@@ -116,6 +116,13 @@ const double _wRemSdnn = 0.32;
 const double _wRemHrSd = 0.27;
 const double _wRemLfhf = 0.12;
 
+/// The REM axis weights, exposed (read-only) for [CausalStager], which scores
+/// REM from the SAME measured effect sizes instead of re-declaring them.
+const double kRemWeightRk = _wRemRk;
+const double kRemWeightSdnn = _wRemSdnn;
+const double kRemWeightHrSd = _wRemHrSd;
+const double kRemWeightLfhf = _wRemLfhf;
+
 const double _wDeepRk = 0.53;
 const double _wDeepHrSd = 0.43;
 const double _wDeepSdnn = 0.41;
@@ -867,18 +874,7 @@ CardioStagerResult classifyCardioEpochs(
     final hrSdZ =
         (sleepHrSd.length >= 4 && hrSd[e] > 0) ? hrSdScale?.z(hrSd[e]) : null;
 
-    // Weighted mean over the axes that are actually MEASURABLE this epoch, so
-    // a night with no usable RR falls back to the hrSd axis alone instead of
-    // silently scoring every epoch as if the missing axes voted "no".
-    double? score(List<(double?, double)> terms) {
-      var num = 0.0, den = 0.0;
-      for (final (z, w) in terms) {
-        if (z == null || z.isNaN) continue;
-        num += z * w;
-        den += w.abs();
-      }
-      return den == 0 ? null : num / den;
-    }
+    final score = weightedAxisScore;
 
     final remScore = score([
       (rkZ, _wRemRk),
@@ -988,6 +984,20 @@ CardioStagerResult classifyCardioEpochs(
   );
 }
 
+/// Weighted mean of robust-z axis terms over the axes that are actually
+/// MEASURABLE this epoch, so a night with no usable RR falls back to the hrSd
+/// axis alone instead of silently scoring every epoch as if the missing axes
+/// voted "no". Null when no axis is measurable. Shared with [CausalStager].
+double? weightedAxisScore(List<(double?, double)> terms) {
+  var num = 0.0, den = 0.0;
+  for (final (z, w) in terms) {
+    if (z == null || z.isNaN) continue;
+    num += z * w;
+    den += w.abs();
+  }
+  return den == 0 ? null : num / den;
+}
+
 /// Honest "cannot stage this window" result: NO epochs, no deep flags, zero
 /// confidence. Callers must treat an empty [StagerResult.stages] as UNSTAGED
 /// (see `advanced_stager._stageSessionCardio`), never as sleep.
@@ -1058,7 +1068,26 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   final mid = (s + t) ~/ 2;
   if (mid >= accel.length) return empty;
   final centreMs = accel[mid].tsMs;
-  final lo = centreMs - halfWinMs, hi = centreMs + halfWinMs;
+  return cleanRrBeatsBetween(
+      rrMs, rrTsMs, centreMs - halfWinMs, centreMs + halfWinMs);
+}
+
+/// The physiologic-gated RR beats whose time falls in `[loMs, hiMs]`
+/// (INCLUSIVE at both ends), with each beat's time rebased to [loMs] in seconds.
+///
+/// The body of [_cleanBeatsInWindow], lifted out so [CausalStager] gathers its
+/// trailing windows through the SAME gate (300-2000 ms, successive jump
+/// <= 200 ms) instead of a second copy. [rrTsMs] must be non-decreasing and the
+/// same length as [rrMs]; an empty or mismatched pair yields no beats.
+({List<double> beats, List<double> tsSec}) cleanRrBeatsBetween(
+  List<double> rrMs,
+  List<double> rrTsMs,
+  double loMs,
+  double hiMs,
+) {
+  const empty = (beats: <double>[], tsSec: <double>[]);
+  if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
+  final lo = loMs, hi = hiMs;
   // [rrTsMs] is ascending, so lower-bound into it and stop at the far edge
   // instead of walking every beat of the night once per epoch per feature.
   //
@@ -1221,8 +1250,15 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   // one; see [_cleanBeatsInWindow].
   final win =
       _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: 90 * 1000);
-  final beats = win.beats; // clean RR (ms)
-  final beatTsSec = win.tsSec; // matching beat times (s), rebased to window
+  return remFeaturesFromBeats(win.beats, win.tsSec);
+}
+
+/// LF/HF and R(k) from already-gated beats ([beats] in ms, [beatTsSec] their
+/// times in seconds, any common origin). The numeric half of
+/// [_windowRemFeatures], shared with [CausalStager]; nulls when fewer than 16
+/// beats (the spectral stability gate).
+({double? lfhf, double? rk}) remFeaturesFromBeats(
+    List<double> beats, List<double> beatTsSec) {
   if (beats.length < 16)
     return (lfhf: null, rk: null); // spectral stability gate
   // R(k): mean absolute successive difference of instantaneous HR (bpm).
