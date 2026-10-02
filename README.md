@@ -98,9 +98,9 @@ foundation layers:
   TRIMP + CTL/ATL/TSB training load, a Poincaré irregular-rhythm screen, cosinor circadian
   fitting, and real-time cardiac coherence for guided breathing sessions.
 - **`sleep/`** — van Hees z-angle segmentation feeding a cardiac/motion stager (the
-  single source of truth for sleep staging), AASM hypnogram metrics, cardiopulmonary
-  coupling, fractal sleep-cycle detection, circadian non-parametric indices
-  (IS/IV/RA/L5/M10).
+  single source of truth for sleep staging), a causal (online, abstaining) wake/NREM/REM
+  stager for live decisions, AASM hypnogram metrics, cardiopulmonary coupling, fractal
+  sleep-cycle detection, circadian non-parametric indices (IS/IV/RA/L5/M10).
 - **`respiration/`** — RSA-derived respiratory rate fused with motion-modulated RIIV,
   CVHR-based apnea screening, a relative (never absolute) oxygen-desaturation ratio.
 - **`motion/`** — ENMO/MAD activity metrics, a 100 Hz AN-2554-derived live pedometer
@@ -136,8 +136,9 @@ assertion out.
 
 ## Validation
 
-`tool/` has four harnesses that score shipped detectors against labelled corpora, not
-synthetic fixtures — run one before touching the logic it covers:
+`tool/` has five harnesses that score shipped detectors against labelled corpora (or, for
+the causal stager, the one recorded night in-tree) rather than synthetic fixtures — run one
+before touching the logic it covers:
 
 - `dart run tool/oxwalk_validate.dart <path-to-OxWalk_Dec2022>` — the pedometer against
   OxWalk (Oxford, CC BY): 39 subjects, camera-annotated heel strikes.
@@ -145,6 +146,10 @@ synthetic fixtures — run one before touching the logic it covers:
   against a PSG-labelled corpus (e.g. DREAMT), reporting Cohen's kappa.
 - `dart run tool/nap_harness.dart <fixture.json>` — the nap detector against hand-labelled
   days.
+- `dart run tool/causal_stager_validate.dart` — replays the in-tree real night through the
+  causal (online) stager and scores agreement, false- and late-trigger behaviour for the
+  "wake during REM" use case against the offline stager. There is no PSG-labelled night
+  in-tree, so this is agreement, not accuracy; see `docs/CAUSAL_STAGER.md`.
 - `dart run tool/whoop_proportions.dart <dir-of-night-json>` — sweeps sleep-stage cutoffs
   against normative stage proportions on real device captures.
 
