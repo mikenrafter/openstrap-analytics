@@ -111,6 +111,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `hrRecovery` | `workout/hr_recovery.dart` | HRR — HR drop N seconds post-peak | Cole/Lauer 1999-style HRR |
 | `Calories.dailyEnergy` / `estimateBoutCalories` | `workout/calories.dart` | Keytel HR→kcal regression + Harris-Benedict/Mifflin BMR | Keytel et al. 2005 |
 | `Calories.metFromCadenceSpm` | `workout/calories.dart` | walking METs from measured cadence, for sub-flex-gate minutes (100/110/120/130 spm ↔ 3/4/5/6 METs, linear between, clamped) | Tudor-Locke et al. 2019 (CADENCE-Adults) |
+| `Calories.minuteEnergy` / `hourlyRollup` | `workout/calories.dart` | the `dailyEnergy` computation exposed per minute (same gate, same billing; folds back to the daily `active`/`walking` bit-for-bit) plus an hourly rollup with per-hour coverage. A minute with no usable HR and no billable cadence abstains (null + reason); nothing is filled or interpolated | Keytel et al. 2005; Tudor-Locke et al. 2019 |
 
 ### `wellness/`
 | Function | File | Method | Citation |
