@@ -326,6 +326,12 @@ class LombScargle {
 ///
 /// This operates on NATIVE sample times — no resampling — which is exactly why
 /// it's the correct PSD for unevenly-sampled beat-time RR.
+///
+/// PRECISION: every trig argument is built from `t - t.first`, never the raw
+/// [t]. On epoch seconds (~1.8e9) the argument `2π·f·t` reaches ~1e10 rad, where
+/// a double is only good to ~1e-6 rad, which cost up to ~5e-6 relative error in
+/// the PSD. The spectrum is time-shift invariant, so the shift changes nothing
+/// but that error (≈1e-13 after it).
 LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   final n = t.length;
   if (n < 4 || y.length != n || freqsHz.isEmpty) return null;
@@ -345,6 +351,7 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
   }
   final span = tMax - tMin;
   if (span <= 0) return null;
+  final t0 = t[0];
   // One-sided periodogram → density: 2·Δt, with Δt the MEAN sample interval.
   final psdScale = 2.0 * span / (n - 1);
 
@@ -358,14 +365,14 @@ LombScargle? lombScargle(List<double> t, List<double> y, List<double> freqsHz) {
     // τ: phase reference for time-shift invariance.
     var sin2 = 0.0, cos2 = 0.0;
     for (final ti in t) {
-      sin2 += math.sin(2 * w * ti);
-      cos2 += math.cos(2 * w * ti);
+      sin2 += math.sin(2 * w * (ti - t0));
+      cos2 += math.cos(2 * w * (ti - t0));
     }
     final tau = math.atan2(sin2, cos2) / (2 * w);
 
     var cNum = 0.0, cDen = 0.0, sNum = 0.0, sDen = 0.0;
     for (var i = 0; i < n; i++) {
-      final arg = w * (t[i] - tau);
+      final arg = w * ((t[i] - t0) - tau);
       final c = math.cos(arg);
       final s = math.sin(arg);
       cNum += yc[i] * c;

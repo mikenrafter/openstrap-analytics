@@ -73,6 +73,7 @@ before the work: about 350 ms compute per derive in
 | Incremental | Why it is unused | Where it would pay |
 |---|---|---|
 | `IncrementalLombScargle` | Its callers (`hrvFreq`, `cardiacCoherence`) run on the finished night or on short sessions; the night is cached whole. | A live coherence/breathing session that recomputes its spectrum as beats arrive. |
+| `IntHistogram` | No existing incremental state recomputes an HR median per pass. | A rolling or trailing HR median/percentile over a long window (see the caller table in INCREMENTAL_USAGE.md). |
 | `RunningMoments` | No caller recomputes a long mean/SD per pass. Night SDNN is cached whole. | Rolling windows over the awake day (daytime HRV, rolling HR variability) or baselines kept as running state. |
 | `IncrementalHrvTime` | Removed from the app: the night's beats do not change while awake, so the cached result already covers it. | Daytime HRV (`_daytimeHrv`) if it becomes expensive. |
 
@@ -84,10 +85,14 @@ before the work: about 350 ms compute per derive in
      `Calories.dailyEnergy` does)
    - day-duration tests
    - `drift_test.dart`
+   - `IntHistogram`
+   - the first-sample time shift in `lombScargle` and its precision test
    - this plan
 
-   Commit them, open a PR, and note the new commit SHA. No algorithm output
-   changes, so `kAlgoVersion` does not need a bump for parity reasons.
+   Commit them, open a PR, and note the new commit SHA. The incremental work
+   changes no algorithm output, but the `lombScargle` shift does (about 1e-6
+   relative, worst case), so edge must bump `kAlgoVersion` when it pins a commit
+   that contains it.
 
 2. **Move the edge work onto the current edge branch.** Commit the worktree's
    changes on `feat/incremental-analytics`, then rebase onto
@@ -130,31 +135,33 @@ before the work: about 350 ms compute per derive in
    should show full passes. `DerivationEngine.debugCalculationState(day)`
    exposes hits and work counters.
 
-## Follow-ups (not started)
+## Follow-ups
 
-- **Medians from compacted histograms.** HR is a whole number of bpm, with
-  about 45 distinct values in a night of real data
-  (`test/onehz/fixtures/real_night_2026_07_onehz.csv`). A sorted
-  `value → count` list is exact and small for any median or percentile of
-  HR. `percentileSorted` interpolates between the two neighbouring order
-  statistics, and cumulative counts find both. The largest medians in a day
-  are the two inside `calibrateGRef`, over every valid accelerometer
-  magnitude: up to 86,400 values, nearly all distinct (30,848 of 32,041 in
-  the same capture), so compaction does not shrink them. Those are now off
-  the awake path, because the reference is kept. If they ever need to be
-  incremental, use an order-statistic structure, not a histogram.
-- **Observed max HR.** The all-time ceiling is already a cached comparison:
-  `LocalDb.observedHrCeiling` takes the max over one stored value per day.
-  The per-day value comes from `sessionHrCeiling` over each session's
-  samples. A finished session's ceiling never changes, so cache it per
-  session and sample revision. Only an open session needs its hold-window
+- **Medians from compacted histograms (done).** `IntHistogram` is an exact
+  `value -> count` summary with `percentile` and `median` bit-identical to
+  `percentileSorted` on the expanded list, tested against the real-night HR and
+  randomized data. HR has about 45 distinct values in a real night
+  (`test/onehz/fixtures/real_night_2026_07_onehz.csv`). No existing incremental
+  state recomputed an HR median per pass, so nothing was switched; candidate
+  callers are listed in INCREMENTAL_USAGE.md. The largest medians in a day are
+  the two inside `calibrateGRef`, over every valid accelerometer magnitude
+  (up to 86,400 values, 30,848 distinct of 32,041 in the same capture), so a
+  histogram does not help there. Those are off the awake path because the
+  reference is kept. If they ever need to be incremental, use an
+  order-statistic structure, not a histogram.
+- **Observed max HR (pending, edge-side).** The all-time ceiling is already a
+  cached comparison: `LocalDb.observedHrCeiling` takes the max over one stored
+  value per day. The per-day value comes from `sessionHrCeiling` over each
+  session's samples. A finished session's ceiling never changes, so cache it
+  per session and sample revision. Only an open session needs its hold-window
   state carried forward.
-- **Batch Lomb–Scargle precision.** `lombScargle` uses raw epoch seconds, so
-  its trig arguments reach about 1e10 radians. Against an 80-bit reference
-  it is off by up to 4.6e-6 relative; on times shifted by the first sample
-  the error is 3.8e-13. Shifting by `t.first` inside `lombScargle` would
-  change `hrvFreq` and coherence outputs at the 1e-6 level, so it needs a
-  `kAlgoVersion` bump. Separate change.
+- **Batch Lomb–Scargle precision (done here; edge must bump `kAlgoVersion`).**
+  `lombScargle` now shifts times by the first sample. On raw epoch seconds the
+  trig arguments reached about 1e10 radians and the periodogram was off by up
+  to 4.6e-6 relative against an 80-bit reference. This changes `hrvFreq`,
+  `cardiacCoherence`, the respiration RSA rate and the cardio stager's LF/HF at
+  the 1e-6 level worst case, so edge must bump `kAlgoVersion` when it pins this
+  commit (and the pin must contain it; see AGENTS.md invariants 4 and 5).
 - Remaining batch calculations and their constraints are listed in
   INCREMENTAL_MATH.md. Several (sleep staging, naps, cycles, rank-based
   statistics) cannot be made exactly incremental, because new data revises

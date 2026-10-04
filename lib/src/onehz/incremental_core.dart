@@ -91,6 +91,134 @@ class RunningMoments {
       };
 }
 
+/// Exact order statistics of integer-valued data, kept as a sorted
+/// `value -> count` list. Heart rate is whole bpm with a few dozen distinct
+/// values a night, so the list stays tiny however many samples it holds. Add,
+/// remove and merge are exact; [percentile] returns the same double
+/// `percentileSorted` returns for the expanded sorted list, not an estimate.
+///
+/// Only for data that really is integral. Values that are nearly all distinct
+/// (accelerometer magnitudes) gain nothing: the list is as long as the data.
+class IntHistogram {
+  List<int> _values = [];
+  List<int> _counts = [];
+  int _count = 0;
+
+  IntHistogram();
+
+  factory IntHistogram.fromJson(Map<String, dynamic> json) {
+    _checkVersion(json, 'IntHistogram');
+    final values = json['values'], counts = json['counts'];
+    if (values is! List || counts is! List || values.length != counts.length) {
+      throw const FormatException('Invalid histogram bins');
+    }
+    final result = IntHistogram();
+    for (var i = 0; i < values.length; i++) {
+      final v = values[i], c = counts[i];
+      if (v is! int || c is! int || c < 1 || (i > 0 && v <= values[i - 1])) {
+        throw const FormatException('Invalid histogram bins');
+      }
+      result._values.add(v);
+      result._counts.add(c);
+      result._count += c;
+    }
+    return result;
+  }
+
+  /// Number of values held, counting repeats.
+  int get count => _count;
+
+  /// Number of different values held.
+  int get distinct => _values.length;
+
+  /// Linear-interpolated median, or null when empty.
+  double? get median => percentile(50);
+
+  /// Index of [value], or the insertion point as `-(point + 1)`.
+  int _find(int value) {
+    var lo = 0, hi = _values.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >> 1;
+      if (_values[mid] < value) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    return lo < _values.length && _values[lo] == value ? lo : -(lo + 1);
+  }
+
+  /// Adds [times] copies of [value], which must be a finite whole number.
+  void add(num value, [int times = 1]) {
+    if (!value.isFinite || value != value.truncate()) {
+      throw ArgumentError.value(value, 'value', 'Must be a whole number');
+    }
+    if (times < 1) throw ArgumentError.value(times, 'times', 'Must be positive');
+    final v = value.toInt();
+    final at = _find(v);
+    if (at >= 0) {
+      _counts[at] += times;
+    } else {
+      _values.insert(-at - 1, v);
+      _counts.insert(-at - 1, times);
+    }
+    _count += times;
+  }
+
+  /// Removes one copy of [value]. The caller must remove a value it added.
+  void remove(num value) {
+    final at = value.isFinite && value == value.truncate()
+        ? _find(value.toInt())
+        : -1;
+    if (at < 0) throw StateError('Cannot remove a value that is not present');
+    if (--_counts[at] == 0) {
+      _values.removeAt(at);
+      _counts.removeAt(at);
+    }
+    _count--;
+  }
+
+  void merge(IntHistogram other) {
+    final values = List.of(other._values), counts = List.of(other._counts);
+    for (var i = 0; i < values.length; i++) {
+      add(values[i], counts[i]);
+    }
+  }
+
+  /// The [p]th percentile (0 to 100), interpolated between the two
+  /// neighbouring order statistics exactly as `percentileSorted` does. Null
+  /// when empty, never 0.
+  double? percentile(double p) {
+    if (_count == 0) return null;
+    if (!(p >= 0 && p <= 100)) throw ArgumentError.value(p, 'p', '0 to 100');
+    if (_count == 1) return _values[0].toDouble();
+    final rank = (p / 100) * (_count - 1);
+    final lo = rank.floor();
+    final hi = rank.ceil();
+    final low = _orderStatistic(lo);
+    if (lo == hi) return low;
+    final frac = rank - lo;
+    return low + (_orderStatistic(hi) - low) * frac;
+  }
+
+  /// The value at zero-based sorted position [k].
+  double _orderStatistic(int k) {
+    var seen = 0;
+    for (var i = 0; i < _values.length; i++) {
+      seen += _counts[i];
+      if (k < seen) return _values[i].toDouble();
+    }
+    throw StateError('Order statistic out of range');
+  }
+
+  Map<String, dynamic> toJson() => {
+        'version': 1,
+        'type': 'IntHistogram',
+        'values': List<int>.of(_values),
+        'counts': List<int>.of(_counts),
+      };
+}
+
 /// Fixed-grid spectral sums. Raw snapshots establish that each sync is a
 /// genuine prefix; callers may revise or remove any earlier sample.
 class IncrementalLombScargle {
