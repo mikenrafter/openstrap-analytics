@@ -527,6 +527,68 @@ class Calories {
     );
   }
 
+  /// Prepares fixed profile and anchor math once for independent minute bills.
+  /// Returns null under the same anchor gate as [dailyEnergy].
+  static MinuteEnergyPricer? minuteEnergyPricer({
+    required WorkoutUserProfile profile,
+    required double hrmax,
+    required double restingHr,
+  }) {
+    final ctx = _energyCtx(profile, hrmax, restingHr);
+    if (ctx == null) return null;
+    return MinuteEnergyPricer._(
+        ctx.basalPerMin, (hr, cadence) => _bill(ctx, hr, cadence));
+  }
+
+  /// Assembles previously priced minute bills without evaluating HR or cadence.
+  /// Intended for keyed incremental callers that retain the exact bills and
+  /// replace only changed minutes. Walking is already included in active.
+  static MinuteEnergySeries assembleMinuteEnergySeries(
+    List<
+            ({
+              int minute,
+              MinuteEnergySource? source,
+              double active,
+              double walking
+            })>
+        bills, {
+    required double basalKcalPerMin,
+  }) {
+    final minutes = <MinuteEnergy>[];
+    var hrActive = 0.0, walking = 0.0;
+    var covered = 0;
+    for (final bill in bills) {
+      final source = bill.source;
+      if (source == null) {
+        minutes.add(MinuteEnergy._abstained(bill.minute));
+        continue;
+      }
+      covered++;
+      final cadence = source == MinuteEnergySource.cadence;
+      if (cadence) {
+        walking += bill.walking;
+      } else {
+        hrActive += bill.active;
+      }
+      final active = cadence ? bill.walking : bill.active;
+      minutes.add(MinuteEnergy._(
+        minute: bill.minute,
+        source: source,
+        basal: basalKcalPerMin,
+        active: active,
+        walking: cadence ? bill.walking : null,
+        total: basalKcalPerMin + active,
+      ));
+    }
+    return MinuteEnergySeries._(
+      minutes: minutes,
+      basalKcalPerMin: basalKcalPerMin,
+      active: hrActive + walking,
+      walking: walking,
+      coveredMinutes: covered,
+    );
+  }
+
   /// Sums [minutes] into hourly buckets, ascending, for hours that have at
   /// least one record. Only COVERED minutes are summed and nothing is scaled up
   /// for the rest: an hour with 30 covered minutes reports 30 minutes of
@@ -620,6 +682,18 @@ class Calories {
       usedDefaultAnchors: usedDefaultAnchors,
     );
   }
+}
+
+/// Reusable fixed-profile calorie pricing, with no minute-record allocation.
+class MinuteEnergyPricer {
+  final double basalKcalPerMin;
+  final ({MinuteEnergySource? source, double active, double walking}) Function(
+      double, double?) _price;
+  MinuteEnergyPricer._(this.basalKcalPerMin, this._price);
+
+  ({MinuteEnergySource? source, double active, double walking}) price(
+          double hr, double? cadenceSpm) =>
+      _price(hr, cadenceSpm);
 }
 
 /// Why a minute carries no energy.

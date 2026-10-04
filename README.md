@@ -85,6 +85,10 @@ if (hrv.value != null) {
 Every metric function in the package follows this shape: plain `List<double>` (or a
 small typed input class for the composite ones) in, `Metric<T>` out.
 
+For repeated updates, [incremental calculation states](docs/INCREMENTAL_USAGE.md)
+retain contributions while checking the complete current inputs for revisions.
+The [math audit](docs/INCREMENTAL_MATH.md) explains the algebra and rebuild rules.
+
 ## What's actually in here
 
 Eight families, each its own subdirectory with its own sub-barrel, built on two shared

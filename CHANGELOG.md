@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- Incremental states for centered moments, fixed-grid Lomb–Scargle, time-domain
+  HRV, motion with a measured gravity reference, and keyed minute TRIMP/energy.
+  Appends reuse retained contributions; edits, removals and changed dependencies
+  update or rebuild them. Batch algorithms remain available as test oracles.
+- Bounded dependency-aware `CalculationCache` and explicit `CalculationMode`.
+  Only `periodicAwake` permits reuse. Sleep, heavy and forced runs use full math.
+- Minute summary mode avoids constructing per-minute energy records when only
+  totals are needed. See `docs/INCREMENTAL_USAGE.md` for contracts and limitations.
+- Parameterized incremental parity tests, checked-in capture fixtures, checkpoint
+  tests, work counters and a deterministic timing comparison tool.
+- Pinned Nix devshell with Flutter 3.41.6 / Dart 3.11.4 and native build tooling.
 - `Calories.minuteEnergy` — per-minute energy (basal, active, walking, total,
   and an abstention reason) from the same computation `Calories.dailyEnergy`
   does. A minute with no usable HR and no billable cadence abstains: all values
