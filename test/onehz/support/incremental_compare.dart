@@ -80,7 +80,7 @@ void minuteClose(MinuteMetrics actual, List<int> keys, List<double> hr,
     double? maxHr = 186,
     Sex sex = Sex.male,
     WorkoutUserProfile? profile,
-    double dayMinutes = 1440,
+    int dayMinutes = 1440,
     double? quietHrr = .12}) {
   final trimp = banisterTrimp(hr, restingHr: rhr, maxHr: maxHr, sex: sex);
   final strain = strainScoreMetric(trimp.value,
@@ -100,7 +100,7 @@ void minuteClose(MinuteMetrics actual, List<int> keys, List<double> hr,
       profile: profile,
       hrmax: maxHr,
       restingHr: rhr,
-      dayMinutes: dayMinutes.toInt(),
+      dayMinutes: dayMinutes,
       cadenceSpmPerMin: cadence);
   final series = Calories.minuteEnergy(hr,
       profile: profile,

@@ -12,7 +12,7 @@ void _summaryClose(
   double? maxHr = 186,
   Sex sex = Sex.male,
   WorkoutUserProfile? profile,
-  double dayMinutes = 1440,
+  int dayMinutes = 1440,
   double? quietHrr = .12,
 }) {
   expect(actual.minutes, isNull,
@@ -32,7 +32,7 @@ void _summaryClose(
           profile: profile,
           hrmax: maxHr,
           restingHr: rhr,
-          dayMinutes: dayMinutes.toInt(),
+          dayMinutes: dayMinutes,
           cadenceSpmPerMin: cadence);
   if (energy == null) {
     expect(actual.energy, isNull);
@@ -177,7 +177,7 @@ void main() {
         (double.nan, 186)
       ]) {
         for (final sex in Sex.values) {
-          for (final duration in [0.0, 900.0, 1440.0]) {
+          for (final duration in [0, 900, 1440]) {
             _summaryClose(
                 state.sync(f.minuteKeys, f.hr,
                     cadenceSpm: f.cadence,
@@ -253,5 +253,28 @@ void main() {
             includeMinuteSeries: false),
         f.hr,
         profile: p);
+  });
+  test('day duration reprices only basal, across short, DST and long days', () {
+    final f = incrementalFixture(seed: 5, minutes: 47);
+    final p = energyProfiles.values.first;
+    final state = IncrementalMinuteMetrics();
+    MinuteMetrics sync(int dayMinutes) => state.sync(f.minuteKeys, f.hr,
+        cadenceSpm: f.cadence,
+        restingHr: 54,
+        maxHr: 186,
+        profile: p,
+        quietHrr: .12,
+        dayMinutes: dayMinutes,
+        includeMinuteSeries: false);
+    sync(1440);
+    final work = state.processedMinutes;
+    // Empty, one minute, an hour, both DST days, a whole and a double day, and
+    // a negative count (batch multiplies it through; parity, not validation).
+    for (final minutes in [0, 1, 60, 1380, 1439, 1440, 1441, 1500, 2880, -1]) {
+      _summaryClose(sync(minutes), f.hr,
+          cadence: f.cadence, profile: p, dayMinutes: minutes);
+      expect(state.processedMinutes, work,
+          reason: 'basal is a scalar over the day; no minute is repriced');
+    }
   });
 }

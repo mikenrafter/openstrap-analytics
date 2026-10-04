@@ -140,7 +140,7 @@ class IncrementalMinuteMetrics {
     double? maxHr,
     Sex sex = Sex.male,
     WorkoutUserProfile? profile,
-    double dayMinutes = 1440,
+    int dayMinutes = 1440,
     double? quietHrr,
     bool force = false,
     bool includeMinuteSeries = true,
@@ -181,9 +181,6 @@ class IncrementalMinuteMetrics {
         throw ArgumentError('Minute keys must be unique');
       }
     }
-    if (!dayMinutes.isFinite || dayMinutes != dayMinutes.truncateToDouble())
-      throw ArgumentError.value(
-          dayMinutes, 'dayMinutes', 'Must be finite whole minutes');
     final parameters = <Object?>[
       restingHr == null ? null : _encode(restingHr),
       maxHr == null ? null : _encode(maxHr),

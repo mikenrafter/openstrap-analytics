@@ -13,6 +13,13 @@
   totals are needed. See `docs/INCREMENTAL_USAGE.md` for contracts and limitations.
 - Parameterized incremental parity tests, checked-in capture fixtures, checkpoint
   tests, work counters and a deterministic timing comparison tool.
+- `hrDipFromDayTotals`: `hrDip` from the day side's running count and sum, for
+  callers that keep the waking day as totals. `hrDip` shares its scoring, so
+  both give the same result for the same samples.
+- `IncrementalMinuteMetrics.sync` takes `dayMinutes` as an `int`, as
+  `Calories.dailyEnergy` does; a fractional day can no longer be passed.
+- Long-run drift tests: 30 000 Lomb–Scargle appends and 100 000-step sliding
+  moments stay within 1e-9 of the batch results.
 - Pinned Nix devshell with Flutter 3.41.6 / Dart 3.11.4 and native build tooling.
 - `Calories.minuteEnergy` — per-minute energy (basal, active, walking, total,
   and an abstention reason) from the same computation `Calories.dailyEnergy`
