@@ -1,60 +1,33 @@
-// FOUNDATION — RR artifact correction.
+// FROZEN REFERENCE: a verbatim copy of `correctRr` as it stood at analytics
+// a19f439 (before the sliding-window speed rewrite), with its helpers and the
+// two `util.dart` functions it calls (`percentile`, `median`) copied in too, so
+// nothing the rewrite touches can change what this file computes.
 //
-// Lipponen & Tarvainen 2019 ("A robust algorithm for heart rate variability
-// time series artefact correction using novel beat classification", J Med Eng
-// Technol) — the detector Kubios automates. Applies the dRR / mRR / sRR
-// decision logic with a time-varying threshold derived from a quantile-based
-// dispersion of dRR over a sliding window.
-//
-// Correction policy (Peltola 2012):
-//   * cubic-spline interpolate ONLY isolated single ectopic/missed/extra beats;
-//   * flag-and-drop multi-beat runs — never interpolate a run.
-//
-// This is PRV. Output = cleaned NN series + per-beat artifact mask + clean
-// fraction. Multi-beat gaps are never silently bridged.
-
+// It is the oracle for the production `correctRr` and for the streaming
+// `RrCorrector`: same input => bit-identical nn, nnTimesMs, classes, counts and
+// cleanFraction. DO NOT "fix" or speed this file up; if the production
+// behaviour is meant to change, that is a kAlgoVersion-level decision and this
+// copy is replaced deliberately, in its own commit.
 import 'dart:math' as math;
-import '../util.dart';
 
-/// Artifact label for a single beat.
-enum BeatClass { normal, ectopic, longShort, missed, extra }
+import 'package:openstrap_analytics/onehz.dart'
+    show BeatClass, RrCorrectionResult;
 
-class RrCorrectionResult {
-  /// Cleaned NN intervals (ms). Isolated artifacts spline-corrected; multi-beat
-  /// runs dropped (length may differ from the input).
-  final List<double> nn;
-
-  /// Beat-time (ms) for each NN interval, relative to the START of the first
-  /// input beat (so `nnTimesMs.first == rrMs.first` when the first beat is
-  /// kept, and adding `rrTsMs.first - rrMs.first` puts it back on the epoch).
-  ///
-  /// Built by cumulative-summing RR *within a contiguous run*, and RE-ANCHORED
-  /// to the beat's real timestamp at every sensor dropout — see [correctRr]'s
-  /// `rrTsMs`. Without `rrTsMs` it is a pure cumsum and the dropouts are
-  /// spliced out; pass the timestamps.
-  final List<double> nnTimesMs;
-
-  /// Per-input-beat classification (same length as the input rr).
-  final List<BeatClass> classes;
-
-  /// Fraction of input beats classified normal (0..1).
-  final double cleanFraction;
-
-  /// Count of beats dropped (part of a multi-beat run, not interpolated).
-  final int droppedCount;
-
-  /// Count of isolated beats that were spline-corrected.
-  final int correctedCount;
-
-  const RrCorrectionResult({
-    required this.nn,
-    required this.nnTimesMs,
-    required this.classes,
-    required this.cleanFraction,
-    required this.droppedCount,
-    required this.correctedCount,
-  });
+double? _percentileSortedRef(List<double> sorted, double p) {
+  if (sorted.isEmpty) return null;
+  if (sorted.length == 1) return sorted[0];
+  final rank = (p / 100) * (sorted.length - 1);
+  final lo = rank.floor();
+  final hi = rank.ceil();
+  if (lo == hi) return sorted[lo];
+  final frac = rank - lo;
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
 }
+
+double? _percentileRef(List<double> values, double p) =>
+    _percentileSortedRef([...values]..sort(), p);
+
+double? _medianRef(List<double> xs) => _percentileRef(xs, 50);
 
 /// Lipponen–Tarvainen RR artifact correction.
 ///
@@ -74,7 +47,7 @@ class RrCorrectionResult {
 /// `rec_ts*1000` and therefore whole-second — and re-anchors to the real
 /// timestamp whenever the wall step exceeds the interval by more than
 /// [reanchorGapMs], i.e. at a dropout.
-RrCorrectionResult correctRr(
+RrCorrectionResult correctRrReference(
   List<double> rrMs, {
   List<double>? rrTsMs,
   double alpha = 5.2,
@@ -85,7 +58,7 @@ RrCorrectionResult correctRr(
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
   // every branch below reads a clock instead of advancing its own.
-  final tAll = _beatTimes(rrMs, rrTsMs, reanchorGapMs);
+  final tAll = _beatTimesRef(rrMs, rrTsMs, reanchorGapMs);
   if (n == 0) {
     return const RrCorrectionResult(
       nn: [],
@@ -129,15 +102,15 @@ RrCorrectionResult correctRr(
 
   // Time-varying threshold from a sliding quartile-deviation (QD) of dRR.
   // th1 ~ dispersion of dRR (short artifacts), th2 ~ dispersion of medianed RR.
-  final th1 = _slidingThreshold(dRR, windowBeats, alpha, minThresholdMs);
+  final th1 = _slidingThresholdRef(dRR, windowBeats, alpha, minThresholdMs);
 
   // medRR: rr minus local median (for missed/extra long-range tests).
-  final med = _slidingMedian(rrMs, windowBeats);
+  final med = _slidingMedianRef(rrMs, windowBeats);
   final mRR = List<double>.generate(n, (i) {
     final d = rrMs[i] - med[i];
     return d < 0 ? d * 2 : d; // paper asymmetry weight
   });
-  final th2 = _slidingThreshold(mRR, windowBeats, alpha, minThresholdMs);
+  final th2 = _slidingThresholdRef(mRR, windowBeats, alpha, minThresholdMs);
 
   final classes = List<BeatClass>.filled(n, BeatClass.normal);
   for (var i = 0; i < n; i++) {
@@ -207,7 +180,7 @@ RrCorrectionResult correctRr(
     final runLen = j - i;
     if (runLen == 1) {
       // Isolated -> spline-correct from surrounding normals.
-      final corr = _splineCorrect(rrMs, isArtifact, i);
+      final corr = _splineCorrectRef(rrMs, isArtifact, i);
       if (corr != null) {
         // The beat keeps its REAL time, not the interpolated one. `corr` is our
         // best guess at what the NN *should* have been (a missed beat splits one
@@ -260,7 +233,7 @@ RrCorrectionResult correctRr(
 /// The slack has to be ≥ the max plausible RR (2,400 ms saturation) minus a
 /// normal beat, or ordinary quantisation would re-anchor constantly; 1,000 ms
 /// is the audit's figure and is ~1 whole quantisation step.
-List<double> _beatTimes(
+List<double> _beatTimesRef(
     List<double> rrMs, List<double>? rrTsMs, double reanchorGapMs) {
   final n = rrMs.length;
   final t = List<double>.filled(n, 0);
@@ -301,16 +274,20 @@ List<double> _beatTimes(
 /// folds the symmetric ±dRR distribution onto one side, collapsing QD by ~an
 /// order of magnitude; the threshold then sinks to [floor] and the detector
 /// degenerates into a fixed 100 ms cut-off that flags ordinary RSA as ectopy.
-List<double> _slidingThreshold(
+List<double> _slidingThresholdRef(
     List<double> x, int win, double alpha, double floor) {
   final n = x.length;
   final out = List<double>.filled(n, 0);
   final half = win ~/ 2;
-  final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
-    w.advanceTo(i);
-    final q1 = percentileSorted(w.a, 25) ?? 0;
-    final q3 = percentileSorted(w.a, 75) ?? 0;
+    final lo = math.max(0, i - half);
+    final hi = math.min(n - 1, i + half);
+    final seg = <double>[];
+    for (var k = lo; k <= hi; k++) {
+      seg.add(x[k]);
+    }
+    final q1 = _percentileRef(seg, 25) ?? 0;
+    final q3 = _percentileRef(seg, 75) ?? 0;
     final qd = (q3 - q1) / 2;
     // Floor keeps a gross outlier detectable on (near-)quantized clean data
     // where the QD genuinely collapses to 0 (constant RR). On any series with
@@ -321,95 +298,26 @@ List<double> _slidingThreshold(
   return out;
 }
 
-/// Median of the window around each beat EXCLUDING the beat itself (falls back
-/// to the beat when the window holds nothing else). Same value as sorting the
-/// window-minus-self per beat, but the window is kept sorted as it slides and
-/// the self element is skipped by index arithmetic instead of copied out.
-List<double> _slidingMedian(List<double> x, int win) {
+List<double> _slidingMedianRef(List<double> x, int win) {
   final n = x.length;
   final out = List<double>.filled(n, 0);
   final half = win ~/ 2;
-  final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
-    w.advanceTo(i);
-    out[i] = _medianExcluding(w.a, x[i]) ?? x[i];
+    final lo = math.max(0, i - half);
+    final hi = math.min(n - 1, i + half);
+    final seg = <double>[];
+    for (var k = lo; k <= hi; k++) {
+      if (k == i) continue;
+      seg.add(x[k]);
+    }
+    out[i] = _medianRef(seg) ?? x[i];
   }
   return out;
 }
 
-/// `median(sorted minus one occurrence of v)` — [percentile]'s linear
-/// interpolation at p = 50 over the sorted list with v's slot skipped, and the
-/// same operation order so the result is bit-identical. Null if nothing is left.
-double? _medianExcluding(List<double> sorted, double v) {
-  final len = sorted.length - 1;
-  if (len <= 0) return null;
-  final skip = _lowerBound(sorted, v);
-  double at(int j) => j < skip ? sorted[j] : sorted[j + 1];
-  if (len == 1) return at(0);
-  final rank = (50.0 / 100) * (len - 1);
-  final lo = rank.floor();
-  final hi = rank.ceil();
-  if (lo == hi) return at(lo);
-  final frac = rank - lo;
-  return at(lo) + (at(hi) - at(lo)) * frac;
-}
-
-/// First index whose element is not less than [v] under `compareTo` — the same
-/// total order `List<double>.sort()` uses (-0.0 < 0.0, NaN last), so the
-/// window stays in the order the per-beat sort produced.
-int _lowerBound(List<double> a, double v) {
-  var lo = 0;
-  var hi = a.length;
-  while (lo < hi) {
-    final m = (lo + hi) >> 1;
-    if (a[m].compareTo(v) < 0) {
-      lo = m + 1;
-    } else {
-      hi = m;
-    }
-  }
-  return lo;
-}
-
-/// Ascending-sorted copy of `x[max(0,i-half) .. min(n-1,i+half)]`, maintained
-/// incrementally as [advanceTo] steps i forward by one (O(log w) search plus a
-/// w-element memmove per beat instead of an O(w log w) sort).
-class _SortedWindow {
-  final List<double> _x;
-  final int _half;
-  final List<double> a = [];
-  int _lo = 0;
-  int _hi = -1; // inclusive; -1 = empty
-
-  _SortedWindow(this._x, this._half);
-
-  void advanceTo(int i) {
-    final n = _x.length;
-    final newLo = math.max(0, i - _half);
-    final newHi = math.min(n - 1, i + _half);
-    if (_hi < _lo) {
-      // First call: build once.
-      a
-        ..addAll(_x.getRange(newLo, newHi + 1))
-        ..sort();
-    } else {
-      while (_lo < newLo) {
-        final v = _x[_lo++];
-        a.removeAt(_lowerBound(a, v));
-      }
-      while (_hi < newHi) {
-        final v = _x[++_hi];
-        a.insert(_lowerBound(a, v), v);
-      }
-    }
-    _lo = newLo;
-    _hi = newHi;
-  }
-}
-
 /// Catmull-Rom cubic interpolation at the artifact index using the nearest two
 /// NORMAL beats on each side. Returns null if anchors are unavailable.
-double? _splineCorrect(List<double> rr, List<bool> isArtifact, int idx) {
+double? _splineCorrectRef(List<double> rr, List<bool> isArtifact, int idx) {
   final left = <double>[];
   for (var k = idx - 1; k >= 0 && left.length < 2; k--) {
     if (!isArtifact[k]) left.insert(0, rr[k]);
