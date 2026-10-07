@@ -1,6 +1,7 @@
 // Settle horizon in the wild: how many beats / seconds behind the newest beat
 // is the last SETTLED output, distribution over 1-beat folds.
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'rr_stream.dart';
 import 'synth.dart';
 

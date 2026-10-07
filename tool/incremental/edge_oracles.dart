@@ -7,7 +7,8 @@
 // ORACLES the incremental states are compared with.
 import 'dart:math' as math;
 
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
 /// edge `accelPlausible` (substrate.dart:100).
 bool accelPlausible(double ax, double ay, double az) {

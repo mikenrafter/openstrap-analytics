@@ -1,7 +1,8 @@
 // "Never fabricate": at EVERY short prefix (1-beat folds, n = 0..~700) every
 // incremental estimator is absent exactly where its oracle is absent, present
 // exactly where it is present, with the same note.
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'package:test/test.dart';
 
 import '../../tool/incremental/driver.dart';

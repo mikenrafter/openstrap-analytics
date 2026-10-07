@@ -1,4 +1,5 @@
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'package:test/test.dart';
 
 /// Max-error recorder for approximate fields.

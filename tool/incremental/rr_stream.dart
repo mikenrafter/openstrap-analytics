@@ -25,7 +25,8 @@
 // is exactly what correctRr would say at the current n.
 import 'dart:math' as math;
 
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
 /// Provisional + counters view after a fold. `settled*` is NOT here: [fold]
 /// returns the newly settled output; this is the part that can still change.

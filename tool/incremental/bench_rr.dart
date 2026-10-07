@@ -1,7 +1,8 @@
 // Timing: oracle correctRr vs streaming RrCorrector on a 23 h real-shaped day.
 // dart run tool/incremental/bench_rr.dart
 import 'dart:convert';
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'oracle_util.dart';
 import 'rr_stream.dart';
 import 'synth.dart';

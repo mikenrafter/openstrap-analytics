@@ -6,7 +6,8 @@
 // returns; the provisional tail is RrSnapshot.tailNn/tailNnTimes.
 import 'dart:math' as math;
 
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
 // ===========================================================================
 // 1. hrvTime scalars: RMSSD, pNN50, SDNN, SDANN, SDNN-index, diffAcf1

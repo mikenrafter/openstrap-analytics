@@ -9,7 +9,8 @@
 // that list with the batch's own arithmetic => bit-identical.
 import 'dart:math' as math;
 
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 
 int _lowerBound(List<double> a, double v) {
   var lo = 0, hi = a.length;

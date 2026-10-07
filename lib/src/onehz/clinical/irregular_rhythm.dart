@@ -17,6 +17,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import 'irregular_window.dart';
 
 class IrregularRhythm {
   final double sd1; // ms — short-term (beat-to-beat) scatter
@@ -238,12 +239,10 @@ bool _sustainedAcrossWindows(
   }
   // Fail CLOSED (never sustained) on a bad config — a misconfigured caller
   // must never manufacture a medical false positive.
-  if (!windowMinutes.isFinite ||
-      windowMinutes <= 0 ||
-      minWindowBeats < 2 ||
-      !sustainedFraction.isFinite ||
-      sustainedFraction < 0 ||
-      sustainedFraction > 1) {
+  if (!irregularWindowConfigOk(
+      windowMinutes: windowMinutes,
+      minWindowBeats: minWindowBeats,
+      sustainedFraction: sustainedFraction)) {
     return false;
   }
   final windowMs = windowMinutes * 60000;
@@ -253,28 +252,14 @@ bool _sustainedAcrossWindows(
   var bucket = <double>[];
   var bucketAdjacent = <bool>[];
   void flush() {
-    if (bucket.length >= minWindowBeats) {
+    final verdict = irregularWindowVerdict(bucket, bucketAdjacent,
+        sd1sd2Flag: sd1sd2Flag,
+        pnnThresholdMs: pnnThresholdMs,
+        pnnFlagPct: pnnFlagPct,
+        minWindowBeats: minWindowBeats);
+    if (verdict != null) {
       validWindows++;
-      // Mirror the aggregate's `keep[i] && keep[i-1]` guard: never diff
-      // across a beat that was dropped as an artifact in the original series,
-      // even though it's now a consecutive pair in this compacted bucket.
-      final diffs = <double>[
-        for (var i = 1; i < bucket.length; i++)
-          if (bucketAdjacent[i]) bucket[i] - bucket[i - 1]
-      ];
-      final sdsd = stddev(diffs);
-      final sdnn = stddev(bucket);
-      if (sdsd != null && sdnn != null) {
-        final sd1 = sdsd / math.sqrt2;
-        final v = 2 * sdnn * sdnn - sd1 * sd1;
-        final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-        if (sd2 > 0) {
-          final ratio = sd1 / sd2;
-          final over = diffs.where((d) => d.abs() > pnnThresholdMs).length;
-          final pnn = 100.0 * over / diffs.length;
-          if (ratio >= sd1sd2Flag && pnn >= pnnFlagPct) flaggedWindows++;
-        }
-      }
+      if (verdict) flaggedWindows++;
     }
     bucket = [];
     bucketAdjacent = [];

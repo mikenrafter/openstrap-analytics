@@ -1,7 +1,8 @@
 // Max abs/rel error of the Welford-based fields (irregular SD1/SD2, hrvTime SDNN)
 // over many random prefixes. dart run tool/incremental/err_probe.dart
 import 'dart:math' as math;
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'hrv_incr.dart';
 import 'synth.dart';
 

@@ -13,8 +13,7 @@
 // This is PRV. Output = cleaned NN series + per-beat artifact mask + clean
 // fraction. Multi-beat gaps are never silently bridged.
 
-import 'dart:math' as math;
-import '../util.dart';
+import 'rr_correction_kernel.dart';
 
 /// Artifact label for a single beat.
 enum BeatClass { normal, ectopic, longShort, missed, extra }
@@ -133,32 +132,13 @@ RrCorrectionResult correctRr(
 
   // medRR: rr minus local median (for missed/extra long-range tests).
   final med = _slidingMedian(rrMs, windowBeats);
-  final mRR = List<double>.generate(n, (i) {
-    final d = rrMs[i] - med[i];
-    return d < 0 ? d * 2 : d; // paper asymmetry weight
-  });
+  final mRR = List<double>.generate(n, (i) => medianDeviation(rrMs[i], med[i]));
   final th2 = _slidingThreshold(mRR, windowBeats, alpha, minThresholdMs);
 
-  final classes = List<BeatClass>.filled(n, BeatClass.normal);
-  for (var i = 0; i < n; i++) {
-    final hardLong = rrMs[i] > 2000;
-    final hardShort = rrMs[i] < 300;
-    final bigJump = dRR[i].abs() > th1[i];
-    final bigDev = mRR[i].abs() > th2[i];
-    if (hardLong || (bigDev && mRR[i] > 0)) {
-      // Long interval: likely a MISSED beat (interval ~ multiple of normal).
-      classes[i] = (med[i] > 0 && rrMs[i] > 1.5 * med[i])
-          ? BeatClass.missed
-          : BeatClass.longShort;
-    } else if (hardShort || (bigDev && mRR[i] < 0)) {
-      // Short interval: likely an EXTRA (spurious) beat.
-      classes[i] = (med[i] > 0 && rrMs[i] < 0.6 * med[i])
-          ? BeatClass.extra
-          : BeatClass.longShort;
-    } else if (bigJump) {
-      classes[i] = BeatClass.ectopic;
-    }
-  }
+  final classes = [
+    for (var i = 0; i < n; i++)
+      classifyBeat(rrMs[i], dRR[i], th1[i], med[i], mRR[i], th2[i])
+  ];
 
   // Compensatory-pair reconciliation. A single ectopic/extra beat shows up as
   // TWO successive dRR spikes of opposite sign (the bad beat, then the
@@ -169,17 +149,13 @@ RrCorrectionResult correctRr(
   // single isolated artifact rather than a spurious 2-beat run.
   for (var k = 1; k < n; k++) {
     if (classes[k] != BeatClass.ectopic) continue;
-    final prevBad = classes[k - 1] == BeatClass.extra ||
-        classes[k - 1] == BeatClass.missed ||
-        classes[k - 1] == BeatClass.ectopic ||
-        classes[k - 1] == BeatClass.longShort;
-    if (!prevBad) continue;
-    final oppositeSign = dRR[k] * dRR[k - 1] < 0;
-    final valueNormal = med[k] > 0 &&
-        rrMs[k] >= 300 &&
-        rrMs[k] <= 2000 &&
-        (rrMs[k] - med[k]).abs() <= 0.2 * med[k];
-    if (oppositeSign && valueNormal) {
+    final prevBad = classes[k - 1] != BeatClass.normal;
+    if (isRecoveryBeat(
+        prevIsArtifact: prevBad,
+        rr: rrMs[k],
+        dRR: dRR[k],
+        dRRPrev: dRR[k - 1],
+        med: med[k])) {
       classes[k] = BeatClass.normal;
     }
   }
@@ -309,14 +285,7 @@ List<double> _slidingThreshold(
   final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
     w.advanceTo(i);
-    final q1 = percentileSorted(w.a, 25) ?? 0;
-    final q3 = percentileSorted(w.a, 75) ?? 0;
-    final qd = (q3 - q1) / 2;
-    // Floor keeps a gross outlier detectable on (near-)quantized clean data
-    // where the QD genuinely collapses to 0 (constant RR). On any series with
-    // real beat-to-beat variability α·QD dominates the floor, so the floor
-    // never governs a physiological signal.
-    out[i] = math.max(alpha * qd, floor);
+    out[i] = thresholdOfSorted(w.a, alpha, floor);
   }
   return out;
 }
@@ -332,43 +301,9 @@ List<double> _slidingMedian(List<double> x, int win) {
   final w = _SortedWindow(x, half);
   for (var i = 0; i < n; i++) {
     w.advanceTo(i);
-    out[i] = _medianExcluding(w.a, x[i]) ?? x[i];
+    out[i] = medianExcluding(w.a, x[i]) ?? x[i];
   }
   return out;
-}
-
-/// `median(sorted minus one occurrence of v)` — [percentile]'s linear
-/// interpolation at p = 50 over the sorted list with v's slot skipped, and the
-/// same operation order so the result is bit-identical. Null if nothing is left.
-double? _medianExcluding(List<double> sorted, double v) {
-  final len = sorted.length - 1;
-  if (len <= 0) return null;
-  final skip = _lowerBound(sorted, v);
-  double at(int j) => j < skip ? sorted[j] : sorted[j + 1];
-  if (len == 1) return at(0);
-  final rank = (50.0 / 100) * (len - 1);
-  final lo = rank.floor();
-  final hi = rank.ceil();
-  if (lo == hi) return at(lo);
-  final frac = rank - lo;
-  return at(lo) + (at(hi) - at(lo)) * frac;
-}
-
-/// First index whose element is not less than [v] under `compareTo` — the same
-/// total order `List<double>.sort()` uses (-0.0 < 0.0, NaN last), so the
-/// window stays in the order the per-beat sort produced.
-int _lowerBound(List<double> a, double v) {
-  var lo = 0;
-  var hi = a.length;
-  while (lo < hi) {
-    final m = (lo + hi) >> 1;
-    if (a[m].compareTo(v) < 0) {
-      lo = m + 1;
-    } else {
-      hi = m;
-    }
-  }
-  return lo;
 }
 
 /// Ascending-sorted copy of `x[max(0,i-half) .. min(n-1,i+half)]`, maintained
@@ -377,7 +312,8 @@ int _lowerBound(List<double> a, double v) {
 class _SortedWindow {
   final List<double> _x;
   final int _half;
-  final List<double> a = [];
+  final _set = SortedMultiset();
+  List<double> get a => _set.a;
   int _lo = 0;
   int _hi = -1; // inclusive; -1 = empty
 
@@ -385,21 +321,17 @@ class _SortedWindow {
 
   void advanceTo(int i) {
     final n = _x.length;
-    final newLo = math.max(0, i - _half);
-    final newHi = math.min(n - 1, i + _half);
+    final newLo = i - _half < 0 ? 0 : i - _half;
+    final newHi = i + _half > n - 1 ? n - 1 : i + _half;
     if (_hi < _lo) {
       // First call: build once.
-      a
-        ..addAll(_x.getRange(newLo, newHi + 1))
-        ..sort();
+      _set.resetFrom(_x.getRange(newLo, newHi + 1));
     } else {
       while (_lo < newLo) {
-        final v = _x[_lo++];
-        a.removeAt(_lowerBound(a, v));
+        _set.remove(_x[_lo++]);
       }
       while (_hi < newHi) {
-        final v = _x[++_hi];
-        a.insert(_lowerBound(a, v), v);
+        _set.add(_x[++_hi]);
       }
     }
     _lo = newLo;
@@ -418,19 +350,5 @@ double? _splineCorrect(List<double> rr, List<bool> isArtifact, int idx) {
   for (var k = idx + 1; k < rr.length && right.length < 2; k++) {
     if (!isArtifact[k]) right.add(rr[k]);
   }
-  if (left.isEmpty || right.isEmpty) return null;
-  final p1 = left.last;
-  final p2 = right.first;
-  final p0 = left.length >= 2 ? left.first : p1;
-  final p3 = right.length >= 2 ? right.last : p2;
-  // Catmull-Rom at t=0.5 between p1 and p2.
-  const t = 0.5;
-  final t2 = t * t;
-  final t3 = t2 * t;
-  final v = 0.5 *
-      ((2 * p1) +
-          (-p0 + p2) * t +
-          (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-          (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
-  return v;
+  return splineMid(left, right);
 }

@@ -1,7 +1,8 @@
 // Timing: whole-series oracle vs incremental (fold + evaluate) per 15-min pass.
 // dart run tool/incremental/bench_all.dart
 import 'dart:convert';
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'driver.dart';
 import 'edge_oracles.dart';
 import 'hrv_incr.dart';

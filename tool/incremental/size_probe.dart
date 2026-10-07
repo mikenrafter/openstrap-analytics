@@ -1,6 +1,5 @@
 // JSON size of each carried state at the end of the real night (no timing).
 import 'dart:convert';
-import 'package:openstrap_analytics/onehz.dart';
 import 'driver.dart';
 import 'hrv_incr.dart';
 import 'oracle_util.dart';

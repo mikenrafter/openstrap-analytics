@@ -7,7 +7,8 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
-import 'package:openstrap_analytics/onehz.dart';
+import 'package:openstrap_analytics/onehz.dart'
+    hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
 import 'package:test/test.dart';
 
 import '../../tool/incremental/driver.dart';
