@@ -14,6 +14,10 @@
   as before. `IrregularScreenState` checkpoints are now version 2 (two more
   counters); a version 1 checkpoint is refused rather than restored with counts
   it never kept. A NaN beat no longer makes the checkpoint unencodable.
+  `IrregularDiagnostics.artifactFraction` is null (absent) when the corrector was
+  handed no beats: a share of nothing has no value, and the `1 - cleanFraction`
+  of an empty series (1.0) must not read as "every beat is an artifact".
+  Verdicts are unchanged.
 - Incremental states for centered moments, fixed-grid Lomb–Scargle, time-domain
   HRV, motion with a measured gravity reference, and keyed minute TRIMP/energy.
   Appends reuse retained contributions; edits, removals and changed dependencies

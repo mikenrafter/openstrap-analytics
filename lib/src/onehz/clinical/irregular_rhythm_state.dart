@@ -321,7 +321,7 @@ class IrregularScreenState {
           dropped: cleaning?.dropped,
           nnIn: c._nIn,
           nnKept: c._nKept,
-          artifactFraction: artifactFraction,
+          artifactFraction: diagnosticArtifactFraction(artifactFraction, cleaning),
           windows: windows,
           thresholds: thresholds,
         );

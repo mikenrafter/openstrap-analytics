@@ -32,6 +32,11 @@ class RrCleaningCounts {
   });
 }
 
+/// The artifact fraction to record as evidence: [fraction], or null when
+/// [cleaning] says the corrector saw no beats (no denominator).
+double? diagnosticArtifactFraction(double fraction, RrCleaningCounts? cleaning) =>
+    cleaning != null && cleaning.raw == 0 ? null : fraction;
+
 /// Why a screen produced no value. Wire names (toJson): `too_few_beats`,
 /// `artifact`, `no_successive_pairs`, `no_long_term_variability`.
 enum IrregularAbstain {
@@ -107,8 +112,12 @@ class IrregularDiagnostics {
   /// ones inside [300, 2000] ms that it used (== `IrregularRhythm.nBeats`).
   final int nnIn, nnKept;
 
-  /// The artifact fraction handed in (0 when none was).
-  final double artifactFraction;
+  /// The artifact fraction handed in (0 when none was). Null when the corrector
+  /// was handed no beats ([RrCleaningCounts.raw] == 0): a share of nothing has
+  /// no value, and the `1 - cleanFraction` of an empty series (1.0) would read
+  /// as "every beat is an artifact". The verdict gate still reads the fraction
+  /// the caller passed; only this evidence field is absent.
+  final double? artifactFraction;
 
   /// Null when windows were not evaluated: no beat times (or a length that does
   /// not match the beats), or a window config that fails closed.
@@ -201,7 +210,8 @@ class IrregularDiagnostics {
       dropped: b['dropped'] as int?,
       nnIn: b['nn_in'] as int,
       nnKept: b['nn_kept'] as int,
-      artifactFraction: d(b, 'artifact_fraction'),
+      artifactFraction:
+          b['artifact_fraction'] == null ? null : d(b, 'artifact_fraction'),
       windows: w == null
           ? null
           : IrregularWindowCounts(
