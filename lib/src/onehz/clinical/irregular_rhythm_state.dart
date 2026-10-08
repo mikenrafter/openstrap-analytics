@@ -16,6 +16,7 @@
 import 'dart:math' as math;
 
 import '../types.dart';
+import 'irregular_diagnostics.dart';
 import 'irregular_rhythm.dart';
 import 'irregular_window.dart';
 
@@ -229,6 +230,18 @@ class IrregularScreenState {
       _add(nn[i], nnTimesMs[i]);
     }
   }
+
+  /// [evaluate] plus the evidence behind the verdict, equal to
+  /// `irregularBeatScreenDetailed(allNn, ...)` over settled ++ tail. RED STUB.
+  IrregularScreenResult evaluateDetailed(
+    List<double> tailNn,
+    List<double> tailNnTimesMs, {
+    double artifactFraction = 0.0,
+    int minBeats = irregularScreenMinBeats,
+    double maxArtifact = 0.30,
+    RrCleaningCounts? cleaning,
+  }) =>
+      throw UnimplementedError('red stub');
 
   /// The screen over everything folded plus the provisional ([tailNn],
   /// [tailNnTimesMs]). Does not change the state. Absent (same note) exactly

@@ -35,6 +35,7 @@ export 'src/onehz/clinical/load_trimp.dart';
 export 'src/onehz/clinical/stress_si.dart';
 export 'src/onehz/clinical/irregular_rhythm.dart';
 export 'src/onehz/clinical/irregular_rhythm_state.dart';
+export 'src/onehz/clinical/irregular_diagnostics.dart';
 export 'src/onehz/clinical/cardiac_coherence.dart';
 export 'src/onehz/clinical/vo2max.dart';
 
