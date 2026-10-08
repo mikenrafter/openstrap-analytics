@@ -17,6 +17,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import 'irregular_diagnostics.dart';
 import 'irregular_window.dart';
 
 class IrregularRhythm {
@@ -76,14 +77,59 @@ Metric<IrregularRhythm> irregularBeatScreen(
   double windowMinutes = 5,
   int minWindowBeats = 40,
   double sustainedFraction = 0.5,
+}) =>
+    irregularBeatScreenDetailed(
+      rrMs,
+      nnTimesMs: nnTimesMs,
+      artifactFraction: artifactFraction,
+      minBeats: minBeats,
+      sd1sd2Flag: sd1sd2Flag,
+      pnnThresholdMs: pnnThresholdMs,
+      pnnFlagPct: pnnFlagPct,
+      maxArtifact: maxArtifact,
+      windowMinutes: windowMinutes,
+      minWindowBeats: minWindowBeats,
+      sustainedFraction: sustainedFraction,
+    ).metric;
+
+/// [irregularBeatScreen] and the evidence behind its verdict: the beat counts,
+/// the per-window counts (the final OPEN window included), the thresholds, and,
+/// when the screen abstained, which gate stopped it. The Metric is exactly the
+/// one [irregularBeatScreen] returns. [cleaning] is what the RR corrector did
+/// upstream, when the caller knows (otherwise those counts are null, not 0).
+/// Windows are counted whenever beat times are given, whether or not the
+/// aggregate looked irregular and whether or not the screen abstained.
+IrregularScreenResult irregularBeatScreenDetailed(
+  List<double> rrMs, {
+  List<double>? nnTimesMs,
+  double artifactFraction = 0.0,
+  int minBeats = irregularScreenMinBeats,
+  double sd1sd2Flag = 0.70,
+  double pnnThresholdMs = 70,
+  double pnnFlagPct = 30,
+  double maxArtifact = 0.30,
+  double windowMinutes = 5,
+  int minWindowBeats = 40,
+  double sustainedFraction = 0.5,
+  RrCleaningCounts? cleaning,
 }) {
   const inputs = ['rr_cleaned'];
+  final thresholds = IrregularThresholds(
+    minBeats: minBeats,
+    maxArtifact: maxArtifact,
+    sd1sd2Flag: sd1sd2Flag,
+    pnnThresholdMs: pnnThresholdMs,
+    pnnFlagPct: pnnFlagPct,
+    windowMinutes: windowMinutes,
+    minWindowBeats: minWindowBeats,
+    sustainedFraction: sustainedFraction,
+  );
   // The defensive [300, 2000] filter COMPACTS the series. Keep the mask too, so
   // successive differences below are taken only between beats that were both
   // kept AND adjacent in the input — otherwise every filtered beat manufactured
   // one spurious difference spanning the gap, which counted toward pNNx and
   // inflated sdsd/sd1, pushing both flag conditions toward a false "sustained
-  // irregularity" screen positive.
+  // irregularity" screen positive. (NaN fails both comparisons: not a beat.)
   final keep = [for (final v in rrMs) v >= 300 && v <= 2000];
   final nn = [
     for (var i = 0; i < rrMs.length; i++)
@@ -103,20 +149,61 @@ Metric<IrregularRhythm> irregularBeatScreen(
       prevKeptOrigIdx = i;
     }
   }
-  if (nn.length < minBeats) {
-    return const Metric<IrregularRhythm>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'too few clean beats for an irregular-rhythm screen',
+
+  // Windows are built from the SAME clean beats as the aggregate (the [keep]
+  // mask), not the raw input — an artifact beat the aggregate correctly
+  // excludes must not be allowed back in to inflate one window's own ratio/pNN
+  // into a spurious per-window flag. Counted up front so an abstention can
+  // still report them; the verdict reads them only where it did before.
+  final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
+  final windowsOk = irregularWindowConfigOk(
+      windowMinutes: windowMinutes,
+      minWindowBeats: minWindowBeats,
+      sustainedFraction: sustainedFraction);
+  IrregularWindowCounts? windows;
+  if (hasTimes && windowsOk) {
+    final nnTimes = [
+      for (var i = 0; i < rrMs.length; i++)
+        if (keep[i]) nnTimesMs[i]
+    ];
+    windows = _countWindows(
+      nn,
+      nnTimes,
+      nnAdjacent,
+      sd1sd2Flag: sd1sd2Flag,
+      pnnThresholdMs: pnnThresholdMs,
+      pnnFlagPct: pnnFlagPct,
+      windowMinutes: windowMinutes,
+      minWindowBeats: minWindowBeats,
     );
   }
+
+  IrregularScreenResult abstain(IrregularAbstain why, String note) =>
+      IrregularScreenResult(
+        Metric<IrregularRhythm>.absent(
+            tier: Tier.estimate, inputs_used: inputs, note: note),
+        IrregularDiagnostics(
+          abstain: why,
+          rrRaw: cleaning?.raw,
+          corrected: cleaning?.corrected,
+          dropped: cleaning?.dropped,
+          nnIn: rrMs.length,
+          nnKept: nn.length,
+          artifactFraction: artifactFraction,
+          windows: windows,
+          thresholds: thresholds,
+        ),
+      );
+
+  if (nn.length < minBeats) {
+    return abstain(IrregularAbstain.tooFewBeats,
+        'too few clean beats for an irregular-rhythm screen');
+  }
   if (artifactFraction > maxArtifact) {
-    return Metric<IrregularRhythm>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'artifact fraction ${(artifactFraction * 100).round()}% > '
-          '${(maxArtifact * 100).round()}% — screen suppressed on noisy RR',
-    );
+    return abstain(
+        IrregularAbstain.artifact,
+        'artifact fraction ${(artifactFraction * 100).round()}% > '
+        '${(maxArtifact * 100).round()}% — screen suppressed on noisy RR');
   }
 
   // Poincaré descriptors — successive beats only (see [keep]).
@@ -127,11 +214,8 @@ Metric<IrregularRhythm> irregularBeatScreen(
   final sdsd = stddev(diffs);
   final sdnn = stddev(nn);
   if (sdsd == null || sdnn == null) {
-    return const Metric<IrregularRhythm>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'no successive clean beats to build a Poincare plot from',
-    );
+    return abstain(IrregularAbstain.noSuccessivePairs,
+        'no successive clean beats to build a Poincare plot from');
   }
   final sd1 = sdsd / math.sqrt2;
   final v = 2 * sdnn * sdnn - sd1 * sd1;
@@ -140,12 +224,10 @@ Metric<IrregularRhythm> irregularBeatScreen(
     // SD1/SD2 is undefined without long-term variability to divide by; emitting
     // ratio 0.0 with sd1 = sd2 = 0 published "perfectly regular" as a
     // measurement of a degenerate series.
-    return const Metric<IrregularRhythm>.absent(
-      tier: Tier.estimate,
-      inputs_used: inputs,
-      note: 'no long-term variability (SD2 = 0) — the SD1/SD2 ratio is '
-          'undefined, not "perfectly regular"',
-    );
+    return abstain(
+        IrregularAbstain.noLongTermVariability,
+        'no long-term variability (SD2 = 0) — the SD1/SD2 ratio is '
+        'undefined, not "perfectly regular"');
   }
   final ratio = sd1 / sd2;
 
@@ -168,98 +250,86 @@ Metric<IrregularRhythm> irregularBeatScreen(
   // that is what "sustained" is supposed to mean. Falls back to the old
   // whole-span verdict only when times weren't supplied (short/sleep-only
   // callers where the whole span already IS roughly one physiological state).
-  // Windows are built from the SAME clean beats as the aggregate above (the
-  // [keep] mask), not the raw input — an artifact beat the aggregate
-  // correctly excludes must not be allowed back in here to inflate one
-  // window's own ratio/pNN into a spurious per-window flag.
-  final hasTimes = nnTimesMs != null && nnTimesMs.length == rrMs.length;
-  final nnTimes = hasTimes
-      ? [
-          for (var i = 0; i < rrMs.length; i++)
-            if (keep[i]) nnTimesMs[i]
-        ]
-      : const <double>[];
+  // A bad window config fails CLOSED (never sustained): a misconfigured caller
+  // must never manufacture a medical false positive.
   final flag = aggregateHigh &&
       (!hasTimes ||
-          _sustainedAcrossWindows(
-            nn,
-            nnTimes,
-            nnAdjacent,
-            sd1sd2Flag: sd1sd2Flag,
-            pnnThresholdMs: pnnThresholdMs,
-            pnnFlagPct: pnnFlagPct,
-            windowMinutes: windowMinutes,
-            minWindowBeats: minWindowBeats,
-            sustainedFraction: sustainedFraction,
-          ));
+          (windows != null &&
+              windows.valid > 0 &&
+              windows.flagged / windows.valid >= sustainedFraction));
   // Confidence scales with beat count (~5000 beats ≈ a full strong night) AND
   // with the artifact fraction we were handed — it used to ignore it entirely,
   // so a barely-passing 29 %-artifact night published at the same confidence as
   // a clean one.
   final conf = (nn.length / 5000.0 * (1 - artifactFraction)).clamp(0.2, 0.9);
-  return Metric<IrregularRhythm>(
-    value: IrregularRhythm(
-      sd1: sd1,
-      sd2: sd2,
-      sd1sd2: ratio,
-      pnnPct: pnnPct,
-      nBeats: nn.length,
-      flag: flag,
+  return IrregularScreenResult(
+    Metric<IrregularRhythm>(
+      value: IrregularRhythm(
+        sd1: sd1,
+        sd2: sd2,
+        sd1sd2: ratio,
+        pnnPct: pnnPct,
+        nBeats: nn.length,
+        flag: flag,
+      ),
+      confidence: conf,
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'irregular-rhythm SCREEN (not a diagnosis): Poincaré SD1/SD2 + pNN'
+          '${pnnThresholdMs.round()}. PRV not ECG — wrist pulse misses P-waves. '
+          'Discuss with a clinician only if you have symptoms.',
     ),
-    confidence: conf,
-    tier: Tier.estimate,
-    inputs_used: inputs,
-    note: 'irregular-rhythm SCREEN (not a diagnosis): Poincaré SD1/SD2 + pNN'
-        '${pnnThresholdMs.round()}. PRV not ECG — wrist pulse misses P-waves. '
-        'Discuss with a clinician only if you have symptoms.',
+    IrregularDiagnostics(
+      abstain: null,
+      rrRaw: cleaning?.raw,
+      corrected: cleaning?.corrected,
+      dropped: cleaning?.dropped,
+      nnIn: rrMs.length,
+      nnKept: nn.length,
+      artifactFraction: artifactFraction,
+      windows: windows,
+      thresholds: thresholds,
+    ),
   );
 }
 
-/// True when the SD1/SD2 + pNNx criteria independently hold in a real
-/// fraction of short, roughly-stationary windows across [rrMs] — not just in
-/// the one number the whole span blends into. [timesMs] must be the same
-/// length as [rrMs] and index-aligned (elapsed ms per beat).
-bool _sustainedAcrossWindows(
+/// Counts the short windows across [rrMs] (clean beats only, with their
+/// [timesMs] and [adjacent] flags, all the same length): how many exist, how
+/// many are thick enough to vote, how many of those flag, and what the final
+/// OPEN window was. The window rule and per-window verdict are the ones
+/// `IrregularScreenState` uses (irregular_window.dart).
+IrregularWindowCounts _countWindows(
   List<double> rrMs,
   List<double> timesMs,
-  // Aligned to [rrMs]: whether each beat was truly adjacent (no dropped
-  // artifact beat in between) to the previous one in the ORIGINAL series.
   List<bool> adjacent, {
   required double sd1sd2Flag,
   required double pnnThresholdMs,
   required double pnnFlagPct,
   required double windowMinutes,
   required int minWindowBeats,
-  required double sustainedFraction,
 }) {
-  if (timesMs.length != rrMs.length ||
-      adjacent.length != rrMs.length ||
-      rrMs.length < 2) {
-    return false;
-  }
-  // Fail CLOSED (never sustained) on a bad config — a misconfigured caller
-  // must never manufacture a medical false positive.
-  if (!irregularWindowConfigOk(
-      windowMinutes: windowMinutes,
-      minWindowBeats: minWindowBeats,
-      sustainedFraction: sustainedFraction)) {
-    return false;
-  }
   final windowMs = windowMinutes * 60000;
-  var windowStart = timesMs.first;
-  var validWindows = 0;
-  var flaggedWindows = 0;
+  var total = 0, valid = 0, flagged = 0;
+  var openBeats = 0;
+  var open = IrregularOpenWindow.none;
   var bucket = <double>[];
   var bucketAdjacent = <bool>[];
+  var windowStart = timesMs.isEmpty ? 0.0 : timesMs.first;
   void flush() {
+    if (bucket.isEmpty) return;
     final verdict = irregularWindowVerdict(bucket, bucketAdjacent,
         sd1sd2Flag: sd1sd2Flag,
         pnnThresholdMs: pnnThresholdMs,
         pnnFlagPct: pnnFlagPct,
         minWindowBeats: minWindowBeats);
-    if (verdict != null) {
-      validWindows++;
-      if (verdict) flaggedWindows++;
+    total++;
+    openBeats = bucket.length;
+    if (verdict == null) {
+      open = IrregularOpenWindow.thin;
+    } else {
+      valid++;
+      if (verdict) flagged++;
+      open = verdict ? IrregularOpenWindow.flagged : IrregularOpenWindow.unflagged;
     }
     bucket = [];
     bucketAdjacent = [];
@@ -274,6 +344,11 @@ bool _sustainedAcrossWindows(
     bucketAdjacent.add(adjacent[i]);
   }
   flush();
-  if (validWindows == 0) return false;
-  return flaggedWindows / validWindows >= sustainedFraction;
+  return IrregularWindowCounts(
+    total: total,
+    valid: valid,
+    flagged: flagged,
+    openBeats: openBeats,
+    open: open,
+  );
 }

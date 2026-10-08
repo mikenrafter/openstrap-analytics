@@ -328,6 +328,33 @@ void main() {
     });
   });
 
+  group('old checkpoints', () {
+    test('a version 1 checkpoint (no input-beat or window-total counters) is '
+        'REFUSED, never restored with counts it did not keep', () {
+      final st = IrregularScreenState()
+        ..fold([for (var i = 0; i < 80; i++) 800.0 + i % 9], [
+          for (var i = 0; i < 80; i++) 800.0 * (i + 1)
+        ]);
+      final v1 = jsonDecode(jsonEncode(st.toJson())) as Map<String, dynamic>
+        ..['version'] = 1
+        ..remove('nIn')
+        ..remove('total');
+      expect(() => IrregularScreenState.fromJson(v1), throwsFormatException);
+      // The current format still restores.
+      final now = IrregularScreenState.fromJson(
+          jsonDecode(jsonEncode(st.toJson())) as Map<String, dynamic>);
+      expect(now.evaluateDetailed(const [], const []).diagnostics.nnIn, 80);
+      expect(st.toJson()['version'], 2);
+    });
+
+    test('a version 2 checkpoint missing a counter is refused too', () {
+      final j = jsonDecode(jsonEncode(IrregularScreenState().toJson()))
+          as Map<String, dynamic>
+        ..remove('nIn');
+      expect(() => IrregularScreenState.fromJson(j), throwsFormatException);
+    });
+  });
+
   group('absent input stays absent', () {
     test('a fresh state: absent, zero counts, nothing invented', () {
       final got = IrregularScreenState().evaluateDetailed(const [], const []);

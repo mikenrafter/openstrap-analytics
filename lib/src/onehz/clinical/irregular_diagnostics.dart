@@ -1,9 +1,5 @@
 // CLINICAL — the evidence behind an irregular-rhythm screen verdict.
 //
-// RED STUB (design 04 "PRV diagnostics"): the types exist so the contract
-// tests compile; every behaviour throws UnimplementedError. Nothing here is
-// computed yet.
-//
 // What it is for: `irregularBeatScreen` computes the beat counts, the cleaning
 // counts and the per-5-minute-window counts on its way to a flag, then throws
 // them away. A reader who sees "flagged" or "not screened" cannot tell why.
@@ -96,7 +92,7 @@ class IrregularWindowCounts {
   });
 
   /// flagged / valid, null (never 0 or NaN) when no window is valid.
-  double? get sustainedObserved => throw UnimplementedError('red stub');
+  double? get sustainedObserved => valid == 0 ? null : flagged / valid;
 }
 
 class IrregularDiagnostics {
@@ -131,12 +127,102 @@ class IrregularDiagnostics {
     required this.thresholds,
   });
 
-  /// See test/onehz/irregular_diagnostics_test.dart for the wire shape.
-  Map<String, dynamic> toJson() => throw UnimplementedError('red stub');
+  static const _abstainWire = {
+    IrregularAbstain.tooFewBeats: 'too_few_beats',
+    IrregularAbstain.artifact: 'artifact',
+    IrregularAbstain.noSuccessivePairs: 'no_successive_pairs',
+    IrregularAbstain.noLongTermVariability: 'no_long_term_variability',
+  };
+
+  /// Wire shape (version 1); see test/onehz/irregular_diagnostics_test.dart.
+  /// Doubles are written as they are held, so a JSON text round trip is exact.
+  Map<String, dynamic> toJson() => {
+        'version': 1,
+        'abstain': abstain == null ? null : _abstainWire[abstain],
+        'beats': {
+          'rr_raw': rrRaw,
+          'nn_in': nnIn,
+          'nn_kept': nnKept,
+          'corrected': corrected,
+          'dropped': dropped,
+          'artifact_fraction': artifactFraction,
+        },
+        'windows': windows == null
+            ? null
+            : {
+                'total': windows!.total,
+                'valid': windows!.valid,
+                'flagged': windows!.flagged,
+                'sustained_observed': windows!.sustainedObserved,
+                'open_beats': windows!.openBeats,
+                'open': windows!.open.name,
+              },
+        'thresholds': {
+          'min_beats': thresholds.minBeats,
+          'max_artifact': thresholds.maxArtifact,
+          'sd1sd2_flag': thresholds.sd1sd2Flag,
+          'pnn_threshold_ms': thresholds.pnnThresholdMs,
+          'pnn_flag_pct': thresholds.pnnFlagPct,
+          'window_minutes': thresholds.windowMinutes,
+          'min_window_beats': thresholds.minWindowBeats,
+          'sustained_fraction': thresholds.sustainedFraction,
+        },
+      };
 
   /// Throws [FormatException] on a map of another version or a malformed one.
-  factory IrregularDiagnostics.fromJson(Map<String, dynamic> json) =>
-      throw UnimplementedError('red stub');
+  factory IrregularDiagnostics.fromJson(Map<String, dynamic> json) {
+    try {
+      return _restore(json);
+    } on FormatException {
+      rethrow;
+    } catch (e) {
+      throw FormatException('malformed IrregularDiagnostics: $e');
+    }
+  }
+
+  static IrregularDiagnostics _restore(Map<String, dynamic> j) {
+    if (j['version'] != 1) {
+      throw FormatException('unsupported IrregularDiagnostics version ${j['version']}');
+    }
+    final b = j['beats'] as Map, th = j['thresholds'] as Map;
+    final w = j['windows'] as Map?;
+    final a = j['abstain'] as String?;
+    IrregularAbstain? abstain;
+    if (a != null) {
+      final hit = _abstainWire.entries.where((e) => e.value == a);
+      if (hit.isEmpty) throw FormatException('unknown abstain reason $a');
+      abstain = hit.first.key;
+    }
+    double d(Map m, String k) => (m[k] as num).toDouble();
+    return IrregularDiagnostics(
+      abstain: abstain,
+      rrRaw: b['rr_raw'] as int?,
+      corrected: b['corrected'] as int?,
+      dropped: b['dropped'] as int?,
+      nnIn: b['nn_in'] as int,
+      nnKept: b['nn_kept'] as int,
+      artifactFraction: d(b, 'artifact_fraction'),
+      windows: w == null
+          ? null
+          : IrregularWindowCounts(
+              total: w['total'] as int,
+              valid: w['valid'] as int,
+              flagged: w['flagged'] as int,
+              openBeats: w['open_beats'] as int,
+              open: IrregularOpenWindow.values.byName(w['open'] as String),
+            ),
+      thresholds: IrregularThresholds(
+        minBeats: th['min_beats'] as int,
+        maxArtifact: d(th, 'max_artifact'),
+        sd1sd2Flag: d(th, 'sd1sd2_flag'),
+        pnnThresholdMs: d(th, 'pnn_threshold_ms'),
+        pnnFlagPct: d(th, 'pnn_flag_pct'),
+        windowMinutes: d(th, 'window_minutes'),
+        minWindowBeats: th['min_window_beats'] as int,
+        sustainedFraction: d(th, 'sustained_fraction'),
+      ),
+    );
+  }
 }
 
 /// A screen verdict and the evidence behind it.
@@ -147,23 +233,8 @@ class IrregularScreenResult {
 
   /// `metric.toJson((v) => v.toJson())` plus a `diagnostics` key: the envelope
   /// edge persists. The existing keys are unchanged.
-  Map<String, dynamic> toJson() => throw UnimplementedError('red stub');
+  Map<String, dynamic> toJson() => {
+        ...metric.toJson((v) => v.toJson()),
+        'diagnostics': diagnostics.toJson(),
+      };
 }
-
-/// Same arguments and same verdict as [irregularBeatScreen], plus the evidence.
-/// [cleaning] is what the corrector did upstream, if the caller knows.
-IrregularScreenResult irregularBeatScreenDetailed(
-  List<double> rrMs, {
-  List<double>? nnTimesMs,
-  double artifactFraction = 0.0,
-  int minBeats = irregularScreenMinBeats,
-  double sd1sd2Flag = 0.70,
-  double pnnThresholdMs = 70,
-  double pnnFlagPct = 30,
-  double maxArtifact = 0.30,
-  double windowMinutes = 5,
-  int minWindowBeats = 40,
-  double sustainedFraction = 0.5,
-  RrCleaningCounts? cleaning,
-}) =>
-    throw UnimplementedError('red stub');

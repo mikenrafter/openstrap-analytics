@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- `irregularBeatScreenDetailed` and `IrregularScreenState.evaluateDetailed`: the
+  irregular-rhythm screen's verdict plus its evidence (`IrregularDiagnostics`) —
+  beats in / kept after the [300, 2000] ms filter, the corrector's raw /
+  corrected / dropped counts (passed in as `RrCleaningCounts`), artifact
+  fraction, window counts (total, voting, flagged, the final OPEN window and
+  what became of it, sustained share seen vs required) and the thresholds — for
+  a screen that ran and for one that abstained (with the reason). Batch and
+  streamed results are identical. `irregularBeatScreen` returns the same Metric
+  as before. `IrregularScreenState` checkpoints are now version 2 (two more
+  counters); a version 1 checkpoint is refused rather than restored with counts
+  it never kept. A NaN beat no longer makes the checkpoint unencodable.
 - Incremental states for centered moments, fixed-grid Lomb–Scargle, time-domain
   HRV, motion with a measured gravity reference, and keyed minute TRIMP/energy.
   Appends reuse retained contributions; edits, removals and changed dependencies

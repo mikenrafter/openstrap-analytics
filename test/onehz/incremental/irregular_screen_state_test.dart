@@ -455,9 +455,9 @@ void main() {
   group('contract', () {
     test('checkpoint is versioned and typed like the other states', () {
       final json = IrregularScreenState().toJson();
-      expect(json['version'], 1);
+      expect(json['version'], 2);
       expect(json['type'], 'IrregularScreenState');
-      expect(() => IrregularScreenState.fromJson({...json, 'version': 2}),
+      expect(() => IrregularScreenState.fromJson({...json, 'version': 3}),
           throwsFormatException);
       expect(() => IrregularScreenState.fromJson({...json, 'type': 'Other'}),
           throwsFormatException);
