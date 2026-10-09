@@ -85,8 +85,9 @@ const _flavours = [
   'flat', // constant RR: QD = 0, massive ties
   'outliers', // flat, with an outlier at the start, middle and end
   'edge gaps', // dropouts of exactly, one under and one over each re-anchor gap
+  'hard limits', // 300 and 2000 exactly, then a too-long and a too-short beat
 ];
-const int _nFlavours = 9;
+const int _nFlavours = 10;
 
 /// 2025-10-09 08:53:20 UTC in ms: a whole second, as production stamps are.
 const double _t0 = 1760000000000;
@@ -182,6 +183,10 @@ _Series _expandSeries(int flavour, int n, int seed) {
         emit(800);
       case 7:
         emit(i == 0 || i == n ~/ 2 || i == n - 1 ? 1300 : 800);
+      case 9:
+        // The edges of the plausible range, exactly, then one beat past each:
+        // 300 and 2000 are plausible, 2500 and 250 are not.
+        emit(i < 4 ? const [300.0, 2000.0, 2500.0, 250.0][i] : v);
       case 8:
         // The wall-clock step exceeds the beat by exactly the re-anchor gap of
         // one of the configs (400, 1000, 5000 ms), one ms under it, one over.
@@ -350,6 +355,7 @@ const Map<String, double> _rrShares = {
   'flavour: flat': .03,
   'flavour: outliers': .03,
   'flavour: edge gaps': .02,
+  'flavour: hard limits': .02,
   'beats: none': .01,
   'beats: under 3 (the short branch)': .015,
   'beats: inside the window (3 to 90)': .1,
@@ -382,6 +388,11 @@ final List<_Case> _forced = [
   _c(0, 1), // one beat
   _c(0, 2, restart: 127), // two: the < 3 branch
   _c(0, 3, restart: 127), // exactly three
+  _c(9, 1), // exactly 300 ms: plausible
+  _c(9, 2, restart: 127), // 300 and 2000 exactly
+  _c(9, 3, restart: 127), // and a too-long beat: the first main-path verdict
+  _c(9, 4, restart: 127), // and a too-short one
+  _c(9, 120, splits: 4, cutSeed: 28, restart: 127),
   _c(1, 5, splits: 6, restart: 127),
   _c(0, 44, splits: 4, cutSeed: 3), // under the half window
   _c(0, 46, splits: 5, cutSeed: 4), // the first beat whose window is complete
@@ -410,6 +421,11 @@ final List<_Case> _forced = [
   _c(1, 1200, splits: 6, cutSeed: 20, restart: 127), // past 1000 beats
   _c(1, 3000, splits: 6, cutSeed: 21, restart: 127), // the cap
 ];
+
+/// A day with settled beats, artefacts and several windows: the base the
+/// mutated-checkpoint law cuts its mutations from.
+final _Case _l3Base = _forced.firstWhere(
+    (c) => c.$1.$1 == 1 && c.$1.$2 >= 300 && c.$1.$4 == 0 && c.$2.$4 == 0);
 
 // ── RC: the corrector ───────────────────────────────────────────────────────
 
@@ -846,8 +862,9 @@ const _nnFlavours = [
   'two point', // alternating 800 / 1000
   'sinus + gaps', // sinus with dropouts (time jumps)
   'af heavy', // AF in most blocks
+  'range edges', // 300 and 2000 exactly (kept), 299 and 2001 (not), then calm beats
 ];
-const int _nNnFlavours = 7;
+const int _nNnFlavours = 8;
 
 /// (out-of-range share, NaN share) of the entries.
 const List<(double, double)> _salts = [(0, 0), (.02, 0), (.2, .02), (0, .02)];
@@ -886,6 +903,7 @@ _Nn _expandNn(int flavour, int n, int seed, int salt) {
     var v = switch (flavour) {
       3 => 800.0,
       4 => i.isEven ? 800.0 : 1000.0,
+      7 => const [300.0, 2000.0, 299.0, 2001.0, 800.0, 1000.0, 850.0][i % 7],
       _ => af
           ? (420 + r.nextInt(700)).toDouble()
           : (850 + 40 * math.sin(i / 90) + 25 * (r.nextDouble() - .5)).roundToDouble(),
@@ -1248,6 +1266,7 @@ const Map<String, double> _nnShares = {
   'flavour: two point': .03,
   'flavour: sinus + gaps': .03,
   'flavour: af heavy': .03,
+  'flavour: range edges': .03,
   'beats: under a thin window': .05,
   'beats: 500 or more': .08,
   'out-of-range entries': .3,
@@ -1287,6 +1306,11 @@ final List<_NnCase> _nnForced = [
   _n(0, 40, splits: 4, cfg: 0, ev: 1), // exactly the minimum window
   _n(0, 41, splits: 4, cfg: 0, ev: 1),
   _n(0, 2, cfg: 2, ev: 4), // minimum window of 2 beats, minimum beats 2
+  _n(0, 3, cfg: 2, ev: 4), // exactly two successive differences
+  _n(1, 3, cfg: 2, ev: 4),
+  _n(1, 4, cfg: 2, ev: 4),
+  _n(7, 200, cfg: 1, ev: 1, splits: 5, restart: 127), // the edges of the kept range
+  _n(7, 7, cfg: 2, ev: 4, splits: 3), // exactly one period
   _n(3, 300, cfg: 0, ev: 1, splits: 5, restart: 127), // flat: SD2 = 0
   _n(4, 300, cfg: 2, ev: 1, splits: 5, restart: 127), // two point
   _n(1, 900, cfg: 0, ev: 1, splits: 6, cut: 3, restart: 127), // AF: flags
@@ -1303,6 +1327,13 @@ final List<_NnCase> _nnForced = [
   _n(0, 3000, cfg: 0, ev: 0, splits: 6, cut: 14, restart: 127), // the cap, default minimum
   _n(1, 3000, cfg: 1, ev: 1, splits: 6, cut: 15, restart: 127),
 ];
+
+/// Days with an open window, completed windows and counts worth contradicting:
+/// the base the mutated-checkpoint law cuts its mutations from.
+final List<_NnCase> _nnL3 = _nnForced
+    .where((c) => c.$1.$2 >= 600 && _scCfgValid(c.$2.$1))
+    .take(3)
+    .toList();
 
 /// Window edge hit EXACTLY: a kept beat a full window after the window's first
 /// closes it (>=). Hand-built, so it does not depend on a generator reaching it.
@@ -2008,9 +2039,9 @@ void main() {
       examples: [
         for (var i = 0; i < 11 * 4; i++)
           (_forced[const [3, 8, 13, 16, 20, 17, 11][i % 7] + (i % 3 == 0 ? 0 : 0)], (i % 11, i ~/ 11, 7 + i)),
-        for (var k = 0; k < 11; k++) (_forced[9], (k, k, 0)),
-        for (var a = 0; a < 10; a++) (_forced[9], (0, a, 0)),
-        for (var a = 0; a < 5; a++) for (var b = 0; b < 4; b++) (_forced[9], (8, a, b)),
+        for (var k = 0; k < 11; k++) (_l3Base, (k, k, 0)),
+        for (var a = 0; a < 10; a++) (_l3Base, (0, a, 0)),
+        for (var a = 0; a < 5; a++) for (var b = 0; b < 4; b++) (_l3Base, (8, a, b)),
       ],
       cases: 200,
       reach: Reach<(_Case, Mut)>({
@@ -2085,8 +2116,8 @@ void main() {
       _scL3,
       examples: [
         for (var k = 0; k < 11; k++)
-          for (var a = 0; a < 3; a++) (_nnForced[10 + a], (k, a + k, 3 * k + a)),
-        for (var a = 0; a < 9; a++) (_nnForced[10], (0, a, 0)),
+          for (var a = 0; a < 3; a++) (_nnL3[a], (k, a + k, 3 * k + a)),
+        for (var a = 0; a < 9; a++) (_nnL3[0], (0, a, 0)),
       ],
       cases: 250,
       reach: Reach<(_NnCase, Mut)>({

@@ -519,6 +519,8 @@ const _hrvFlavours = [
   'big steps', // every 7th beat 90 ms off: pNN50 moves
   'two valued', // alternating 800 / 1000: ACF of the differences is -1
   'seconds grid', // 1 s beats on a whole-second grid: the 5-minute bin edges are hit exactly
+  'gap edge', // the time step exceeds the beat by exactly, under and over the half millisecond
+  'fifty', // successive differences of exactly, under and over 50 ms
 ];
 const _hrvOrigins = [0.0, 299999.5, 1700000010123.125, 1700000000000.0];
 const _hrvAf = [0.0, .17, .8, 1.0];
@@ -540,6 +542,7 @@ class HrvOps extends Ops<HrvIn> {
     final g = Rng(seed * 7919 + flavour + 5);
     final nn = <double>[], t = <double>[];
     var clock = _hrvOrigins[originIdx];
+    var fiftyBase = 800.0;
     for (var i = 0; i < n; i++) {
       final v = switch (flavour) {
         1 => 800 + 160 * (g.nextDouble() - .5),
@@ -547,11 +550,13 @@ class HrvOps extends Ops<HrvIn> {
         3 => 800.0,
         6 => i.isEven ? 800.0 : 1000.0,
         7 => 900.0 + (i % 11) * 7,
+        9 => fiftyBase += const [50.0, -50.0, 49.0, -49.0, 51.0, -51.0][i % 6],
         5 => 800 + 40 * math.sin(i * .13) + (i % 7 == 6 ? 90 : 0),
         _ => 800 + 75 * math.sin(i * .13 + seed * .003) + 21 * math.sin(i * .031 + seed * .007),
       };
       if (flavour == 4 && i % 113 == 112) clock += 21000;
       clock += flavour == 7 ? 1000 : v;
+      if (flavour == 8 && i % 9 == 8) clock += const [.5, .25, .75, .5, .4999, .5001][(i ~/ 9) % 6];
       nn.add(v);
       t.add(clock);
     }
@@ -752,6 +757,12 @@ class HrvOps extends Ops<HrvIn> {
         [3, 29, 1, 1, 0, 0], // constant, no times
         [1, 300, 2, 0, 0, 1], // jitter: RMSSD refused
         [6, 120, 1, 0, 0, 0], // ACF of the differences exactly -1
+        [0, 31, 1, 0, 0, 0], // exactly 30 pairs: the first with an ACF
+        [0, 32, 2, 1, 0, 0],
+        [7, 450, 1, 0, 0, 0], // exactly two 5-minute bins
+        [8, 120, 1, 0, 0, 0], // dropout edges
+        [9, 120, 1, 0, 0, 0], // differences of exactly 50 ms
+        [9, 120, 2, 1, 3, 1],
         [7, 610, 1, 0, 0, 0], // whole-second grid across 5-minute edges
         [7, 610, 1, 0, 1, 2], // shifted origin
         [7, 610, 1, 0, 2, 3],
