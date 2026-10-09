@@ -110,10 +110,20 @@ class IrregularScreenState {
     s._lM2 = d('lM2');
     s._winStart = (j['winStart'] as num?)?.toDouble();
     s._bk = [for (final x in j['bk'] as List) (x as num).toDouble()];
-    s._bkAdj = [for (final x in j['bkAdj'] as List) (x as int) == 1];
+    final bkAdj = j['bkAdj'] as List;
+    if (bkAdj.any((x) => x is! int || (x != 0 && x != 1))) {
+      throw const FormatException('invalid bkAdj');
+    }
+    s._bkAdj = [for (final x in bkAdj) x == 1];
     s._total = j['total'] as int;
     s._valid = j['valid'] as int;
     s._flagged = j['flagged'] as int;
+    if (s._lN != s._nKept) throw const FormatException('invalid lN');
+    if (s._dN > s._nIn) throw const FormatException('invalid dN');
+    if (s._total > s._nIn) throw const FormatException('invalid total');
+    if (s._bk.isNotEmpty && s._winStart == null) {
+      throw const FormatException('invalid winStart');
+    }
     final ok = s._bk.length == s._bkAdj.length &&
         s._nKept >= 0 &&
         s._nIn >= s._nKept &&
