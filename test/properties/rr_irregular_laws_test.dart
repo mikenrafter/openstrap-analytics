@@ -2550,11 +2550,7 @@ void main() {
         expect(() => IrregularScreenState.fromJson(j), throwsFormatException,
             reason: e.key);
       }
-    }, skip: 'FINDING (reader hardening, no output change): fromJson checks '
-        'bk/bkAdj lengths, nKept <= nIn, total >= valid, over <= dN and '
-        'flagged <= valid, but accepts the contradictions above and reads any '
-        'integer other than 1 as "not adjacent", silently. Reported, not fixed '
-        '(design 05: lib/ is out of scope for the pilot).');
+    });
 
     test('RrCorrector.fromJson refuses a checkpoint whose counters are '
         'impossible', () {
@@ -2576,10 +2572,7 @@ void main() {
         e.value(j);
         expect(() => RrCorrector.fromJson(j), throwsFormatException, reason: e.key);
       }
-    }, skip: 'FINDING (reader hardening, no output change): fromJson validates '
-        'array lengths, the off <= ce <= c2 <= c1 <= n order, class values and '
-        'the window size, but accepts the impossible counters above. Reported, '
-        'not fixed.');
+    });
   });
 
   _laws.registerReachTest();

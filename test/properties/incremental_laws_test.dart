@@ -3004,10 +3004,7 @@ void main() {
         // FormatException a malformed checkpoint is documented to raise.
         expect(() => IntHistogram.fromJson(j), throwsFormatException, reason: '$j');
       }
-    }, skip: 'FINDING (hostile counts, no output change for any real '
-        'checkpoint): fromJson accepts bin counts that overflow int64 when '
-        'summed; the histogram then reports a negative count and percentile() '
-        'throws StateError. Reported, not fixed.');
+    });
   });
 
   group('the forced scenarios say what they claim', () {
