@@ -187,6 +187,8 @@ class IntHistogram {
     _count--;
   }
 
+  /// Merges [other] into this histogram.
+  /// Throws [StateError] if the total count would overflow int64.
   void merge(IntHistogram other) {
     if (_count > _maxInt64 - other._count) {
       throw StateError('Histogram count would overflow int64');

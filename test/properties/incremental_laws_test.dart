@@ -2995,6 +2995,33 @@ void main() {
   });
 
   group('FINDINGS (skipped: suspected gaps against the documented contract)', () {
+    test('IntHistogram public overflow checks preserve state', () {
+      const maxInt64 = 0x7fffffffffffffff;
+      Map<String, dynamic> snapshot(IntHistogram h) {
+        final json = h.toJson();
+        return {
+          'count': h.count,
+          'values': json['values'],
+          'counts': json['counts'],
+          'toJson': json,
+        };
+      }
+
+      final h = IntHistogram()..add(7, maxInt64);
+      expect(h.count, maxInt64);
+      expect(h.toJson()['counts'], [maxInt64]);
+      final before = snapshot(h);
+      expect(() => h.add(7), throwsStateError);
+      expect(snapshot(h), before);
+
+      final other = IntHistogram()..add(8);
+      expect(() => h.merge(other), throwsStateError);
+      expect(snapshot(h), before);
+
+      expect(() => h.merge(h), throwsStateError);
+      expect(snapshot(h), before);
+    });
+
     test('IntHistogram.fromJson refuses bin counts whose total does not fit an '
         'int', () {
       final bad = <Map<String, dynamic>>[
