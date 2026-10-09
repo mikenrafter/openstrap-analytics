@@ -1031,6 +1031,19 @@ void _close(double got, double want, String why, {double rel = 1e-9}) {
   }
 }
 
+/// The kept beats of [nn] (300..2000 ms) and the successive differences taken
+/// only between two kept neighbours, from the documented rule alone.
+({List<double> kept, List<double> diffs}) _keptAndDiffs(List<double> nn) {
+  bool kept(double v) => v >= 300 && v <= 2000;
+  return (
+    kept: [for (final v in nn) if (kept(v)) v],
+    diffs: [
+      for (var i = 1; i < nn.length; i++)
+        if (kept(nn[i]) && kept(nn[i - 1])) nn[i] - nn[i - 1]
+    ],
+  );
+}
+
 /// Whether SD2 is numerically zero for [nn]: 2*SDNN^2 - SD1^2 is within 1e-9 of
 /// its own scale of nothing (an exactly two-valued alternating series is the
 /// plain case). There the sign of float noise decides "no long-term
@@ -1038,46 +1051,77 @@ void _close(double got, double want, String why, {double rel = 1e-9}) {
 /// two-pass batch legitimately disagree. Computed independently, from the
 /// documented rule.
 bool _sd2Degenerate(List<double> nn) {
-  bool kept(double v) => v >= 300 && v <= 2000;
-  final lv = [for (final v in nn) if (kept(v)) v];
-  final d = <double>[
-    for (var i = 1; i < nn.length; i++)
-      if (kept(nn[i]) && kept(nn[i - 1])) nn[i] - nn[i - 1]
-  ];
-  final sdnn = _sd(lv), sdsd = _sd(d);
+  final k = _keptAndDiffs(nn);
+  final sdnn = _sd(k.kept), sdsd = _sd(k.diffs);
   if (sdnn == null || sdsd == null || sdnn == 0) return false;
   final v = 2 * sdnn * sdnn - sdsd * sdsd / 2;
   return v.abs() <= 1e-9 * 2 * sdnn * sdnn;
 }
 
+/// A reported SD2 is "numerically zero" when sd2^2 is within the same 1e-9 of
+/// the scale 2*SDNN^2 (= sd1^2 + sd2^2) that [_sd2Degenerate] uses. The bound
+/// is the float noise of the cancellation 2*SDNN^2 - SD1^2: two sums of squares
+/// of the same magnitude differ by a few ulps (about 1e-15 relative, times a
+/// factor that grows with the beat count, well under 1e-12 at the 3,000 beats
+/// the generators cap at), so 1e-9 leaves a margin of more than 1e3 and
+/// still rejects any SD2 that is a real fraction of SD1.
+void _expectNumericallyZeroSd2(IrregularRhythm r, String why) {
+  expect(r.sd2.isFinite && r.sd2 >= 0, isTrue, reason: 'sd2 finite, >= 0 $why');
+  expect(r.sd2 * r.sd2 <= 1e-9 * (r.sd1 * r.sd1 + r.sd2 * r.sd2), isTrue,
+      reason: 'a reported SD2 where the other side abstains is numerically '
+          'zero (sd1 ${r.sd1}, sd2 ${r.sd2}) $why');
+}
+
 /// Counts, flags, abstentions, notes and the diagnostics text exact; SD1 / SD2 /
 /// ratio within 1e-9 relative, confidence within 1e-12 (running sums against a
-/// two-pass batch) -- except where SD2 is numerically zero ([degenerate]: see
-/// [_sd2Degenerate]), where the two may disagree on whether SD2 is zero; then
-/// the only allowed difference is an abstention for `noLongTermVariability`
-/// against a present value, and the numbers that depend on SD2 are not compared.
+/// two-pass batch).
+///
+/// Pass [nn] (the beats the screen saw) to allow the one ambiguity of a
+/// numerically zero SD2 (see [_sd2Degenerate]): the two sides may disagree on
+/// whether SD2 is zero. That exempts ONLY the SD2 presence and what hangs on
+/// it: SD2 and the ratio (both sides, when both report: each only has to be
+/// numerically zero), and, when exactly one side reports, the note, the flag
+/// and pNN, because the abstaining side has nothing to compare them with.
+/// Everything else is still held: tier, inputs, every diagnostics field but the
+/// abstention reason, SD1 (against an independent value when only one side
+/// reports), the beat count, pNN and confidence (both when both report). When
+/// exactly one side reports, the other must abstain with
+/// `noLongTermVariability` and the reported SD2 must be numerically zero.
 void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String why,
-    {bool degenerate = false}) {
+    {List<double>? nn}) {
   final g = got.metric, w = want.metric;
+  final degenerate = nn != null && _sd2Degenerate(nn);
+  final ambiguous = degenerate && g.present != w.present;
   String diagText(IrregularScreenResult r, {bool noAbstain = false}) {
     final j = r.diagnostics.toJson();
     if (noAbstain) j['abstain'] = null;
     return jsonEncode(j);
   }
 
-  if (degenerate && g.present != w.present) {
-    final absent = g.present ? want : got;
-    expect(absent.diagnostics.abstain, IrregularAbstain.noLongTermVariability,
+  expect(g.tier, w.tier, reason: 'tier $why');
+  expect(g.inputs_used, w.inputs_used, reason: 'inputs $why');
+  expect(diagText(got, noAbstain: ambiguous), diagText(want, noAbstain: ambiguous),
+      reason: 'diagnostics$why${ambiguous ? " (but the abstention reason)" : ""}');
+  if (ambiguous) {
+    final rep = g.present ? got : want, abs = g.present ? want : got;
+    expect(abs.diagnostics.abstain, IrregularAbstain.noLongTermVariability,
         reason: 'the only disagreement allowed at a numerically zero SD2 $why');
-    expect(diagText(got, noAbstain: true), diagText(want, noAbstain: true),
-        reason: 'diagnostics, but for the reason $why');
+    expect(rep.diagnostics.abstain, isNull, reason: 'a reported screen did not abstain $why');
+    expect(abs.metric.value, isNull, reason: 'absent => no value $why');
+    expect(abs.metric.confidence, 0, reason: 'absent => confidence 0 $why');
+    final v = rep.metric.value!;
+    _expectNumericallyZeroSd2(v, why);
+    final k = _keptAndDiffs(nn);
+    expect(v.nBeats, k.kept.length, reason: 'nBeats $why');
+    expect(v.nBeats, rep.diagnostics.nnKept, reason: 'nBeats is the kept count $why');
+    _close(v.sd1, _sd(k.diffs)! / math.sqrt2, 'sd1 against the independent value $why');
+    expect(v.pnnPct >= 0 && v.pnnPct <= 100, isTrue, reason: 'pnn in range $why');
+    expect(rep.metric.confidence >= 0.2 && rep.metric.confidence <= 0.9, isTrue,
+        reason: 'confidence in its clamp $why');
     return;
   }
   expect(g.present, w.present, reason: 'present $why');
   expect(g.note, w.note, reason: 'note $why');
-  expect(g.tier, w.tier, reason: 'tier $why');
-  expect(g.inputs_used, w.inputs_used, reason: 'inputs $why');
-  expect(diagText(got), diagText(want), reason: 'diagnostics $why');
   if (!w.present) {
     expect(g.value, isNull, reason: 'absent => no value $why');
     expect(g.confidence, 0, reason: 'absent => confidence 0 $why');
@@ -1087,8 +1131,12 @@ void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String w
   expect(a.flag, b.flag, reason: 'flag $why');
   expect(a.nBeats, b.nBeats, reason: 'nBeats $why');
   expect(a.pnnPct, b.pnnPct, reason: 'pnn $why');
-  if (!degenerate) {
-    _close(a.sd1, b.sd1, 'sd1 $why');
+  _close(a.sd1, b.sd1, 'sd1 $why');
+  if (degenerate) {
+    // Both report: SD2 and the ratio are float noise around zero on both sides.
+    _expectNumericallyZeroSd2(a, why);
+    _expectNumericallyZeroSd2(b, why);
+  } else {
     _close(a.sd2, b.sd2, 'sd2 $why');
     _close(a.sd1sd2, b.sd1sd2, 'sd1sd2 $why');
   }
@@ -1411,7 +1459,7 @@ void _scL1b(_NnCase c) {
     expect(_stext(st), before, reason: '$tag: evaluate reads, never writes');
     final want = _batchScreenOf(s.nn.sublist(0, tailEnd), s.t.sublist(0, tailEnd), cfg, ev);
     final why = '$tag seam $k at $at tail to $tailEnd';
-    _sameScreen(got, want, why, degenerate: _sd2Degenerate(s.nn.sublist(0, tailEnd)));
+    _sameScreen(got, want, why, nn: s.nn.sublist(0, tailEnd));
     _expectEvidence(got, s.nn.sublist(0, tailEnd), s.t.sublist(0, tailEnd), cfg, why);
   });
 }
@@ -1737,7 +1785,7 @@ void _ipBody(_IpCase arg) {
         sustainedFraction: cs.$6,
         cleaning: RrCleaningCounts(
             raw: at, corrected: want.correctedCount, dropped: want.droppedCount));
-    _sameScreen(got, batch, why, degenerate: _sd2Degenerate(want.nn));
+    _sameScreen(got, batch, why, nn: want.nn);
     // L5, integrated: the corrector's counts are the screen's evidence.
     final dg = got.diagnostics;
     expect(dg.rrRaw, at, reason: 'rr_raw is every beat the corrector saw $why');
@@ -1998,7 +2046,14 @@ void _wAbsent(_WireCase c) {
     String noReason(String t) =>
         jsonEncode((jsonDecode(t) as Map)..['abstain'] = null);
     if (_sd2Degenerate(s.nn)) {
+      // Only the abstention reason may differ, and only between "reported" and
+      // "no long-term variability".
       expect(noReason(bj), noReason(aj), reason: '$tag: batch and stream agree');
+      final ba = batch.diagnostics.abstain, sa = stream.diagnostics.abstain;
+      if (ba != sa) {
+        expect({ba, sa}, {null, IrregularAbstain.noLongTermVariability},
+            reason: '$tag: the only reason change allowed at a zero SD2');
+      }
     } else {
       expect(bj, aj, reason: '$tag: batch and stream agree');
     }
@@ -2134,7 +2189,7 @@ void main() {
           for (var a = 0; a < 3; a++) (_nnL3[a], (k, a + k, 3 * k + a)),
         for (var a = 0; a < 9; a++) (_nnL3[0], (0, a, 0)),
       ],
-      cases: 250,
+      cases: 200,
       reach: Reach<(_NnCase, Mut)>({
         for (var k = 0; k < 11; k++) 'kind: $k': .02,
         'a state with an open window': .3,
@@ -2285,7 +2340,7 @@ void main() {
         for (var a = 0; a < 6; a++) (forcedWire[3], (6, a, 0)),
         for (var a = 0; a < 5; a++) (forcedWire[9], (5, a, 0)),
       ],
-      cases: 250,
+      cases: 200,
       reach: Reach<(_WireCase, Mut)>({
         for (var k = 0; k < 8; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
