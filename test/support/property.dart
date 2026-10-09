@@ -706,7 +706,9 @@ String? _callerTestFile() {
   final m = RegExp(r'test/[\w/.\-]+\.dart');
   for (final line in StackTrace.current.toString().split('\n')) {
     final hit = m.firstMatch(line)?.group(0);
-    if (hit != null && !hit.endsWith('support/property.dart')) return hit;
+    if (hit != null && !RegExp(r'support/(property|law_registry)\.dart$').hasMatch(hit)) {
+      return hit;
+    }
   }
   return null;
 }
