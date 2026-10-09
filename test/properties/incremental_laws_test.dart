@@ -2909,6 +2909,7 @@ void main() {
     // through an identical sync.
     Json viaText(Json j) => (jsonDecode(jsonEncode(j)) as Map).cast<String, dynamic>();
 
+    // If reader hardening ever refuses this altered state, this becomes a refusal test.
     test('IncrementalHrvTime: an accepted two-beat checkpoint keeps its level '
         'moments through an identical sync', () {
       final live = IncrementalHrvTime()..sync([800.0, 900.0]);
@@ -2922,6 +2923,7 @@ void main() {
       expect(((back.toJson()['levels'] as Map)['m2'] as num).toDouble(), 20000.0);
     });
 
+    // If reader hardening ever refuses this altered state, this becomes a refusal test.
     test('IncrementalEnmoSeries: accepted altered minute sums survive an '
         'identical sync', () {
       final a = [for (var i = 0; i < 90; i++) AccelSample(i * 1000.0, .3, -.4, 1)];
@@ -2937,6 +2939,7 @@ void main() {
       expect(((back.toJson()['bins'] as List)[0] as Map)['enmoSum'], 3.0);
     });
 
+    // If reader hardening ever refuses this altered state, this becomes a refusal test.
     test('IncrementalLombScargle: accepted altered spectral sums survive an '
         'identical sync', () {
       final t = [for (var i = 0; i < 40; i++) i * .8 + (i % 3) * .05];
