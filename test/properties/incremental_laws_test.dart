@@ -2902,6 +2902,57 @@ void main() {
       }
     });
 
+    // Accepted-checkpoint continuations. The reader accepts some checkpoints a
+    // writer never produces (a sum changed, still self-consistent); the state
+    // then goes on from exactly what was written. A sync that adds nothing must
+    // not quietly rebuild it from the series, so these hold the altered value
+    // through an identical sync.
+    Json viaText(Json j) => (jsonDecode(jsonEncode(j)) as Map).cast<String, dynamic>();
+
+    test('IncrementalHrvTime: an accepted two-beat checkpoint keeps its level '
+        'moments through an identical sync', () {
+      final live = IncrementalHrvTime()..sync([800.0, 900.0]);
+      final j = viaText(live.toJson());
+      expect(((j['levels'] as Map)['m2'] as num).toDouble(), 5000.0);
+      (j['levels'] as Map)['m2'] = 20000.0; // positive: the reader cannot tell
+      final back = IncrementalHrvTime.fromJson(viaText(j));
+      final out = back.sync([800.0, 900.0]);
+      expect(out.value!.sdnn, closeTo(math.sqrt(20000.0), 1e-9),
+          reason: 'the SDNN is the one the state holds, not a rebuilt 70.7');
+      expect(((back.toJson()['levels'] as Map)['m2'] as num).toDouble(), 20000.0);
+    });
+
+    test('IncrementalEnmoSeries: accepted altered minute sums survive an '
+        'identical sync', () {
+      final a = [for (var i = 0; i < 90; i++) AccelSample(i * 1000.0, .3, -.4, 1)];
+      final live = IncrementalEnmoSeries()..sync(a, gRef: 1);
+      final j = viaText(live.toJson());
+      final bin = (j['bins'] as List)[0] as Map;
+      final n = (bin['mags'] as List).length;
+      bin['enmoSum'] = 3.0;
+      final back = IncrementalEnmoSeries.fromJson(viaText(j));
+      final out = back.sync(a, gRef: 1);
+      expect(out.minutes.first.enmo, closeTo(3.0 / n, 1e-12),
+          reason: 'the minute reads the sum the checkpoint holds');
+      expect(((back.toJson()['bins'] as List)[0] as Map)['enmoSum'], 3.0);
+    });
+
+    test('IncrementalLombScargle: accepted altered spectral sums survive an '
+        'identical sync', () {
+      final t = [for (var i = 0; i < 40; i++) i * .8 + (i % 3) * .05];
+      final y = [for (var i = 0; i < 40; i++) 800.0 + 50 * (i % 5)];
+      final live = IncrementalLombScargle([.04, .1, .25]);
+      final batch = live.sync(t, y)!;
+      final j = viaText(live.toJson());
+      ((j['sums'] as List)[1] as List)[5] = 1234.5; // centred y * cos: unchecked
+      final back = IncrementalLombScargle.fromJson(viaText(j));
+      final out = back.sync(t, y)!;
+      expect(out.spectrum[0].psd, batch.spectrum[0].psd, reason: 'the other rows are untouched');
+      expect(out.spectrum[1].psd, isNot(closeTo(batch.spectrum[1].psd, 1e-6)),
+          reason: 'the altered row reads the sums the checkpoint holds');
+      expect(((back.toJson()['sums'] as List)[1] as List)[5], 1234.5);
+    });
+
     test('IncrementalMinuteMetrics: a detour through reordered minutes gives '
         'the checkpoint (by key) and the output of one sync', () {
       final ops = MinOps();

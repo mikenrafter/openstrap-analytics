@@ -2372,6 +2372,28 @@ void main() {
     );
   });
 
+  group('RC accepted-checkpoint continuation', () {
+    test('a checkpoint the reader accepts with a nonzero first difference goes '
+        'on from it: the second beat can be the recovery of the first', () {
+      // A writer stores d[0] = 0, but the reader takes any finite difference.
+      // Resumed from d[0] = -200, beat 1 (+200 against beat 0) is a recovery
+      // from beat 0's jump, and is demoted to normal; with d[0] = 0 it is not.
+      // (If the reader is ever hardened to refuse a nonzero d[0], this becomes
+      // the refusal test.)
+      List<BeatClass> classesAfter(double d0) {
+        final c = RrCorrector(windowBeats: 1)..fold([600]);
+        final j = (jsonDecode(jsonEncode(c.toJson())) as Map).cast<String, dynamic>();
+        (j['d'] as List)[0] = d0;
+        return RrCorrector.fromJson(j).fold([800, 800]).classes;
+      }
+
+      expect(classesAfter(-200.0),
+          [BeatClass.ectopic, BeatClass.normal, BeatClass.normal]);
+      expect(classesAfter(0.0), isNot(classesAfter(-200.0)),
+          reason: 'the stored difference is what decides it');
+    });
+  });
+
   group('the forced scenarios say what they claim', () {
     test('every abstention reason, every open-window label, a flag and the '
         'absent artifact fraction are met by hand-built series, and the stream '
