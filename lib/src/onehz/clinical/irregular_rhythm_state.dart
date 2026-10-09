@@ -119,8 +119,12 @@ class IrregularScreenState {
     s._valid = j['valid'] as int;
     s._flagged = j['flagged'] as int;
     if (s._lN != s._nKept) throw const FormatException('invalid lN');
-    if (s._dN > s._nIn) throw const FormatException('invalid dN');
-    if (s._total > s._nIn) throw const FormatException('invalid total');
+    if (s._dN > math.max(0, s._nKept - 1)) {
+      throw const FormatException('invalid dN');
+    }
+    if (s._total > s._nKept - s._bk.length) {
+      throw const FormatException('invalid total');
+    }
     if (s._bk.isNotEmpty && s._winStart == null) {
       throw const FormatException('invalid winStart');
     }

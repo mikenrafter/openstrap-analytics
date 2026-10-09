@@ -2529,6 +2529,23 @@ void main() {
   });
 
   group('FINDINGS (skipped: suspected gaps against the documented contract)', () {
+    test('IrregularScreenState.fromJson bounds differences and closed windows', () {
+      final nn = [for (var i = 0; i < 300; i++) 800.0 + (i % 7) * 11];
+      final t = [for (var i = 0; i < 300; i++) 10000.0 + i * 1000];
+      final st = IrregularScreenState()..fold(nn, t);
+      Map<String, dynamic> fresh() =>
+          (jsonDecode(jsonEncode(st.toJson())) as Map).cast<String, dynamic>();
+      final good = fresh();
+      expect((good['bk'] as List).length, 300);
+      expect(IrregularScreenState.fromJson(good).toJson(), good);
+
+      for (final (field, value) in [('dN', 300), ('total', 1)]) {
+        final bad = fresh()..[field] = value;
+        expect(() => IrregularScreenState.fromJson(bad), throwsFormatException,
+            reason: '$field: $value');
+      }
+    });
+
     test('IrregularScreenState.fromJson refuses a checkpoint whose parts '
         'contradict each other', () {
       final nn = [for (var i = 0; i < 300; i++) 800.0 + (i % 7) * 11];
