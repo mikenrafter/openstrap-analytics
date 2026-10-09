@@ -480,6 +480,20 @@ RrCorrectionResult _oracle(_Series s, bool wall, int cfg, int at) {
 
 void _expectOracleAt(_Run run, _Series s, bool wall, int cfg, int at, String why) {
   final want = _oracle(s, wall, cfg, at);
+  if (at <= _refCap) {
+    // The production batch is the oracle beyond the reference's budget; hold it
+    // to the reference wherever both run, so that swap stays justified.
+    final p = _corrCfgs[cfg];
+    expectSameCorrection(
+        correctRr(s.rr.sublist(0, at),
+            rrTsMs: wall ? s.ts.sublist(0, at) : null,
+            alpha: p.$1,
+            windowBeats: p.$2,
+            minThresholdMs: p.$3,
+            reanchorGapMs: p.$4),
+        want,
+        '$why: production batch vs frozen reference');
+  }
   final snap = run.c.snapshot();
   expect(snap.n, at, reason: 'snapshot.n $why');
   expect(snap.classifiedBeats, run.classes.length,
