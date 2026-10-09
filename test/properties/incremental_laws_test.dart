@@ -2346,7 +2346,9 @@ void _histL3((MomCase, Mut) arg) {
 /// least-recently-used results, each with an owned snapshot of the dependencies
 /// it was computed from; a hit needs the same key and DEEP-equal dependencies
 /// (NaN equals NaN) and no `full` request; a hit and a computation are counted;
-/// a calculation that throws changes nothing; results are copies.
+/// a calculation that throws changes nothing; results are copies; the
+/// dependencies are snapshotted before the calculation runs, so a calculation
+/// that mutates them does not change what the entry was computed from.
 class _CacheModel {
   _CacheModel(this.cap);
   final int cap;
@@ -2378,9 +2380,13 @@ class _CacheModel {
       hits++;
       return copy(e.$3);
     }
+    // The dependencies are snapshotted BEFORE the callback runs (the callback
+    // is user code and may mutate them): the entry holds what the caller passed
+    // in, and a later lookup with that value hits (CalculationCache.evaluate).
+    final snapshot = copy(deps);
     final v = calc(); // may throw: nothing changes
     if (at >= 0) entries.removeAt(at);
-    entries.add((key, copy(deps), copy(v)));
+    entries.add((key, snapshot, copy(v)));
     while (entries.length > cap) {
       entries.removeAt(0);
     }
@@ -2409,23 +2415,54 @@ Object? _dep(Rng g, int depth) {
   }
 }
 
+/// Dependencies a mutating calculation works on: nested lists and maps.
+Object? _mutableDeps(Object? pooled) => {
+      'p': _CacheModel.copy(pooled),
+      'q': [1, [2, 3], 'x'],
+      'r': {'s': [4, 5], 't': {'u': 6}},
+    };
+
+/// What a user calculation might do to the dependencies it was handed: change
+/// them at depth, grow and shrink them.
+void _mutateDeps(Object? d) {
+  final m = d as Map;
+  ((m['q'] as List)[1] as List)[0] = 99;
+  (m['q'] as List).add('added');
+  ((m['r'] as Map)['s'] as List).removeLast();
+  (((m['r'] as Map)['t']) as Map)['u'] = 7;
+  m['v'] = 1;
+}
+
 void _cacheModelLaw(List<int> c) {
-  // (steps, capacity, seed)
-  final steps = c[0], cap = c[1] + 1, seed = c[2];
+  // (steps, capacity, seed, how often the calculation mutates its dependencies)
+  final steps = c[0], cap = c[1] + 1, seed = c[2], mutMode = c[3];
   final g = Rng(seed * 31 + 7);
   final cache = CalculationCache(maxEntries: cap);
   final model = _CacheModel(cap);
-  final tag = 'cache steps=$steps cap=$cap seed=$seed';
+  final tag = 'cache steps=$steps cap=$cap seed=$seed mut=$mutMode';
   var made = 0;
+  // The calculations that actually ran, on each side: the cache runs the
+  // callback exactly when the model says it misses (or is told to recompute),
+  // failures included.
+  var cacheRuns = 0, modelRuns = 0, failures = 0;
   // A small pool of dependency values, so equal dependencies recur.
   final pool = [for (var i = 0; i < 4; i++) _dep(Rng(seed + i * 17), 2)];
-  for (var i = 0; i < steps; i++) {
-    final key = 'key${g.nextInt(cap + 2)}';
-    final deps = _CacheModel.copy(pool[g.nextInt(pool.length)]);
-    final full = g.nextBool(.15);
-    final throws = g.nextBool(.1);
-    final value = [made++, made % 3];
-    Object? calc() {
+
+  /// One evaluation on both sides, each with its own copy of the dependencies
+  /// and its own callback (so a mutation lands on its own copy).
+  void both(String why, String key, Object? deps, bool full, bool throws,
+      bool mutates, List<int> value) {
+    final depsC = _CacheModel.copy(deps), depsM = _CacheModel.copy(deps);
+    Object? calcC() {
+      cacheRuns++;
+      if (mutates) _mutateDeps(depsC);
+      if (throws) throw StateError('calculation failed');
+      return [...value];
+    }
+
+    Object? calcM() {
+      modelRuns++;
+      if (mutates) _mutateDeps(depsM);
       if (throws) throw StateError('calculation failed');
       return [...value];
     }
@@ -2433,24 +2470,49 @@ void _cacheModelLaw(List<int> c) {
     Object? got, want;
     Object? gotErr, wantErr;
     try {
-      got = cache.evaluate<Object?>(key, deps, calc, full: full);
+      got = cache.evaluate<Object?>(key, depsC, calcC, full: full);
     } catch (e) {
       gotErr = e;
+      failures++;
     }
     try {
-      want = model.evaluate(key, deps, calc, full);
+      want = model.evaluate(key, depsM, calcM, full);
     } catch (e) {
       wantErr = e;
     }
-    expect(gotErr.runtimeType, wantErr.runtimeType, reason: '$tag step $i: failures propagate');
-    expect(got, want, reason: '$tag step $i: result');
-    expect(cache.computations, model.computations, reason: '$tag step $i: computations');
-    expect(cache.hits, model.hits, reason: '$tag step $i: hits');
+    expect(gotErr.runtimeType, wantErr.runtimeType, reason: '$tag $why: failures propagate');
+    expect(got, want, reason: '$tag $why: result');
+    expect(cache.computations, model.computations, reason: '$tag $why: computations');
+    expect(cache.hits, model.hits, reason: '$tag $why: hits');
+    expect(cacheRuns, modelRuns, reason: '$tag $why: calculations that ran');
+    expect(cacheRuns, cache.computations + failures,
+        reason: '$tag $why: one run per computation or failure, none on a hit');
     // The result is the caller's: changing it changes no later hit.
     if (got is List && got.isNotEmpty) got[0] = -99;
     // The dependencies handed in are snapshotted: changing them afterwards
     // does not turn a later hit into a miss (or the reverse).
-    if (deps is List && deps.isNotEmpty) deps.add('mutated');
+    if (depsC is List && depsC.isNotEmpty) depsC.add('mutated');
+    if (depsM is List && depsM.isNotEmpty) depsM.add('mutated');
+  }
+
+  for (var i = 0; i < steps; i++) {
+    final key = 'key${g.nextInt(cap + 2)}';
+    final mutates = mutMode > 0 && g.nextBool(mutMode * .2);
+    final picked = pool[g.nextInt(pool.length)];
+    final deps = mutates ? _mutableDeps(picked) : picked;
+    final full = g.nextBool(.15);
+    final throws = g.nextBool(.1);
+    final value = [made++, made % 3];
+    both('step $i', key, deps, full, throws, mutates, value);
+    if (mutates) {
+      // The contract: the entry was snapshotted before the callback, so a
+      // lookup with the value passed in (not the mutated one) is the hit, and
+      // the mutated value is a different dependency.
+      both('step $i, original value again', key, deps, false, false, false, [-1, -1]);
+      final after = _mutableDeps(picked);
+      _mutateDeps(after);
+      both('step $i, mutated value', key, after, false, false, false, [-2, -2]);
+    }
   }
   // Size: never more than the capacity, each key held once.
   var held = 0;
@@ -2572,27 +2634,69 @@ void main() {
     _laws.law<List<int>>(
       'CalculationCache equals a model of bounded LRU results with deep-compared '
       'dependency snapshots: results, hits, computations, failures, capacity',
-      IntsGen([G.intIn(0, 80), G.intIn(0, 6), G.intIn(0, 1 << 12)]),
+      IntsGen([G.intIn(0, 80), G.intIn(0, 6), G.intIn(0, 1 << 12), G.intIn(0, 3)]),
       _cacheModelLaw,
       examples: [
-        [0, 0, 1],
-        [1, 0, 2],
-        [40, 0, 3], // capacity 1
-        [60, 2, 4], // capacity 3
-        [80, 6, 5], // capacity 7
-        [80, 1, 6],
+        [0, 0, 1, 0],
+        [1, 0, 2, 0],
+        [40, 0, 3, 0], // capacity 1
+        [60, 2, 4, 0], // capacity 3
+        [80, 6, 5, 0], // capacity 7
+        [80, 1, 6, 0],
+        // Calculations that mutate their dependencies: always (mode 5 is a
+        // certainty), often, now and then.
+        [1, 0, 7, 5], // one step, always: the smallest case
+        [30, 0, 8, 5], // capacity 1, always
+        [60, 3, 9, 3],
+        [80, 6, 10, 2],
       ],
       cases: 200,
       reach: Reach<List<int>>({
         'capacity 1': .05,
         'capacity 3 or more': .3,
         'many steps': .4,
+        'calculations that mutate their dependencies': .5,
       }, (c, bump) {
         if (c[1] == 0) bump('capacity 1');
         if (c[1] >= 2) bump('capacity 3 or more');
         if (c[0] >= 40) bump('many steps');
+        if (c[3] > 0 && c[0] > 0) bump('calculations that mutate their dependencies');
       }),
     );
+  });
+
+  test('CalculationCache snapshots the dependencies before the calculation runs, '
+      'so one that mutates them leaves the entry keyed on the original value', () {
+    // Written out, not from the model: the contract in evaluate() is "snapshot
+    // before calling user code, which may itself mutate dependencies".
+    Map<String, Object?> original() => {
+          'q': [1, [2, 3]],
+          'r': {'s': [4, 5]},
+        };
+    final cache = CalculationCache();
+    final deps = original();
+    var runs = 0;
+    expect(cache.evaluate<List<int>>('k', deps, () {
+      runs++;
+      ((deps['q'] as List)[1] as List)[0] = 99; // nested, in place
+      ((deps['r'] as Map)['s'] as List).add(6);
+      (deps['q'] as List).add('more');
+      return [runs];
+    }), [1]);
+    expect(deps['q'], [1, [99, 3], 'more'], reason: 'the callback did mutate them');
+    expect((runs, cache.computations, cache.hits), (1, 1, 0));
+    // The ORIGINAL value hits the entry computed from it: no new run.
+    expect(cache.evaluate<List<int>>('k', original(), () {
+      runs++;
+      return [-1];
+    }), [1], reason: 'the original value hits');
+    expect((runs, cache.computations, cache.hits), (1, 1, 1));
+    // The mutated value is a different dependency: a miss, the callback runs.
+    expect(cache.evaluate<List<int>>('k', deps, () {
+      runs++;
+      return [2];
+    }), [2], reason: 'the mutated value is a miss');
+    expect((runs, cache.computations, cache.hits), (2, 2, 1));
   });
 
   test('CalculationCache refuses a capacity under one entry', () {
