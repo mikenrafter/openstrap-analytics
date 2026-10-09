@@ -1080,15 +1080,19 @@ void _expectNumericallyZeroSd2(IrregularRhythm r, String why) {
 /// numerically zero SD2 (see [_sd2Degenerate]): the two sides may disagree on
 /// whether SD2 is zero. That exempts ONLY the SD2 presence and what hangs on
 /// it: SD2 and the ratio (both sides, when both report: each only has to be
-/// numerically zero), and, when exactly one side reports, the note, the flag
-/// and pNN, because the abstaining side has nothing to compare them with.
+/// numerically zero), and, when exactly one side reports, the note and the
+/// flag, because the abstaining side has nothing to compare them with.
 /// Everything else is still held: tier, inputs, every diagnostics field but the
 /// abstention reason, SD1 (against an independent value when only one side
-/// reports), the beat count, pNN and confidence (both when both report). When
+/// reports), the beat count, pNN and confidence (each against an independent
+/// value when only one side reports, so [pnnThresholdMs] and the screen's
+/// [artifactFraction] are passed along with [nn]). When
 /// exactly one side reports, the other must abstain with
 /// `noLongTermVariability` and the reported SD2 must be numerically zero.
 void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String why,
-    {List<double>? nn}) {
+    {List<double>? nn, double? pnnThresholdMs, double? artifactFraction}) {
+  assert(nn == null || (pnnThresholdMs != null && artifactFraction != null),
+      'the independent values need the pNN threshold and the artifact fraction');
   final g = got.metric, w = want.metric;
   final degenerate = nn != null && _sd2Degenerate(nn);
   final ambiguous = degenerate && g.present != w.present;
@@ -1115,9 +1119,14 @@ void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String w
     expect(v.nBeats, k.kept.length, reason: 'nBeats $why');
     expect(v.nBeats, rep.diagnostics.nnKept, reason: 'nBeats is the kept count $why');
     _close(v.sd1, _sd(k.diffs)! / math.sqrt2, 'sd1 against the independent value $why');
-    expect(v.pnnPct >= 0 && v.pnnPct <= 100, isTrue, reason: 'pnn in range $why');
-    expect(rep.metric.confidence >= 0.2 && rep.metric.confidence <= 0.9, isTrue,
-        reason: 'confidence in its clamp $why');
+    // pNN and confidence do not depend on SD2: held to their documented values.
+    final over = k.diffs.where((d) => d.abs() > pnnThresholdMs!).length;
+    expect(v.pnnPct, k.diffs.isEmpty ? 0.0 : 100.0 * over / k.diffs.length,
+        reason: 'pnn against the independent value $why');
+    _close(rep.metric.confidence,
+        (k.kept.length / 5000.0 * (1 - artifactFraction!)).clamp(0.2, 0.9),
+        'confidence against the independent value $why',
+        rel: 1e-12);
     return;
   }
   expect(g.present, w.present, reason: 'present $why');
@@ -1459,7 +1468,10 @@ void _scL1b(_NnCase c) {
     expect(_stext(st), before, reason: '$tag: evaluate reads, never writes');
     final want = _batchScreenOf(s.nn.sublist(0, tailEnd), s.t.sublist(0, tailEnd), cfg, ev);
     final why = '$tag seam $k at $at tail to $tailEnd';
-    _sameScreen(got, want, why, nn: s.nn.sublist(0, tailEnd));
+    _sameScreen(got, want, why,
+        nn: s.nn.sublist(0, tailEnd),
+        pnnThresholdMs: _scCfgs[cfg].$2,
+        artifactFraction: _evals[ev].$3);
     _expectEvidence(got, s.nn.sublist(0, tailEnd), s.t.sublist(0, tailEnd), cfg, why);
   });
 }
@@ -1785,7 +1797,10 @@ void _ipBody(_IpCase arg) {
         sustainedFraction: cs.$6,
         cleaning: RrCleaningCounts(
             raw: at, corrected: want.correctedCount, dropped: want.droppedCount));
-    _sameScreen(got, batch, why, nn: want.nn);
+    _sameScreen(got, batch, why,
+        nn: want.nn,
+        pnnThresholdMs: cs.$2,
+        artifactFraction: (1.0 - want.cleanFraction).clamp(0.0, 1.0));
     // L5, integrated: the corrector's counts are the screen's evidence.
     final dg = got.diagnostics;
     expect(dg.rrRaw, at, reason: 'rr_raw is every beat the corrector saw $why');
