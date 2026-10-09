@@ -67,6 +67,7 @@ import 'package:test/test.dart';
 
 import '../onehz/support/correct_rr_reference.dart';
 import '../onehz/support/rr_compare.dart';
+import '../support/fold_law_support.dart';
 import '../support/law_registry.dart';
 import '../support/property.dart';
 
@@ -244,30 +245,12 @@ Gen<_Case> _caseGen(int maxN) => G.pair(
           G.elements(const [0, 0, 0, 1, 2, 3, 4, 5])),
     );
 
-/// Chunk boundaries `[0, ...cuts, n]`. Cuts may repeat or sit on 0 / n, which
-/// makes empty chunks; half of them are placed on the edges of the corrector's
-/// windows (the beats where classes and output settle) and at the very start
-/// and end, the rest uniformly.
-List<int> _bounds(int n, int splits, int cutSeed) {
-  final r = Rng(cutSeed + 17);
-  const special = [0, 1, 2, 3, 44, 45, 46, 90, 91, 92, 93, 136, 137, 182, 183];
-  final cuts = <int>[];
-  for (var k = 0; k < splits; k++) {
-    final v = r.nextBool(.5)
-        ? (r.nextBool(.2) ? n - 1 + r.nextInt(2) : special[r.nextInt(special.length)])
-        : r.intIn(0, n);
-    cuts.add(v.clamp(0, n));
-  }
-  cuts.sort();
-  return [0, ...cuts, n];
-}
+const _windowEdges = [0, 1, 2, 3, 44, 45, 46, 90, 91, 92, 93, 136, 137, 182, 183];
 
-bool _hasEmptyChunk(List<int> b) {
-  for (var k = 0; k + 1 < b.length; k++) {
-    if (b[k + 1] == b[k]) return true;
-  }
-  return false;
-}
+/// Chunk boundaries, half of the cuts on the edges of the corrector's windows
+/// (the beats where classes and output settle).
+List<int> _bounds(int n, int splits, int cutSeed) =>
+    foldBounds(n, splits, cutSeed, special: _windowEdges);
 
 // ── folding ─────────────────────────────────────────────────────────────────
 
@@ -337,7 +320,7 @@ void _observeRr(_Case c, void Function(String) bump) {
   final b = _bounds(n, splits, cutSeed);
   if (b.length >= 4) bump('chunks: three or more');
   if (b.length >= 6) bump('chunks: five or more');
-  if (_hasEmptyChunk(b)) bump('an empty chunk');
+  if (hasEmptyChunk(b)) bump('an empty chunk');
   if (restart != 0 && b.length > 2) bump('a restore between chunks');
   if (b.any((x) => x == 91 || x == 92 || x == 45 || x == 46)) {
     bump('a cut on a window edge (45 / 46 / 91 / 92)');
@@ -459,9 +442,6 @@ RrCorrectionResult _oracle(_Series s, bool wall, int cfg, int at) {
           reanchorGapMs: p.$4);
 }
 
-/// The seams a law checks: the first, a middle one and the last.
-Set<int> _picks(int seams) => {0, seams ~/ 2, seams - 1}..removeWhere((k) => k < 0);
-
 void _expectOracleAt(_Run run, _Series s, bool wall, int cfg, int at, String why) {
   final want = _oracle(s, wall, cfg, at);
   final snap = run.c.snapshot();
@@ -492,7 +472,7 @@ void _l1bCorrector(_Case c) {
   final wall = mode == 0;
   final tag = _tag(c);
   final bounds = _bounds(n, splits, cutSeed);
-  final picks = _picks(bounds.length - 1);
+  final picks = pickSeams(bounds.length - 1);
   _drive(s, wall, cfg, bounds, restart, seam: (run, k, at) {
     if (picks.contains(k)) {
       _expectOracleAt(run, s, wall, cfg, at, '$tag seam $k at $at');
@@ -559,28 +539,12 @@ void _l2Corrector(_Case c) {
 
 // ── L3: mutated checkpoints ─────────────────────────────────────────────────
 
-/// What a mutated checkpoint is allowed to do.
-enum _Must {
-  /// Refused with a FormatException, nothing else.
-  refuse,
-
-  /// Refused, or accepted holding exactly what was written.
-  faithful,
-
-  /// Refused, or accepted as the ORIGINAL (the change is ignored).
-  ignored,
-}
-
-typedef _Mut = (int, int, int);
-
-Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
-
 /// Applies mutation [m] to a copy of [src] (a decoded checkpoint). Returns the
 /// mutated map and what it may do. The "must refuse" cases are the ones that
 /// make the checkpoint contradict itself or its type; they are chosen from what
 /// a reachable state can never look like, not from the reader's code.
-(Map<String, dynamic>, _Must) _mutateCorrector(Map<String, dynamic> src, _Mut m) {
-  final j = (_deepCopy(src) as Map).cast<String, dynamic>();
+(Map<String, dynamic>, Must) _mutateCorrector(Map<String, dynamic> src, Mut m) {
+  final j = (deepCopy(src) as Map).cast<String, dynamic>();
   final (kind, a, b) = m;
   final keys = j.keys.toList();
   List l(String k) => j[k] as List;
@@ -588,22 +552,22 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
     case 0:
       const versions = <Object?>[0, 2, 3, -1, 99, '1', null, true, 1 << 40, 'v1'];
       j['version'] = versions[a % versions.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 1:
       const types = <Object?>['IrregularScreenState', 'Other', null, '', 'rrcorrector', 1];
       j['type'] = types[a % types.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 2:
       // A key that every real checkpoint has, gone ('wall' may legally be null).
       final k = keys.where((k) => k != 'wall').toList()[a % (keys.length - 1)];
       j.remove(k);
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 3:
       // The wrong kind of value under a key.
       final k = keys.where((k) => k != 'wall').toList()[a % (keys.length - 1)];
       const junk = <Object?>['x', <String, Object?>{}, <Object?>[<Object?>[]]];
       j[k] = junk[b % junk.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 4:
       // The buffered arrays disagree with each other or with n - off.
       final k = const ['rr', 't', 'd'][a % 3];
@@ -621,7 +585,7 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
           arr.clear();
           if (j['n'] == j['off']) arr.add(1.0);
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 5:
       // The counters contradict their own order  off <= ce <= c2 <= c1 <= n.
       switch (a % 6) {
@@ -638,7 +602,7 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
         default:
           j['n'] = (j['n'] as int) - 1 - b % 3;
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 6:
       // The class buffer: wrong length, or a class that is not one.
       final f = l('fcls');
@@ -658,7 +622,7 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
             f.removeLast();
           }
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 7:
       // The carried state: more than two normals, a class that is not one.
       if (a.isEven) {
@@ -669,12 +633,12 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
       } else {
         j['lastFinal'] = const [5, -1, 99, 1 << 40][b % 4];
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 8:
       // Hostile sizes: the checkpoint says it holds far more than it does.
       const huge = <int>[1 << 40, 1 << 62, 0x7fffffffffffffff, -1];
       j[const ['n', 'off', 'c1', 'c2', 'ce'][a % 5]] = huge[b % huge.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 9:
       // One number changed: the reader cannot tell it from a legal checkpoint.
       switch (a % 9) {
@@ -697,17 +661,17 @@ Object? _deepCopy(Object? o) => jsonDecode(jsonEncode(o));
         default:
           j['wall'] = !(j['wall'] as bool? ?? false);
       }
-      return (j, _Must.faithful);
+      return (j, Must.faithful);
     default:
       // A key this version does not know.
       j['futureField${a % 3}'] = const [1, 'x', <Object?>[1]][b % 3];
-      return (j, _Must.ignored);
+      return (j, Must.ignored);
   }
 }
 
 String _checkpointOutcome(Map<String, dynamic> j) {
   try {
-    final c = RrCorrector.fromJson((_deepCopy(j) as Map).cast<String, dynamic>());
+    final c = RrCorrector.fromJson((deepCopy(j) as Map).cast<String, dynamic>());
     return 'accepted:${jsonEncode(c.toJson())}';
   } on FormatException {
     return 'refused';
@@ -716,36 +680,9 @@ String _checkpointOutcome(Map<String, dynamic> j) {
   }
 }
 
-void _expectMutationOutcome(String outcome, _Must must, String faithfulText,
-    String originalText, String tag) {
-  expect(outcome, isNot(startsWith('WRONG')), reason: '$tag: only FormatException');
-  switch (must) {
-    case _Must.refuse:
-      expect(outcome, 'refused', reason: '$tag: refused whole');
-    case _Must.faithful:
-      if (outcome != 'refused') {
-        expect(outcome, 'accepted:$faithfulText',
-            reason: '$tag: accepted means exactly what was written');
-      }
-    case _Must.ignored:
-      if (outcome != 'refused') {
-        expect(outcome, 'accepted:$originalText',
-            reason: '$tag: an unknown key is ignored, nothing else moves');
-      }
-  }
-}
+final Gen<Mut> _mutGen = mutGen(11);
 
-class _MutKindGen extends Gen<int> {
-  @override
-  int generate(Rng r, int size) => r.nextInt(11);
-  @override
-  Iterable<int> shrink(int v) => G.intIn(0, 10).shrink(v);
-}
-
-final Gen<_Mut> _mutGen =
-    G.triple(_MutKindGen(), G.intIn(0, 1 << 20), G.intIn(0, 1 << 20));
-
-void _l3Corrector((_Case, _Mut) arg) {
+void _l3Corrector((_Case, Mut) arg) {
   final (c, m) = arg;
   final (rec, plan) = c;
   final (flavour, n, seed, mode) = rec;
@@ -755,7 +692,7 @@ void _l3Corrector((_Case, _Mut) arg) {
   final run = _drive(s, mode == 0, cfg, [0, n], 0);
   final src = (jsonDecode(_text(run.c)) as Map).cast<String, dynamic>();
   final (bad, must) = _mutateCorrector(src, m);
-  _expectMutationOutcome(_checkpointOutcome(bad), must, jsonEncode(bad),
+  expectMutationOutcome(_checkpointOutcome(bad), must, jsonEncode(bad),
       jsonEncode(src), tag);
 }
 
@@ -1272,7 +1209,7 @@ void _observeNn(_NnCase c, void Function(String) bump) {
   if (cfg != 0) bump('config: not the default');
   final b = _nnBounds(c);
   if (b.length >= 4) bump('chunks: three or more');
-  if (_hasEmptyChunk(b)) bump('an empty chunk');
+  if (hasEmptyChunk(b)) bump('an empty chunk');
   if (restart != 0 && b.length > 2) bump('a restore between chunks');
   bump('evaluation: $ev');
 }
@@ -1391,7 +1328,7 @@ void _scL1b(_NnCase c) {
   final s = _nnSeries(f, n, seed, salt);
   final tag = _nnTag(c);
   final bounds = _nnBounds(c);
-  final picks = _picks(bounds.length - 1);
+  final picks = pickSeams(bounds.length - 1);
   _foldChunks(() => _newState(cfg), s, bounds, restart, (st, k, at) {
     if (!picks.contains(k)) return;
     // The tail is what a corrector would still hold provisional: some of the
@@ -1443,8 +1380,8 @@ void _scL2(_NnCase c) {
   expect(_projectScreen(back, n), _projectScreen(live, n), reason: tag);
 }
 
-(Map<String, dynamic>, _Must) _mutateScreen(Map<String, dynamic> src, _Mut m) {
-  final j = (_deepCopy(src) as Map).cast<String, dynamic>();
+(Map<String, dynamic>, Must) _mutateScreen(Map<String, dynamic> src, Mut m) {
+  final j = (deepCopy(src) as Map).cast<String, dynamic>();
   final (kind, a, b) = m;
   final keys = j.keys.toList();
   List l(String k) => j[k] as List;
@@ -1454,20 +1391,20 @@ void _scL2(_NnCase c) {
       // with counts it never kept; so is everything else but 2.
       const versions = <Object?>[0, 1, 3, -1, 99, '2', null, true, 1 << 40];
       j['version'] = versions[a % versions.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 1:
       const types = <Object?>['RrCorrector', 'Other', null, '', 'irregularscreenstate', 2];
       j['type'] = types[a % types.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 2:
       final k = keys.where((k) => k != 'winStart').toList()[a % (keys.length - 1)];
       j.remove(k);
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 3:
       final k = keys.where((k) => k != 'winStart').toList()[a % (keys.length - 1)];
       const junk = <Object?>['x', <String, Object?>{}, <Object?>[<Object?>[]]];
       j[k] = junk[b % junk.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 4:
       // The open window's beats and their neighbour flags disagree.
       if (b.isEven) {
@@ -1477,7 +1414,7 @@ void _scL2(_NnCase c) {
       } else {
         l('bk').removeLast();
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 5:
       // Counts that contradict each other: more kept than seen, more valid
       // windows than windows, more flagged than valid, more over than diffs.
@@ -1493,11 +1430,11 @@ void _scL2(_NnCase c) {
         default:
           j['nIn'] = (j['nKept'] as int) - 1;
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 6:
       // Negative counts.
       j[const ['nIn', 'nKept', 'dN', 'lN', 'over', 'flagged'][a % 6]] = -1 - b % 5;
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 7:
       // The neighbour flags are not flags. (Integers other than 0 / 1 are the
       // reader's one leniency, see the skipped finding below.)
@@ -1508,7 +1445,7 @@ void _scL2(_NnCase c) {
       } else {
         l('bkAdj')[b % l('bkAdj').length] = notFlags[a % notFlags.length];
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 8:
       // Hostile sizes, and parts that disagree in ways the reader does not
       // cross-check (the skipped FINDING below): refused, or exactly what was
@@ -1535,7 +1472,7 @@ void _scL2(_NnCase c) {
           l('bk').addAll(List<double>.filled(1 + b % 3, 800.0));
           l('bkAdj').addAll(List<int>.filled(1 + b % 3, 1));
       }
-      return (j, _Must.faithful);
+      return (j, Must.faithful);
     case 9:
       // One number changed: the reader cannot tell it from a legal checkpoint.
       switch (a % 8) {
@@ -1556,16 +1493,16 @@ void _scL2(_NnCase c) {
         default:
           if (l('bk').isNotEmpty) l('bk')[b % l('bk').length] = (l('bk')[b % l('bk').length] as num) + 1.0;
       }
-      return (j, _Must.faithful);
+      return (j, Must.faithful);
     default:
       j['futureField${a % 3}'] = const [1, 'x', <Object?>[1]][b % 3];
-      return (j, _Must.ignored);
+      return (j, Must.ignored);
   }
 }
 
 String _screenCheckpointOutcome(Map<String, dynamic> j) {
   try {
-    final s = IrregularScreenState.fromJson((_deepCopy(j) as Map).cast<String, dynamic>());
+    final s = IrregularScreenState.fromJson((deepCopy(j) as Map).cast<String, dynamic>());
     return 'accepted:${jsonEncode(s.toJson())}';
   } on FormatException {
     return 'refused';
@@ -1574,7 +1511,7 @@ String _screenCheckpointOutcome(Map<String, dynamic> j) {
   }
 }
 
-void _scL3((_NnCase, _Mut) arg) {
+void _scL3((_NnCase, Mut) arg) {
   final (c, m) = arg;
   final ((f, n, seed, salt), (cfg, _, _, _)) = c;
   final tag = '${_nnTag(c)} mutation=${m.$1 % 11}(${m.$2},${m.$3})';
@@ -1582,7 +1519,7 @@ void _scL3((_NnCase, _Mut) arg) {
   final st = _newState(cfg)..fold(s.nn, s.t);
   final src = (jsonDecode(_stext(st)) as Map).cast<String, dynamic>();
   final (bad, must) = _mutateScreen(src, m);
-  _expectMutationOutcome(_screenCheckpointOutcome(bad), must, jsonEncode(bad),
+  expectMutationOutcome(_screenCheckpointOutcome(bad), must, jsonEncode(bad),
       jsonEncode(src), tag);
 }
 
@@ -1698,7 +1635,7 @@ void _ipBody(_IpCase arg) {
   final wall = mode == 0;
   final tag = _ipTag(arg);
   final bounds = _bounds(n, splits, cutSeed);
-  final picks = _picks(bounds.length - 1);
+  final picks = pickSeams(bounds.length - 1);
   var corr = _newCorrector(cfg);
   var st = _newState(scr);
   for (var k = 0; k + 1 < bounds.length; k++) {
@@ -1836,27 +1773,27 @@ void _wL2(_WireCase c) {
   expect((jsonDecode(text) as Map)['windows'] == null, res.diagnostics.windows == null);
 }
 
-(Map<String, dynamic>, _Must) _mutateWire(Map<String, dynamic> src, _Mut m) {
-  final j = (_deepCopy(src) as Map).cast<String, dynamic>();
+(Map<String, dynamic>, Must) _mutateWire(Map<String, dynamic> src, Mut m) {
+  final j = (deepCopy(src) as Map).cast<String, dynamic>();
   final (kind, a, b) = m;
   Map sec(String k) => j[k] as Map;
   switch (kind % 8) {
     case 0:
       const versions = <Object?>[0, 2, 3, -1, 99, '1', null, true, 1 << 40];
       j['version'] = versions[a % versions.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 1:
       const names = <Object?>['unknown', '', 'tooFewBeats', 'TOO_FEW_BEATS', 3, <Object?>[]];
       j['abstain'] = names[a % names.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 2:
       j.remove(const ['beats', 'thresholds', 'version'][a % 3]);
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 3:
       final k = const ['beats', 'thresholds'][a % 2];
       const junk = <Object?>['x', <Object?>[], 1, null];
       j[k] = junk[b % junk.length];
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 4:
       // A field of the wrong kind inside a section.
       final keys = [...sec('beats').keys.where((k) => k == 'nn_in' || k == 'nn_kept')];
@@ -1866,7 +1803,7 @@ void _wL2(_WireCase c) {
       } else {
         sec('thresholds')[tk[b % tk.length]] = const ['x', null, <Object?>[]][a % 3];
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 5:
       // The open window named something that is not one.
       if (j['windows'] == null) {
@@ -1881,7 +1818,7 @@ void _wL2(_WireCase c) {
       } else {
         sec('windows')['open'] = const ['bogus', '', 'FLAGGED', 3, null][a % 5];
       }
-      return (j, _Must.refuse);
+      return (j, Must.refuse);
     case 6:
       // Numbers changed, or parts that disagree about the evidence: the wire
       // is evidence, not a state, and carries no cross-check (the skipped
@@ -1910,7 +1847,7 @@ void _wL2(_WireCase c) {
             ? null
             : (w['flagged'] as int) / (w['valid'] as int);
       }
-      return (j, _Must.faithful);
+      return (j, Must.faithful);
     default:
       if (a % 4 == 3 && j['windows'] != null) {
         // The derived figure is not read: whatever it says, the reader writes
@@ -1919,14 +1856,14 @@ void _wL2(_WireCase c) {
       } else {
         j['futureField${a % 3}'] = const [1, 'x', <Object?>[1]][b % 3];
       }
-      return (j, _Must.ignored);
+      return (j, Must.ignored);
   }
 }
 
 String _wireOutcome(Map<String, dynamic> j) {
   try {
     final d = IrregularDiagnostics.fromJson(
-        (_deepCopy(j) as Map).cast<String, dynamic>());
+        (deepCopy(j) as Map).cast<String, dynamic>());
     return 'accepted:${jsonEncode(d.toJson())}';
   } on FormatException {
     return 'refused';
@@ -1935,14 +1872,14 @@ String _wireOutcome(Map<String, dynamic> j) {
   }
 }
 
-void _wL3((_WireCase, _Mut) arg) {
+void _wL3((_WireCase, Mut) arg) {
   final (c, m) = arg;
   final tag = 'wire ${c.$1} cfg=${c.$2} eval=${c.$3} frac=${c.$4} '
       'mutation=${m.$1 % 8}(${m.$2},${m.$3})';
   final src = (jsonDecode(jsonEncode(_wireResult(c).diagnostics.toJson())) as Map)
       .cast<String, dynamic>();
   final (bad, must) = _mutateWire(src, m);
-  _expectMutationOutcome(_wireOutcome(bad), must, jsonEncode(bad), jsonEncode(src), tag);
+  expectMutationOutcome(_wireOutcome(bad), must, jsonEncode(bad), jsonEncode(src), tag);
 }
 
 /// The "absent, not zero" rules (0fc5768): cleaning counts are null when the
@@ -2037,7 +1974,7 @@ void main() {
       cases: 40,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
-    _laws.law<(_Case, _Mut)>(
+    _laws.law<(_Case, Mut)>(
       'L3 RrCorrector: a mutated checkpoint is refused whole or holds exactly '
       'what was written',
       G.pair(_caseGen(600), _mutGen),
@@ -2050,7 +1987,7 @@ void main() {
         for (var a = 0; a < 5; a++) for (var b = 0; b < 4; b++) (_forced[9], (8, a, b)),
       ],
       cases: 120,
-      reach: Reach<(_Case, _Mut)>({
+      reach: Reach<(_Case, Mut)>({
         for (var k = 0; k < 11; k++) 'kind: $k': .02,
         'a state with settled beats': .3,
         'an empty state': .008,
@@ -2115,7 +2052,7 @@ void main() {
       cases: 60,
       reach: Reach<_NnCase>(shares, _observeNn),
     );
-    _laws.law<(_NnCase, _Mut)>(
+    _laws.law<(_NnCase, Mut)>(
       'L3 IrregularScreenState: a version 1 or otherwise mutated checkpoint is '
       'refused whole or holds exactly what was written',
       G.pair(_nnCaseGen(600), _mutGen),
@@ -2126,7 +2063,7 @@ void main() {
         for (var a = 0; a < 9; a++) (_nnForced[10], (0, a, 0)),
       ],
       cases: 120,
-      reach: Reach<(_NnCase, _Mut)>({
+      reach: Reach<(_NnCase, Mut)>({
         for (var k = 0; k < 11; k++) 'kind: $k': .02,
         'a state with an open window': .3,
       }, (arg, bump) {
@@ -2262,7 +2199,7 @@ void main() {
       cases: 120,
       reach: reach,
     );
-    _laws.law<(_WireCase, _Mut)>(
+    _laws.law<(_WireCase, Mut)>(
       'W-L3 IrregularDiagnostics: another version, an unknown reason, a missing '
       'or malformed section is refused whole; changed numbers are held exactly',
       G.pair(_wireGen(), _mutGen),
@@ -2276,7 +2213,7 @@ void main() {
         for (var a = 0; a < 5; a++) (forcedWire[9], (5, a, 0)),
       ],
       cases: 120,
-      reach: Reach<(_WireCase, _Mut)>({
+      reach: Reach<(_WireCase, Mut)>({
         for (var k = 0; k < 8; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
     );
