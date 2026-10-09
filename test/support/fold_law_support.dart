@@ -34,7 +34,7 @@ bool hasEmptyChunk(List<int> b) {
   return false;
 }
 
-/// The seams a law checks against an expensive oracle: first, middle, last.
+/// The seams a law checks against an expensive reference or batch parity check: first, middle, last.
 Set<int> pickSeams(int seams) =>
     {0, seams ~/ 2, seams - 1}..removeWhere((k) => k < 0);
 

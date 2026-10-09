@@ -18,11 +18,18 @@
 //        checkpoint of the minute metrics lists its bills in the order the keys
 //        were first seen, so after a detour that REORDERS keys it is compared
 //        by key; chunking alone gives the same text.
-//   L1b  streamed vs batch: after every checked sync the output is what the
-//        independent batch function gives for the same series (`hrvTime`,
+//   L1b  streamed vs batch PARITY: after every checked sync the output is what
+//        the production batch function gives for the same series (`hrvTime`,
 //        `enmoSeries`, `lombScargle`, `banisterTrimp` / `strainScoreMetric` /
 //        `Calories`), counts and abstentions exact, numbers within
 //        max(1e-9, 1e-8 relative) (running sums against a two-pass batch).
+//        These batch functions are NOT independent oracles: they share helpers
+//        and constants with the incremental state (`hrvTime` is what the state
+//        delegates to at the refusal boundary, `kNnDiffAcf1Floor`, the Banister
+//        weight, the energy pricer, ...), so a fault in a shared helper passes
+//        this law. What it pins is that the streamed path agrees with the batch
+//        path; the shared helpers have their own tests. Only `RunningMoments`
+//        and `IntHistogram` are checked against references written here.
 //   L2   checkpoint round trip: `toJson` -> real JSON text -> `fromJson` ->
 //        `toJson` is the same text, and the restored state goes on exactly as
 //        the live one does (same outputs, same text).
@@ -49,7 +56,7 @@
 //
 // The laws describe the code at analytics 0fc57682. A failing law is first
 // checked against the module's contract; only a violation of the intended
-// contract is a bug, and a wrong oracle is fixed here, never in lib/.
+// contract is a bug, and a wrong expectation is fixed here, never in lib/.
 //
 // Replay a failure with the command in its report, e.g.
 //   PROPERTY_SEED=<s> PROPERTY_CASE=<n> TZ=UTC dart test \
@@ -57,6 +64,7 @@
 
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
@@ -123,8 +131,14 @@ abstract class Ops<In> {
     return jsonEncode(c);
   }
 
-  /// Whether the checkpoint text after a detour equals a fresh one's.
-  bool get detourExact => true;
+  /// Fails unless [got], the checkpoint after a detour (series replaced, items
+  /// dropped, a forced rebuild, other parameters) and the same series again, is
+  /// the checkpoint [want] of one sync. Exact text by default; a module whose
+  /// checkpoint is equal in MEANING but not in text after a detour (it is
+  /// keyed, and the order its entries were added in is not state) projects
+  /// first.
+  void sameState(Json got, Json want, String why) =>
+      expect(norm(got), norm(want), reason: why);
 
   /// Hand-written invariants of a reachable state that, broken, must be
   /// refused.
@@ -203,7 +217,7 @@ void _l1<In>(Ops<In> ops, Case c) {
   final tag = _tagOf(ops, c);
   final single = ops.fresh(x);
   final out1 = ops.sync(single, x);
-  final want = ops.norm(ops.toJson(single));
+  final want = ops.toJson(single);
   // Growing prefixes (the last one is the whole series), a save/restore after
   // some of them, and a detour before the whole series.
   var st = ops.fresh(x);
@@ -212,7 +226,7 @@ void _l1<In>(Ops<In> ops, Case c) {
     ops.sync(st, ops.prefix(x, bounds[k]));
     if ((restart >> (k % 7)) & 1 == 1) st = _restore(ops, st);
   }
-  if (detour != 0 && ops.detourExact) {
+  if (detour != 0) {
     switch (detour) {
       case 1:
         ops.sync(st, ops.edit(x, 0, cutSeed)); // one item replaced
@@ -229,8 +243,7 @@ void _l1<In>(Ops<In> ops, Case c) {
     st = _restore(ops, st);
   }
   final out2 = ops.sync(st, x);
-  expect(ops.norm(ops.toJson(st)), want,
-      reason: '$tag bounds=$bounds: the checkpoint text is the same');
+  ops.sameState(ops.toJson(st), want, '$tag bounds=$bounds: the checkpoint is the same');
   ops.sameOutput(out2, out1, '$tag: the output is the same');
 }
 
@@ -1169,10 +1182,11 @@ class LombOps extends Ops<LombIn> {
     return [for (final p in r.spectrum) '${p.freqHz}:${p.psd}'].join('|');
   }
 
-  /// The batch function on times shifted by the first one: the periodogram is
+  /// The production batch function on times shifted by the first one (a
+  /// parity check, not an independent oracle): the periodogram is
   /// shift-invariant, the shift is exact, and on raw epoch seconds the batch's
   /// own trigonometric arguments lose ~1e-6 relative (drift_test.dart).
-  LombScargle? _oracle(LombIn i) {
+  LombScargle? _batchOf(LombIn i) {
     final ok = i.t.length == i.y.length &&
         i.t.isNotEmpty &&
         i.t.every((x) => x.isFinite) &&
@@ -1183,7 +1197,7 @@ class LombOps extends Ops<LombIn> {
   }
 
   @override
-  void close(Object? out, LombIn i) => spectrumClose(out as LombScargle?, _oracle(i));
+  void close(Object? out, LombIn i) => spectrumClose(out as LombScargle?, _batchOf(i));
 
   @override
   void sameOutput(Object? a, Object? b, String why) {
@@ -1350,8 +1364,8 @@ const _hrBranches = [54.0, 95.0, 106.799999, 106.8, 130.0, 190.0, 0.0, double.na
 const _cadBranches = <double?>[null, 99.999, 100, 110, 120, 130, 160, 0, double.nan];
 
 /// (resting HR, max HR, sex, profile name, day minutes, quiet HRR). Anchors
-/// that gate the TRIMP off (null, equal, inverted, NaN), no profile (no
-/// energy), a short, a DST and a long day, and quiet-HRR gates.
+/// that gate the TRIMP off (null, equal, inverted, NaN), a negative resting HR,
+/// no profile (no energy), a short, a DST and a long day, and quiet-HRR gates.
 final List<(double?, double?, Sex, String?, int, double?)> _minCfgs = [
   (54, 186, Sex.male, 'male', 1440, .12),
   (65, 197, Sex.female, 'female', 900, .12),
@@ -1364,6 +1378,10 @@ final List<(double?, double?, Sex, String?, int, double?)> _minCfgs = [
   (54, 186, Sex.male, 'female', 1441, -0.1),
   (54, 186, Sex.male, 'male', 1500, double.nan),
   (54, 54, Sex.male, 'male', 1440, .12),
+  // A resting HR below zero is accepted (finite, below the max): an HR of 0
+  // (off-skin) is still billed nothing, where HR 0 would otherwise read as half
+  // the reserve. No profile, so the energy pricer does not take the anchors.
+  (-1, 1, Sex.male, null, 1440, .12),
 ];
 
 class MinIn {
@@ -1381,6 +1399,8 @@ class MinIn {
 
 String _metric(Metric<double> m) =>
     '${m.present}/${m.value}/${m.confidence}/${m.tier}/${m.note}/${m.inputs_used}';
+
+const _minTotals = ['trimpTotal', 'hrActiveTotal', 'walkingTotal'];
 
 class MinOps extends Ops<MinIn> {
   @override
@@ -1409,9 +1429,22 @@ class MinOps extends Ops<MinIn> {
     if (n < 2) return i;
     switch (kind % 3) {
       case 0:
-        final hr = [...i.hr];
-        hr[salt % n] += 29;
-        return MinIn(i.keys, hr, i.cad, i.cfg, i.series);
+        // One minute's HR replaced, or two minutes swapped as whole items, or
+        // every minute in the opposite order: the keys are then not ascending
+        // and every key keeps its value, so the bills are reused in a new order.
+        switch (salt ~/ 3 % 3) {
+          case 0:
+            final hr = [...i.hr];
+            hr[salt % n] += 29;
+            return MinIn(i.keys, hr, i.cad, i.cfg, i.series);
+          case 1:
+            final a = salt % n, b = (salt * 7 + 1) % n == a ? (a + 1) % n : (salt * 7 + 1) % n;
+            return _reorder(i, [
+              for (var k = 0; k < n; k++) k == a ? b : (k == b ? a : k)
+            ]);
+          default:
+            return _reorder(i, [for (var k = n - 1; k >= 0; k--) k]);
+        }
       case 1:
         final d = 1 + salt % (n - 1);
         return MinIn(i.keys.sublist(d), i.hr.sublist(d), i.cad?.sublist(d), i.cfg, i.series);
@@ -1421,6 +1454,14 @@ class MinOps extends Ops<MinIn> {
             i.cad?.sublist(0, n - d), i.cfg, i.series);
     }
   }
+
+  /// The same minutes, each with its own HR and cadence, in the order [from].
+  static MinIn _reorder(MinIn i, List<int> from) => MinIn(
+      [for (final k in from) i.keys[k]],
+      [for (final k in from) i.hr[k]],
+      i.cad == null ? null : [for (final k in from) i.cad![k]],
+      i.cfg,
+      i.series);
 
   @override
   MinIn? reconfigure(MinIn i, int alt) =>
@@ -1517,10 +1558,70 @@ class MinOps extends Ops<MinIn> {
   @override
   List<String> get counters => const ['processedMinutes'];
 
-  // After a detour the bills list may be in another order and the totals carry
-  // add/remove float residue: the checkpoint is equal in meaning, not in text.
+  // After a detour the bills may have been added in another order and the totals
+  // carry add/remove float residue: the checkpoint is equal in meaning, not in
+  // text. The projection is BY KEY: every field but the bills and the three
+  // totals as text (the counters aside), the bills as a map from minute key to
+  // bill (each bill exact: a bill is computed from one minute alone), the totals
+  // within the reader's own tolerance, 1e-9 relative.
   @override
-  bool get detourExact => false;
+  void sameState(Json got, Json want, String why) {
+    Map<String, dynamic> rest(Json j) => {
+          for (final e in j.entries)
+            if (!counters.contains(e.key) &&
+                e.key != 'bills' &&
+                !_minTotals.contains(e.key))
+              e.key: e.value
+        };
+    expect(jsonEncode(rest(got)), jsonEncode(rest(want)), reason: '$why: parameters');
+    Map<Object?, String> byKey(Json j) {
+      final out = <Object?, String>{};
+      for (final b in j['bills'] as List) {
+        final m = (b as Map).cast<String, dynamic>();
+        expect(out.containsKey(m['key']), isFalse, reason: '$why: a minute billed twice');
+        out[m['key']] = jsonEncode(m);
+      }
+      return out;
+    }
+
+    expect(byKey(got), byKey(want), reason: '$why: the bills, by minute key');
+    for (final t in _minTotals) {
+      final g = (got[t] as num).toDouble(), w = (want[t] as num).toDouble();
+      expect((g - w).abs() <= 1e-9 * math.max(1, w.abs()), isTrue,
+          reason: '$why: $t $g vs $w');
+    }
+  }
+
+  // The same series after a detour: its sums were added to and taken from, so
+  // the numbers are the batch's within the batch tolerance, not bit for bit;
+  // the minute series (a bill per minute, in key order) is exact.
+  @override
+  void sameOutput(Object? a, Object? b, String why) {
+    final x = a as MinuteMetrics, y = b as MinuteMetrics;
+    metricEnvelope(x.trimp, y.trimp);
+    numberClose(x.trimp.value, y.trimp.value, reason: '$why: trimp');
+    metricEnvelope(x.strain, y.strain);
+    numberClose(x.strain.value, y.strain.value, reason: '$why: strain');
+    expect(x.energy == null, y.energy == null, reason: '$why: energy present');
+    if (x.energy != null) {
+      numberClose(x.energy!.total, y.energy!.total, reason: '$why: total');
+      numberClose(x.energy!.active, y.energy!.active, reason: '$why: active');
+      numberClose(x.energy!.basal, y.energy!.basal, reason: '$why: basal');
+      numberClose(x.energy!.walking, y.energy!.walking, reason: '$why: walking');
+    }
+    expect(x.minutes == null, y.minutes == null, reason: '$why: series present');
+    if (x.minutes != null) {
+      final p = x.minutes!, q = y.minutes!;
+      expect([for (final m in p.minutes) [m.minute, m.source, m.abstained, m.basal, m.active, m.total, m.walking]],
+          [for (final m in q.minutes) [m.minute, m.source, m.abstained, m.basal, m.active, m.total, m.walking]],
+          reason: '$why: the minute series');
+      expect((p.coveredMinutes, p.abstainedMinutes, p.basalKcalPerMin),
+          (q.coveredMinutes, q.abstainedMinutes, q.basalKcalPerMin),
+          reason: '$why: series counts');
+      numberClose(p.active, q.active, reason: '$why: series active');
+      numberClose(p.walking, q.walking, reason: '$why: series walking');
+    }
+  }
 
   @override
   List<int> get special => const [0, 1, 2, 3, 29, 30, 31, 60, 61];
@@ -1676,6 +1777,8 @@ class MinOps extends Ops<MinIn> {
         [47, 5, 8, 1, 1], // long day, negative quiet gate
         [47, 5, 9, 1, 0], // NaN quiet gate
         [47, 5, 10, 1, 1], // anchors equal
+        [47, 5, 11, 1, 1], // resting HR below zero: HR 0 is off-skin, billed nothing
+        [47, 5, 11, 0, 0],
         [90, 914, 0, 1, 0],
       ];
 
@@ -1689,6 +1792,7 @@ class MinOps extends Ops<MinIn> {
     if (c.$1 == null || c.$2 == null || c.$1!.isNaN) bump('anchors: missing');
     if (c.$1 != null && c.$2 != null && c.$1!.isFinite && c.$1! >= c.$2!) bump('anchors: not ordered');
     if (c.$4 == null) bump('no profile');
+    if (c.$1 != null && c.$1! < 0) bump('anchors: negative resting HR');
     if (c.$3 == Sex.female) bump('sex: female');
     if (r[3] == 1) bump('cadence given');
     bump(r[4] == 1 ? 'minute series requested' : 'summary only');
@@ -1701,6 +1805,7 @@ class MinOps extends Ops<MinIn> {
         'series: an hour or more': .1,
         'anchors: missing': .1,
         'anchors: not ordered': .03,
+        'anchors: negative resting HR': .03,
         'no profile': .05,
         'sex: female': .05,
         'cadence given': .4,
@@ -1739,7 +1844,8 @@ List<double> _momValues(int flavour, int n, int seed) {
 }
 
 /// Mean and sample / population SD of [x] the stable way: about the first value,
-/// two passes. The oracle: independent of the Welford state under test, and
+/// two passes. A reference written here (unlike the batch functions the sync
+/// modules are compared with): independent of the Welford state under test, and
 /// accurate where a plain sum is not (a 1e9 offset).
 ({double? mean, double? sd, double? pop}) _twoPass(List<double> x) {
   final n = x.length;
@@ -2699,6 +2805,132 @@ void main() {
     expect((runs, cache.computations, cache.hits), (2, 2, 1));
   });
 
+  group('reader boundaries, written out at the edge (not drawn)', () {
+    double nextUp(double v) {
+      final bits = ByteData(8)..setFloat64(0, v);
+      final i = bits.getInt64(0);
+      bits.setInt64(0, v >= 0 ? i + 1 : i - 1);
+      return bits.getFloat64(0);
+    }
+
+    double nextDown(double v) => -nextUp(-v);
+
+    IncrementalMinuteMetrics readMin(Json j) =>
+        IncrementalMinuteMetrics.fromJson(
+            (jsonDecode(jsonEncode(j)) as Map).cast<String, dynamic>());
+
+    test('IncrementalMinuteMetrics: the trimp total may differ from its bills '
+        'by 1e-9 relative -- the edge itself and just inside are read, just '
+        'outside is refused', () {
+      // No bills: the sum is 0 and the tolerance is exactly 1e-9 * max(1, 0).
+      const tol = 1e-9;
+      Json empty(double total) => IncrementalMinuteMetrics().toJson()..['trimpTotal'] = total;
+      for (final sign in [1.0, -1.0]) {
+        for (final total in [sign * tol, sign * nextDown(tol), sign * 0.5 * tol]) {
+          expect(readMin(empty(total)).toJson()['trimpTotal'], total,
+              reason: 'a total $total from no bills is within the tolerance');
+        }
+        for (final total in [sign * nextUp(tol), sign * 2 * tol]) {
+          expect(() => readMin(empty(total)), throwsFormatException,
+              reason: 'a total $total from no bills is outside the tolerance');
+        }
+      }
+      // With bills the tolerance scales with the sum of their trimp.
+      final ops = MinOps();
+      final x = ops.expand([61, 3, 0, 1, 1]);
+      final live = ops.fresh(x) as IncrementalMinuteMetrics;
+      ops.sync(live, x);
+      final j = live.toJson();
+      var sum = 0.0;
+      for (final b in j['bills'] as List) {
+        sum += (b as Map)['trimp'] as num;
+      }
+      expect(sum, greaterThan(1), reason: 'the bills carry some load');
+      final scale = 1e-9 * math.max(1, sum);
+      expect(readMin(deepCopy(j) as Json..['trimpTotal'] = sum + 0.5 * scale)
+          .toJson()['trimpTotal'], sum + 0.5 * scale);
+      expect(readMin(deepCopy(j) as Json..['trimpTotal'] = sum - 0.5 * scale)
+          .toJson()['trimpTotal'], sum - 0.5 * scale);
+      expect(() => readMin(deepCopy(j) as Json..['trimpTotal'] = sum + 2 * scale),
+          throwsFormatException);
+      expect(() => readMin(deepCopy(j) as Json..['trimpTotal'] = sum - 2 * scale),
+          throwsFormatException);
+    });
+
+    test('IncrementalMinuteMetrics: an HR of 0 (off-skin) is billed nothing '
+        'whatever the anchors, a negative resting HR included', () {
+      final ops = MinOps();
+      // Config 11: resting HR -1, max HR 1; an HR of 0 would be half the reserve.
+      final x = MinIn([28000000, 28000001, 28000002], [0.0, 40.0, 0.0], null, 11, true);
+      final out = ops.sync(ops.fresh(x), x) as MinuteMetrics;
+      final batch = banisterTrimp(x.hr, restingHr: -1, maxHr: 1, sex: Sex.male);
+      expect(batch.present, isTrue);
+      numberClose(out.trimp.value, batch.value);
+      final only = MinIn([28000000], [0.0], null, 11, true);
+      final none = ops.sync(ops.fresh(only), only) as MinuteMetrics;
+      expect(none.trimp.value, 0, reason: 'only an off-skin minute: no load');
+    });
+
+    test('IncrementalLombScargle: a cos^2 or sin^2 sum of exactly zero is read, '
+        'a negative one is refused', () {
+      // The sums of squares are never negative; 0 is a legal value (the sums
+      // only have to add up to the number of points). A reader that refuses 0
+      // refuses a checkpoint the sums permit.
+      final ops = LombOps();
+      final x = ops.expand([40, 7, 0, 0, 0]);
+      final live = ops.fresh(x) as IncrementalLombScargle;
+      ops.sync(live, x);
+      final j = live.toJson();
+      final rows = j['sums'] as List;
+      final total = ((rows[2] as List)[2] as num) + ((rows[2] as List)[3] as num);
+      IncrementalLombScargle read(Json m) =>
+          IncrementalLombScargle.fromJson((jsonDecode(jsonEncode(m)) as Map).cast<String, dynamic>());
+      for (final which in [2, 3]) {
+        final ok = deepCopy(j) as Json;
+        final row = (ok['sums'] as List)[2] as List;
+        row[which] = 0.0;
+        row[5 - which] = total;
+        expect(read(ok).toJson()['sums'], ok['sums'],
+            reason: 'a zero in column $which is read as written');
+        // Negative, with the other column making up the total: only the sign is wrong.
+        final bad = deepCopy(j) as Json;
+        final badRow = (bad['sums'] as List)[2] as List;
+        badRow[which] = -1e-12;
+        badRow[5 - which] = total + 1e-12;
+        expect(() => read(bad), throwsFormatException,
+            reason: 'a negative sum in column $which is refused');
+      }
+    });
+
+    test('IncrementalMinuteMetrics: a detour through reordered minutes gives '
+        'the checkpoint (by key) and the output of one sync', () {
+      final ops = MinOps();
+      for (final r in [
+        [61, 3, 0, 1, 1],
+        [47, 5, 1, 0, 0],
+        [31, 1, 0, 1, 1],
+        [9, 4, 6, 1, 1],
+      ]) {
+        final x = ops.expand(r);
+        final single = ops.fresh(x) as IncrementalMinuteMetrics;
+        final want = ops.sync(single, x);
+        for (var salt = 3; salt < 9; salt++) {
+          // 3..5 swap two whole minutes, 6..8 put them all in reverse.
+          final other = ops.edit(x, 0, salt);
+          expect(other.keys.toSet(), x.keys.toSet(), reason: 'the same minutes $r $salt');
+          expect(other.keys, isNot(x.keys), reason: 'in another order $r $salt');
+          final st = ops.fresh(x) as IncrementalMinuteMetrics;
+          ops.sync(st, x);
+          ops.close(ops.sync(st, other), other);
+          final back = _restore(ops, st);
+          final got = ops.sync(back, x);
+          ops.sameState(ops.toJson(back), ops.toJson(single), 'reorder $r $salt');
+          ops.sameOutput(got, want, 'reorder $r $salt');
+        }
+      }
+    });
+  });
+
   test('CalculationCache refuses a capacity under one entry', () {
     for (final bad in [0, -1, -100]) {
       expect(() => CalculationCache(maxEntries: bad), throwsArgumentError,
@@ -2805,7 +3037,7 @@ void main() {
       final ops = MinOps();
       var empty = false, missing = false, inverted = false, nan = false;
       var noProfile = false, shortDay = false, dst = false, longDay = false;
-      var series = false, summary = false, energy = false;
+      var series = false, summary = false, energy = false, negative = false;
       for (final r in ops.forced) {
         final x = ops.expand(r);
         final out = ops.sync(ops.fresh(x), x) as MinuteMetrics;
@@ -2821,8 +3053,9 @@ void main() {
         if (x.series) series = true;
         if (!x.series) summary = true;
         if (out.energy != null) energy = true;
+        if (c.$1 != null && c.$1! < 0 && out.trimp.present) negative = true;
       }
-      expect([empty, missing, inverted, nan, noProfile, shortDay, dst, longDay, series, summary, energy],
+      expect([empty, missing, inverted, nan, noProfile, shortDay, dst, longDay, series, summary, energy, negative],
           everyElement(isTrue));
     });
 
