@@ -187,6 +187,18 @@ class RrCorrector {
     c._dropped = j['dropped'] as int;
     c._corrected = j['corrected'] as int;
     c._lastNormals.addAll(doubles('lastNormals'));
+    if (c._n > 0 && c._wall == null) {
+      throw const FormatException('invalid wall');
+    }
+    if (c._dropped < 0 || c._dropped > c._n) {
+      throw const FormatException('invalid dropped');
+    }
+    if (c._corrected < 0 || c._corrected > c._n) {
+      throw const FormatException('invalid corrected');
+    }
+    if (c._normalFinal < 0 || c._normalFinal > c._n) {
+      throw const FormatException('invalid normalFinal');
+    }
     final buffered = c._n - c._off;
     final ok = c._off >= 0 &&
         buffered >= 0 &&

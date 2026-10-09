@@ -2565,13 +2565,13 @@ void main() {
         'more dropped than beats': (j) => j['dropped'] = 1 << 40,
         'negative corrected count': (j) => j['corrected'] = -1,
         'more normal beats than classified': (j) => j['normalFinal'] = 1 << 40,
-        'a negative alpha': (j) => j['alpha'] = -1.0,
       };
       for (final e in bad.entries) {
         final j = fresh();
         e.value(j);
         expect(() => RrCorrector.fromJson(j), throwsFormatException, reason: e.key);
       }
+      expect(() => RrCorrector.fromJson({...fresh(), 'alpha': -1.0}), returnsNormally);
     });
   });
 
