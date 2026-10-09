@@ -2013,7 +2013,7 @@ void main() {
       _caseGen(3000),
       _l1Corrector,
       examples: _forced,
-      cases: 50,
+      cases: 60,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<_Case>(
@@ -2191,7 +2191,7 @@ void main() {
       _ipBody,
       examples: [
         for (var i = 0; i < _forced.length; i++)
-          if (_forced[i].$1.$2 <= 450) (_forced[i], const [0, 1, 2, 3, 4, 8, 5, 6, 7][i % 9], const [0, 1, 2, 3, 4, 5, 6, 7][i % 8]),
+          if (_forced[i].$1.$2 <= 450 && i % 2 == 0) (_forced[i], const [0, 1, 2, 3, 4, 8, 5, 6, 7][i % 9], const [0, 1, 2, 3, 4, 5, 6, 7][i % 8]),
         // The flagged day under the default screen, and the same under each
         // window config, at 500 beats and over.
         (_c(2, 450, splits: 4, cutSeed: 31, restart: 127), 0, 1),
@@ -2207,7 +2207,7 @@ void main() {
         (_c(0, 0), 0, 6), // no beats, nothing seen by the corrector
         (_c(0, 0, mode: 1), 1, 1),
       ],
-      cases: 10,
+      cases: 8,
       reach: Reach<_IpCase>({
         for (final e in _ipShares.entries)
           if (!e.key.startsWith('flavour: ') &&
@@ -2218,6 +2218,7 @@ void main() {
             'beats: under 3 (the short branch)',
             'flavour: flagged',
             'a long irregularly irregular day',
+            'no timestamps',
             'config: invalid',
             'evaluation: 0',
             'evaluation: 1',

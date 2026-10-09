@@ -78,7 +78,11 @@ class LawSet {
         examples: examples,
         cases: cases,
         genVersion: genVersion,
-        budget: budget,
+        // The spec's cap is 2 s per property, measured serially on the dev
+        // desktop (the slowest here is ~0.7 s). The in-test guard that fails a
+        // runaway has 2.5x headroom on top, so a suite running 12 test files at
+        // once does not trip it; PROPERTY_BUDGET_MS tightens it.
+        budget: budget ?? const Duration(seconds: 5),
         skip: skip);
   }
 
