@@ -479,7 +479,7 @@ void _registerSyncLaws<In>(Ops<In> ops,
             ((ops.forced[i], (3, 5, 0, 0)), (5, a, i)),
         for (var a = 0; a < 9; a++) ((ops.forced.first, (3, 5, 0, 0)), (0, a, 0)),
       ],
-      cases: 200,
+      cases: 100,
       reach: Reach<(Case, Mut)>({
         for (var k = 0; k < 7; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 7}')),

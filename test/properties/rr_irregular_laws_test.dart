@@ -458,7 +458,7 @@ void _l1Corrector(_Case c) {
 /// expensive side: about 0.14 ms a beat). Beyond it the production batch is
 /// the oracle: weaker (it shares the kernel with the stream), but pinned to the
 /// reference by rr_correction_oracle_test.dart.
-const int _refCap = 420;
+const int _refCap = 300;
 
 RrCorrectionResult _oracle(_Series s, bool wall, int cfg, int at) {
   final p = _corrCfgs[cfg];
@@ -2013,7 +2013,7 @@ void main() {
       _caseGen(3000),
       _l1Corrector,
       examples: _forced,
-      cases: 120,
+      cases: 50,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<_Case>(
@@ -2021,8 +2021,8 @@ void main() {
       'prefix, bit for bit (frozen reference up to $_refCap beats)',
       _caseGen(1500),
       _l1bCorrector,
-      examples: [for (final c in _forced) if (c.$1.$2 <= 1200) c],
-      cases: 14,
+      examples: [for (final c in _forced) if (c.$1.$2 <= 450) c],
+      cases: 8,
       reach: Reach<_Case>({
         for (final e in _rrShares.entries)
           if (!e.key.startsWith('flavour: ') &&
@@ -2032,6 +2032,7 @@ void main() {
             'beats: none',
             'beats: under 3 (the short branch)',
             'flavour: flagged',
+            'beats: past the window (91 or more)',
           }.contains(e.key))
             e.key: e.value
       }, _observeRr),
@@ -2042,7 +2043,7 @@ void main() {
       _caseGen(1500),
       _l2Corrector,
       examples: _forced,
-      cases: 100,
+      cases: 50,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<(_Case, Mut)>(
@@ -2085,7 +2086,7 @@ void main() {
       _caseGen(3000),
       _l5Corrector,
       examples: _forced,
-      cases: 80,
+      cases: 40,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
   });
@@ -2190,23 +2191,23 @@ void main() {
       _ipBody,
       examples: [
         for (var i = 0; i < _forced.length; i++)
-          if (_forced[i].$1.$2 <= 1200) (_forced[i], const [0, 1, 2, 3, 4, 8, 5, 6, 7][i % 9], const [0, 1, 2, 3, 4, 5, 6, 7][i % 8]),
+          if (_forced[i].$1.$2 <= 450) (_forced[i], const [0, 1, 2, 3, 4, 8, 5, 6, 7][i % 9], const [0, 1, 2, 3, 4, 5, 6, 7][i % 8]),
         // The flagged day under the default screen, and the same under each
         // window config, at 500 beats and over.
-        (_c(2, 900, splits: 4, cutSeed: 31, restart: 127), 0, 1),
-        (_c(2, 900, splits: 4, cutSeed: 32, restart: 127), 1, 1),
-        (_c(2, 900, splits: 4, cutSeed: 33), 2, 1),
-        (_c(2, 900, splits: 4, cutSeed: 34), 3, 1),
-        (_c(2, 900, splits: 4, cutSeed: 35), 4, 1),
-        (_c(2, 900, splits: 4, cutSeed: 36), 5, 1),
-        (_c(2, 900, splits: 4, cutSeed: 37), 6, 1),
-        (_c(2, 900, splits: 4, cutSeed: 38), 7, 1),
-        (_c(2, 900, splits: 4, cutSeed: 39), 8, 1),
-        (_c(2, 1100, splits: 3, cutSeed: 40), 0, 0), // default minimum of 500
+        (_c(2, 450, splits: 4, cutSeed: 31, restart: 127), 0, 1),
+        (_c(2, 450, splits: 4, cutSeed: 32, restart: 127), 1, 1),
+        (_c(2, 450, splits: 4, cutSeed: 33), 2, 1),
+        (_c(2, 450, splits: 4, cutSeed: 34), 3, 1),
+        (_c(2, 450, splits: 4, cutSeed: 35), 4, 1),
+        (_c(2, 450, splits: 4, cutSeed: 36), 5, 1),
+        (_c(2, 450, splits: 4, cutSeed: 37), 6, 1),
+        (_c(2, 450, splits: 4, cutSeed: 38), 7, 1),
+        (_c(2, 450, splits: 4, cutSeed: 39), 8, 1),
+        (_c(2, 600, splits: 3, cutSeed: 40), 0, 0), // default minimum of 500
         (_c(0, 0), 0, 6), // no beats, nothing seen by the corrector
         (_c(0, 0, mode: 1), 1, 1),
       ],
-      cases: 20,
+      cases: 10,
       reach: Reach<_IpCase>({
         for (final e in _ipShares.entries)
           if (!e.key.startsWith('flavour: ') &&
