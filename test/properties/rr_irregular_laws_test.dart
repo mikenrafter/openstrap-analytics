@@ -84,8 +84,9 @@ const _flavours = [
   'artefact heavy', // many artefacts + one run of 120 (longer than the window)
   'flat', // constant RR: QD = 0, massive ties
   'outliers', // flat, with an outlier at the start, middle and end
+  'edge gaps', // dropouts of exactly, one under and one over each re-anchor gap
 ];
-const int _nFlavours = 8;
+const int _nFlavours = 9;
 
 /// 2025-10-09 08:53:20 UTC in ms: a whole second, as production stamps are.
 const double _t0 = 1760000000000;
@@ -99,6 +100,9 @@ const List<(double, int, double, double)> _corrCfgs = [
   (6.5, 91, 30, 400),
   (5.2, 4, 0, 1000),
   (5.2, 90, 100, 5000),
+  (5.2, 1, 100, 1000), // a window of one beat: no look-ahead at all
+  (5.2, 2, 100, 1000),
+  (5.2, 3, 30, 400),
 ];
 
 RrCorrector _newCorrector(int cfg) {
@@ -131,7 +135,7 @@ _Series _expandSeries(int flavour, int n, int seed) {
     clock += e;
     rr.add(e);
     // End-of-beat time quantised to whole seconds (rec_ts * 1000).
-    ts.add((clock / 1000).floorToDouble() * 1000);
+    ts.add(flavour == 8 ? clock : (clock / 1000).floorToDouble() * 1000);
   }
 
   var longRun = false;
@@ -178,6 +182,15 @@ _Series _expandSeries(int flavour, int n, int seed) {
         emit(800);
       case 7:
         emit(i == 0 || i == n ~/ 2 || i == n - 1 ? 1300 : 800);
+      case 8:
+        // The wall-clock step exceeds the beat by exactly the re-anchor gap of
+        // one of the configs (400, 1000, 5000 ms), one ms under it, one over.
+        emit(v);
+        if (i % 12 == 11) {
+          const gaps = [400.0, 399.0, 401.0, 1000.0, 999.0, 1001.0, 5000.0, 4999.0, 5001.0];
+          clock += gaps[(i ~/ 12) % gaps.length];
+          ts[ts.length - 1] = clock; // (exact milliseconds, not whole seconds)
+        }
       default:
         emit(v);
     }
@@ -242,7 +255,7 @@ class _CutSeedGen extends Gen<int> {
 Gen<_Case> _caseGen(int maxN) => G.pair(
       G.quad(_FlavourGen(), _NGen(maxN), G.intIn(0, 1 << 16), G.elements(const [0, 0, 0, 1])),
       G.quad(G.intIn(0, 6), _CutSeedGen(), G.intIn(0, 127),
-          G.elements(const [0, 0, 0, 1, 2, 3, 4, 5])),
+          G.elements(const [0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8])),
     );
 
 const _windowEdges = [0, 1, 2, 3, 44, 45, 46, 90, 91, 92, 93, 136, 137, 182, 183];
@@ -336,6 +349,7 @@ const Map<String, double> _rrShares = {
   'flavour: artefact heavy': .03,
   'flavour: flat': .03,
   'flavour: outliers': .03,
+  'flavour: edge gaps': .02,
   'beats: none': .01,
   'beats: under 3 (the short branch)': .015,
   'beats: inside the window (3 to 90)': .1,
@@ -387,6 +401,12 @@ final List<_Case> _forced = [
   _c(1, 300, splits: 6, cutSeed: 17, cfg: 3, mode: 1),
   _c(1, 300, splits: 6, cutSeed: 18, cfg: 4, restart: 127), // window of 4 beats
   _c(5, 300, splits: 6, cutSeed: 19, cfg: 5), // an even window of 90
+  _c(8, 300, splits: 5, cutSeed: 22, restart: 127), // dropouts exactly at the gap
+  _c(8, 300, splits: 5, cutSeed: 23, cfg: 3, restart: 85), // gap 400
+  _c(8, 300, splits: 5, cutSeed: 24, cfg: 5, restart: 127), // gap 5000
+  _c(1, 200, splits: 6, cutSeed: 25, cfg: 6, restart: 127), // a window of one beat
+  _c(5, 200, splits: 6, cutSeed: 26, cfg: 7), // two beats
+  _c(1, 200, splits: 6, cutSeed: 27, cfg: 8, restart: 127), // three beats
   _c(1, 1200, splits: 6, cutSeed: 20, restart: 127), // past 1000 beats
   _c(1, 3000, splits: 6, cutSeed: 21, restart: 127), // the cap
 ];
@@ -767,8 +787,14 @@ void _l4Corrector(_Case c) {
 
 // ── L5: conservation ────────────────────────────────────────────────────────
 
-void _checkConserved(RrSnapshot snap, _Run run, String why) {
+void _checkConserved(RrSnapshot snap, _Run run, int cfg, String why) {
   final n = snap.n;
+  // The class of a beat is final once the window two thresholds deep (2h beats
+  // each side) is in the data (header of rr_correction_stream.dart); under 3
+  // beats nothing is.
+  final h = _corrCfgs[cfg].$2 ~/ 2;
+  expect(snap.classifiedBeats, n < 3 ? 0 : math.max(0, n - 2 * h),
+      reason: 'classes settle exactly 2h beats behind the newest $why');
   final nnTotal = run.nn.length + snap.tailNn.length;
   expect(nnTotal, n - snap.droppedCount,
       reason: 'nn_in == rr_raw - dropped $why');
@@ -806,7 +832,7 @@ void _l5Corrector(_Case c) {
   final tag = _tag(c);
   final bounds = _bounds(n, splits, cutSeed);
   _drive(s, mode == 0, cfg, bounds, restart, seam: (run, k, at) {
-    _checkConserved(run.c.snapshot(), run, '$tag seam $k at $at');
+    _checkConserved(run.c.snapshot(), run, cfg, '$tag seam $k at $at');
   });
 }
 
