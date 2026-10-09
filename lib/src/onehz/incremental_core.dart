@@ -100,6 +100,8 @@ class RunningMoments {
 /// Only for data that really is integral. Values that are nearly all distinct
 /// (accelerometer magnitudes) gain nothing: the list is as long as the data.
 class IntHistogram {
+  static const _maxInt64 = 0x7fffffffffffffff;
+
   List<int> _values = [];
   List<int> _counts = [];
   int _count = 0;
@@ -117,6 +119,9 @@ class IntHistogram {
       final v = values[i], c = counts[i];
       if (v is! int || c is! int || c < 1 || (i > 0 && v <= values[i - 1])) {
         throw const FormatException('Invalid histogram bins');
+      }
+      if (result._count > _maxInt64 - c) {
+        throw const FormatException('Invalid histogram counts');
       }
       result._values.add(v);
       result._counts.add(c);
@@ -149,11 +154,15 @@ class IntHistogram {
   }
 
   /// Adds [times] copies of [value], which must be a finite whole number.
+  /// Throws [StateError] if the total count would overflow int64.
   void add(num value, [int times = 1]) {
     if (!value.isFinite || value != value.truncate()) {
       throw ArgumentError.value(value, 'value', 'Must be a whole number');
     }
     if (times < 1) throw ArgumentError.value(times, 'times', 'Must be positive');
+    if (_count > _maxInt64 - times) {
+      throw StateError('Histogram count would overflow int64');
+    }
     final v = value.toInt();
     final at = _find(v);
     if (at >= 0) {
@@ -179,6 +188,9 @@ class IntHistogram {
   }
 
   void merge(IntHistogram other) {
+    if (_count > _maxInt64 - other._count) {
+      throw StateError('Histogram count would overflow int64');
+    }
     final values = List.of(other._values), counts = List.of(other._counts);
     for (var i = 0; i < values.length; i++) {
       add(values[i], counts[i]);
