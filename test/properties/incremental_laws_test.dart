@@ -2595,6 +2595,15 @@ void main() {
     );
   });
 
+  test('CalculationCache refuses a capacity under one entry', () {
+    for (final bad in [0, -1, -100]) {
+      expect(() => CalculationCache(maxEntries: bad), throwsArgumentError,
+          reason: 'maxEntries: $bad');
+    }
+    expect(CalculationCache(maxEntries: 1).maxEntries, 1);
+    expect(CalculationCache().maxEntries, 128);
+  });
+
   group('FINDINGS (skipped: suspected gaps against the documented contract)', () {
     test('IntHistogram.fromJson refuses bin counts whose total does not fit an '
         'int', () {
