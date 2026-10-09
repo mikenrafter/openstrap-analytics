@@ -67,7 +67,14 @@ class LawSet {
       final r = runProperty<T>(
         name: name,
         gen: gen,
-        config: PropertyConfig(cases: cases, budget: const Duration(seconds: 60)),
+        config: PropertyConfig(
+            cases: cases,
+            // A generous guard, but PROPERTY_BUDGET_MS (the serial acceptance
+            // run) is the hard limit here too: drawing a law's cases is cheap.
+            budget: Duration(
+                milliseconds: int.tryParse(
+                        Platform.environment['PROPERTY_BUDGET_MS'] ?? '') ??
+                    60000)),
         body: (v) => reach.observe(v, (k) => got[k] = (got[k] ?? 0) + 1),
         genVersion: genVersion,
       );
@@ -79,9 +86,12 @@ class LawSet {
         cases: cases,
         genVersion: genVersion,
         // The spec's cap is 2 s per property, measured serially on the dev
-        // desktop (the slowest here is ~0.7 s). The in-test guard that fails a
-        // runaway has 2.5x headroom on top, so a suite running 12 test files at
-        // once does not trip it; PROPERTY_BUDGET_MS tightens it.
+        // desktop. The in-test guard that fails a runaway has 2.5x headroom on
+        // top, so a suite running 12 test files at once does not trip it.
+        // PROPERTY_BUDGET_MS replaces it as the HARD limit (see
+        // PropertyConfig.fromEnvironment): the acceptance run is
+        //   PROPERTY_BUDGET_MS=2000 dart test -j 1 test/properties/
+        // and any property over 2 s there fails the run.
         budget: budget ?? const Duration(seconds: 5),
         skip: skip);
   }

@@ -619,6 +619,29 @@ void main() {
   });
 
   group('wall budget', () {
+    test('PROPERTY_BUDGET_MS is the hard limit over a property\'s looser default',
+        () {
+      // A law registers a 5 s in-test guard (headroom for a loaded parallel
+      // suite); the serial acceptance run sets PROPERTY_BUDGET_MS=2000 and
+      // that must be what fails a property, not the 5 s default.
+      final c = PropertyConfig.fromEnvironment(
+        const {'PROPERTY_BUDGET_MS': '2000'},
+        defaultBudget: const Duration(seconds: 5),
+      );
+      expect(c.budget, const Duration(milliseconds: 2000));
+      var ticks = 0;
+      final r = runProperty<int>(
+        name: 'serial acceptance',
+        gen: G.intIn(0, 9),
+        body: (_) {},
+        config: c,
+        // 1 s per reading: over 2 s on the third, well inside the 5 s default.
+        elapsed: () => Duration(seconds: ticks++),
+      );
+      expect(r.failure!.kind, FailureKind.budget);
+      expect(r.failure!.report, contains('2000 ms'));
+    });
+
     test('a property over its budget fails, naming budget and cases run', () {
       var ticks = 0;
       final r = runProperty<int>(
