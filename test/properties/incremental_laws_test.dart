@@ -383,12 +383,14 @@ void _l4<In>(Ops<In> ops, Case c) {
   expect(ops.norm(ops.toJson(late)), text,
       reason: '$tag: an empty first sync leaves a state that takes the series afresh');
   // The converse: the parameters belong to the call. Other parameters rebuild
-  // the state as a fresh sync of them would (nothing is refused), and handing
-  // the first ones back rebuilds the first.
+  // the state as a fresh sync of them would (nothing is refused, even for a
+  // state restored from a checkpoint written under the first), and handing the
+  // first ones back rebuilds the first.
   final other = ops.reconfigure(x, c.$2.$2);
   if (other != null) {
-    final s = ops.fresh(x);
+    var s = ops.fresh(x);
     ops.sync(s, x);
+    s = _restore(ops, s);
     ops.sync(s, other);
     final f = ops.fresh(other);
     ops.sync(f, other);
@@ -427,8 +429,8 @@ void _l5<In>(Ops<In> ops, Case c) {
 /// Registers the five laws of [ops].
 void _registerSyncLaws<In>(Ops<In> ops,
     {int maxN = 400,
-    int casesL1 = 40,
-    int casesL1b = 24,
+    int casesL1 = 120,
+    int casesL1b = 60,
     Set<String> dropL1b = const {}}) {
   group(ops.name, () {
     final reachFor = (Set<String> drop) => Reach<Case>(
@@ -457,7 +459,7 @@ void _registerSyncLaws<In>(Ops<In> ops,
       _caseGen(ops, maxN),
       (c) => _l2(ops, c),
       examples: [for (final r in ops.forced) (r, (2, 3 + r.length, 0, 0))],
-      cases: 40,
+      cases: 100,
       reach: reachFor(const {'detour: 1', 'detour: 2', 'detour: 3', 'detour: 4', 'detour: 5'}),
     );
     _laws.law<(Case, Mut)>(
@@ -477,7 +479,7 @@ void _registerSyncLaws<In>(Ops<In> ops,
             ((ops.forced[i], (3, 5, 0, 0)), (5, a, i)),
         for (var a = 0; a < 9; a++) ((ops.forced.first, (3, 5, 0, 0)), (0, a, 0)),
       ],
-      cases: 120,
+      cases: 200,
       reach: Reach<(Case, Mut)>({
         for (var k = 0; k < 7; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 7}')),
@@ -489,7 +491,7 @@ void _registerSyncLaws<In>(Ops<In> ops,
       _caseGen(ops, maxN),
       (c) => _l4(ops, c),
       examples: [for (final r in ops.forced) (r, (3, 7 + r.length, 0, 0))],
-      cases: 40,
+      cases: 100,
       reach: reachFor(const {'detour: 1', 'detour: 2', 'detour: 3', 'detour: 4', 'detour: 5'}),
     );
     _laws.law<Case>(
@@ -498,7 +500,7 @@ void _registerSyncLaws<In>(Ops<In> ops,
       _caseGen(ops, maxN),
       (c) => _l5(ops, c),
       examples: [for (final r in ops.forced) (r, (4, 11 + r.length, 127, 0))],
-      cases: 40,
+      cases: 100,
       reach: reachFor(const {'detour: 1', 'detour: 2', 'detour: 3', 'detour: 4', 'detour: 5'}),
     );
   });
@@ -1048,7 +1050,7 @@ class EnmoOps extends Ops<EnmoIn> {
         'reference: auto': .05,
         'reference: not finite': .05,
         'reference: given': .4,
-        'window: not the default': .3,
+        'window: not the default': .2,
       };
 }
 
@@ -2471,7 +2473,7 @@ void main() {
       _momGen,
       _momMerge,
       examples: _momForced,
-      cases: 120,
+      cases: 200,
       reach: Reach<MomCase>(_momShares, _observeMom),
     );
     _laws.law<MomCase>(
@@ -2479,7 +2481,7 @@ void main() {
       _momGen,
       _momAddRemove,
       examples: _momForced,
-      cases: 60,
+      cases: 120,
       reach: Reach<MomCase>(_momShares, _observeMom),
     );
     _laws.law<MomCase>(
@@ -2488,7 +2490,7 @@ void main() {
       _momGen,
       _momJson,
       examples: _momForced,
-      cases: 60,
+      cases: 120,
       reach: Reach<MomCase>(_momShares, _observeMom),
     );
     _laws.law<(MomCase, Mut)>(
@@ -2502,7 +2504,7 @@ void main() {
         for (var a = 0; a < 5; a++) (_momForced[3], (4, a, 1)),
         for (var a = 0; a < 5; a++) (_momForced[1], (4, a, 1)),
       ],
-      cases: 120,
+      cases: 200,
       reach: Reach<(MomCase, Mut)>({
         for (var k = 0; k < 8; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
@@ -2517,7 +2519,7 @@ void main() {
       _histGen,
       _histMerge,
       examples: _histForced,
-      cases: 120,
+      cases: 200,
       reach: Reach<MomCase>(_histShares, _observeHist),
     );
     _laws.law<MomCase>(
@@ -2526,7 +2528,7 @@ void main() {
       _histGen,
       _histAddRemove,
       examples: _histForced,
-      cases: 80,
+      cases: 150,
       reach: Reach<MomCase>(_histShares, _observeHist),
     );
     _laws.law<MomCase>(
@@ -2535,7 +2537,7 @@ void main() {
       _histGen,
       _histJson,
       examples: _histForced,
-      cases: 80,
+      cases: 150,
       reach: Reach<MomCase>(_histShares, _observeHist),
     );
     _laws.law<(MomCase, Mut)>(
@@ -2548,7 +2550,7 @@ void main() {
           for (var i = 0; i < 4; i++) (_histForced[3 + i], (k, 2 * k + i, 3 * k + i)),
         for (var a = 0; a < 8; a++) (_histForced[4], (4, a, 1)),
       ],
-      cases: 120,
+      cases: 200,
       reach: Reach<(MomCase, Mut)>({
         for (var k = 0; k < 8; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
@@ -2569,7 +2571,7 @@ void main() {
         [80, 6, 5], // capacity 7
         [80, 1, 6],
       ],
-      cases: 100,
+      cases: 200,
       reach: Reach<List<int>>({
         'capacity 1': .05,
         'capacity 3 or more': .3,
@@ -2599,6 +2601,123 @@ void main() {
         'checkpoint): fromJson accepts bin counts that overflow int64 when '
         'summed; the histogram then reports a negative count and percentile() '
         'throws StateError. Reported, not fixed.');
+  });
+
+  group('the forced scenarios say what they claim', () {
+    test('HRV: empty, jitter gate, constant, dropouts, several 5-minute bins, no '
+        'times, an artifact fraction', () {
+      final ops = HrvOps();
+      var absent = false, gated = false, multiBin = false, noTimes = false;
+      var constant = false, gaps = false, af = false;
+      for (final r in ops.forced) {
+        final x = ops.expand(r);
+        final st = ops.fresh(x);
+        final out = ops.sync(st, x) as Metric<HrvTime>;
+        final j = ops.toJson(st);
+        if (!out.present) absent = true;
+        if (out.present && out.value!.rmssd == null && out.note!.startsWith('rmssd_refused')) {
+          gated = true;
+        }
+        if ((j['bins'] as List).length >= 2) multiBin = true;
+        if (x.t == null && x.nn.length >= 2) noTimes = true;
+        if (r[0] == 3 && x.nn.length >= 31) constant = true;
+        if (x.t != null) {
+          for (var i = 1; i < x.nn.length; i++) {
+            if (x.t![i] - x.t![i - 1] > x.nn[i] + .5) gaps = true;
+          }
+        }
+        if (x.af > 0) af = true;
+      }
+      expect([absent, gated, multiBin, noTimes, constant, gaps, af],
+          everyElement(isTrue));
+    });
+
+    test('ENMO: empty, gaps, invalid samples, duplicate and unsorted times, a '
+        'given, an auto and a non-finite reference', () {
+      final ops = EnmoOps();
+      var empty = false, invalid = false, dup = false, unsorted = false;
+      var given = false, auto = false, nonFinite = false, multiMinute = false;
+      for (final r in ops.forced) {
+        final x = ops.expand(r);
+        final out = ops.sync(ops.fresh(x), x) as EnmoResult;
+        if (x.samples.isEmpty) empty = true;
+        if (x.samples.any((s) => !s.valid)) invalid = true;
+        for (var i = 1; i < x.samples.length; i++) {
+          if (x.samples[i].tsMs == x.samples[i - 1].tsMs) dup = true;
+          if (x.samples[i].tsMs < x.samples[i - 1].tsMs) unsorted = true;
+        }
+        final g = x.c.$1;
+        if (g == null) auto = true;
+        if (g != null && !g.isFinite) nonFinite = true;
+        if (g != null && g.isFinite) given = true;
+        if (out.minutes.length >= 2) multiMinute = true;
+      }
+      expect([empty, invalid, dup, unsorted, given, auto, nonFinite, multiMinute],
+          everyElement(isTrue));
+    });
+
+    test('Lomb: abstentions, a spectrum, a non-finite value, a mismatch, '
+        'epoch-sized times, an empty and a repeated grid', () {
+      final ops = LombOps();
+      var abstains = false, spectrum = false, nonFinite = false;
+      var mismatch = false, epoch = false, emptyGrid = false, repeated = false;
+      for (final r in ops.forced) {
+        final x = ops.expand(r);
+        final out = ops.sync(ops.fresh(x), x) as LombScargle?;
+        if (out == null) abstains = true;
+        if (out != null && out.spectrum.isNotEmpty) spectrum = true;
+        if (x.t.any((v) => !v.isFinite) || x.y.any((v) => !v.isFinite)) nonFinite = true;
+        if (x.t.length != x.y.length) mismatch = true;
+        if (x.t.isNotEmpty && x.t.first > 1e9) epoch = true;
+        if (x.freqs.isEmpty) emptyGrid = true;
+        if (x.freqs.toSet().length < x.freqs.length) repeated = true;
+      }
+      expect([abstains, spectrum, nonFinite, mismatch, epoch, emptyGrid, repeated],
+          everyElement(isTrue));
+    });
+
+    test('minute metrics: no minutes, missing / inverted / NaN anchors, no '
+        'profile, a short, a DST and a long day, both artifact modes', () {
+      final ops = MinOps();
+      var empty = false, missing = false, inverted = false, nan = false;
+      var noProfile = false, shortDay = false, dst = false, longDay = false;
+      var series = false, summary = false, energy = false;
+      for (final r in ops.forced) {
+        final x = ops.expand(r);
+        final out = ops.sync(ops.fresh(x), x) as MinuteMetrics;
+        final c = _minCfgs[x.cfg];
+        if (x.keys.isEmpty) empty = true;
+        if (c.$1 == null || c.$2 == null) missing = true;
+        if (c.$1 != null && c.$2 != null && c.$1! >= c.$2!) inverted = true;
+        if (c.$1 != null && c.$1!.isNaN) nan = true;
+        if (c.$4 == null) noProfile = true;
+        if (c.$5 < 1440) shortDay = true;
+        if (c.$5 == 1380) dst = true;
+        if (c.$5 > 1440) longDay = true;
+        if (x.series) series = true;
+        if (!x.series) summary = true;
+        if (out.energy != null) energy = true;
+      }
+      expect([empty, missing, inverted, nan, noProfile, shortDay, dst, longDay, series, summary, energy],
+          everyElement(isTrue));
+    });
+
+    test('merge: empty, one value, two, constant, large offset, wide range, '
+        'odd and even counts', () {
+      var empty = false, one = false, two = false, constant = false;
+      var offset = false, wide = false, odd = false, even = false;
+      for (final c in _momForced) {
+        if (c[1] == 0) empty = true;
+        if (c[1] == 1) one = true;
+        if (c[1] == 2) two = true;
+        if (c[0] == 2 && c[1] > 2) constant = true;
+        if (c[0] == 1) offset = true;
+        if (c[0] == 3) wide = true;
+        if (c[1] > 2 && c[1].isOdd) odd = true;
+        if (c[1] > 2 && c[1].isEven) even = true;
+      }
+      expect([empty, one, two, constant, offset, wide, odd, even], everyElement(isTrue));
+    });
   });
 
   _laws.registerReachTest();

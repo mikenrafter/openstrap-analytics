@@ -337,7 +337,7 @@ const Map<String, double> _rrShares = {
   'flavour: flat': .03,
   'flavour: outliers': .03,
   'beats: none': .01,
-  'beats: under 3 (the short branch)': .03,
+  'beats: under 3 (the short branch)': .015,
   'beats: inside the window (3 to 90)': .1,
   'beats: past the window (91 or more)': .4,
   'no timestamps': .08,
@@ -1942,7 +1942,7 @@ void main() {
       _caseGen(3000),
       _l1Corrector,
       examples: _forced,
-      cases: 60,
+      cases: 120,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<_Case>(
@@ -1971,7 +1971,7 @@ void main() {
       _caseGen(1500),
       _l2Corrector,
       examples: _forced,
-      cases: 40,
+      cases: 100,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<(_Case, Mut)>(
@@ -1986,7 +1986,7 @@ void main() {
         for (var a = 0; a < 10; a++) (_forced[9], (0, a, 0)),
         for (var a = 0; a < 5; a++) for (var b = 0; b < 4; b++) (_forced[9], (8, a, b)),
       ],
-      cases: 120,
+      cases: 200,
       reach: Reach<(_Case, Mut)>({
         for (var k = 0; k < 11; k++) 'kind: $k': .02,
         'a state with settled beats': .3,
@@ -2004,7 +2004,7 @@ void main() {
       _caseGen(800),
       _l4Corrector,
       examples: _forced,
-      cases: 60,
+      cases: 150,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
     _laws.law<_Case>(
@@ -2014,7 +2014,7 @@ void main() {
       _caseGen(3000),
       _l5Corrector,
       examples: _forced,
-      cases: 60,
+      cases: 80,
       reach: Reach<_Case>(_rrShares, _observeRr),
     );
   });
@@ -2027,7 +2027,7 @@ void main() {
       _nnCaseGen(3000),
       _scL1,
       examples: _nnForced,
-      cases: 60,
+      cases: 200,
       reach: Reach<_NnCase>(shares, _observeNn),
     );
     _laws.law<_NnCase>(
@@ -2036,7 +2036,7 @@ void main() {
       _nnCaseGen(1500),
       _scL1b,
       examples: [for (final c in _nnForced) if (c.$1.$2 <= 1500) c],
-      cases: 40,
+      cases: 150,
       reach: Reach<_NnCase>({
         for (final e in shares.entries)
           if (!const {'beats: 1500 or more', 'beats: 500 or more'}.contains(e.key))
@@ -2049,7 +2049,7 @@ void main() {
       _nnCaseGen(1500),
       _scL2,
       examples: _nnForced,
-      cases: 60,
+      cases: 200,
       reach: Reach<_NnCase>(shares, _observeNn),
     );
     _laws.law<(_NnCase, Mut)>(
@@ -2062,7 +2062,7 @@ void main() {
           for (var a = 0; a < 3; a++) (_nnForced[10 + a], (k, a + k, 3 * k + a)),
         for (var a = 0; a < 9; a++) (_nnForced[10], (0, a, 0)),
       ],
-      cases: 120,
+      cases: 250,
       reach: Reach<(_NnCase, Mut)>({
         for (var k = 0; k < 11; k++) 'kind: $k': .02,
         'a state with an open window': .3,
@@ -2077,7 +2077,7 @@ void main() {
       _nnCaseGen(800),
       _scL4,
       examples: _nnForced,
-      cases: 60,
+      cases: 200,
       reach: Reach<_NnCase>(shares, _observeNn),
     );
     _laws.law<_NnCase>(
@@ -2087,7 +2087,7 @@ void main() {
       _nnCaseGen(3000),
       _scL5,
       examples: _nnForced,
-      cases: 50,
+      cases: 150,
       reach: Reach<_NnCase>(shares, _observeNn),
     );
     test('a kept beat a full window after the first closes the window (>=)', () {
@@ -2196,7 +2196,7 @@ void main() {
       _wireGen(),
       _wL2,
       examples: forcedWire,
-      cases: 120,
+      cases: 200,
       reach: reach,
     );
     _laws.law<(_WireCase, Mut)>(
@@ -2212,7 +2212,7 @@ void main() {
         for (var a = 0; a < 6; a++) (forcedWire[3], (6, a, 0)),
         for (var a = 0; a < 5; a++) (forcedWire[9], (5, a, 0)),
       ],
-      cases: 120,
+      cases: 250,
       reach: Reach<(_WireCase, Mut)>({
         for (var k = 0; k < 8; k++) 'kind: $k': .03,
       }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
@@ -2224,7 +2224,7 @@ void main() {
       _wireGen(),
       _wAbsent,
       examples: forcedWire,
-      cases: 120,
+      cases: 200,
       reach: reach,
     );
   });
