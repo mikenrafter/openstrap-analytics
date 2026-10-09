@@ -1696,10 +1696,910 @@ class MinOps extends Ops<MinIn> {
       };
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// RunningMoments
+// ═════════════════════════════════════════════════════════════════════════════
+
+const _momFlavours = [
+  'heart rate', // whole bpm, a spread of 40
+  'large offset', // 1e9 plus a spread under 1: where sum-of-squares loses every digit
+  'constant', // all equal: variance exactly zero
+  'wide', // magnitudes from 1e-3 to 1e6, both signs
+  'two valued',
+  'small spread near zero',
+];
+
+/// The values of a recipe (flavour, n, seed).
+List<double> _momValues(int flavour, int n, int seed) {
+  final g = Rng(seed * 8191 + flavour + 3);
+  return [
+    for (var i = 0; i < n; i++)
+      switch (flavour) {
+        0 => 40.0 + g.nextInt(120),
+        1 => 1e9 + (g.nextDouble() * .5 + (i % 7) * .25),
+        2 => 42.0,
+        3 => (g.nextBool() ? 1 : -1) * math.pow(10, g.nextDouble() * 9 - 3).toDouble(),
+        4 => i.isEven ? 800.0 : 1000.0,
+        _ => (g.nextDouble() - .5) * 1e-3,
+      }
+  ];
+}
+
+/// Mean and sample / population SD of [x] the stable way: about the first value,
+/// two passes. The oracle: independent of the Welford state under test, and
+/// accurate where a plain sum is not (a 1e9 offset).
+({double? mean, double? sd, double? pop}) _twoPass(List<double> x) {
+  final n = x.length;
+  if (n == 0) return (mean: null, sd: null, pop: null);
+  final x0 = x.first;
+  var s = 0.0;
+  for (final v in x) {
+    s += v - x0;
+  }
+  final md = s / n;
+  var ss = 0.0;
+  for (final v in x) {
+    final d = v - x0 - md;
+    ss += d * d;
+  }
+  return (
+    mean: x0 + md,
+    sd: n < 2 ? null : math.sqrt(ss / (n - 1)),
+    pop: math.sqrt(ss / n),
+  );
+}
+
+const double _eps = 2.220446049250313e-16;
+
+/// The moments hold what two passes say: the count exact, the mean to a few
+/// ulps of its own size, the SDs to 1e-9 relative (plus the same ulps).
+void _momentsMatch(RunningMoments m, List<double> x, String why) {
+  final o = _twoPass(x);
+  expect(m.count, x.length, reason: 'count $why');
+  if (x.isEmpty) {
+    expect(m.mean, isNull, reason: 'no values, no mean $why');
+    expect(m.sampleSd, isNull, reason: why);
+    expect(m.populationSd, isNull, reason: why);
+    return;
+  }
+  final scale = x.fold<double>(1, (a, v) => math.max(a, v.abs()));
+  final tol = 64 * _eps * scale;
+  expect((m.mean! - o.mean!).abs() <= tol + 1e-12 * (o.sd ?? 0), isTrue,
+      reason: 'mean ${m.mean} vs ${o.mean} (tol $tol) $why');
+  void sdClose(double? got, double? want, String what) {
+    if (want == null) {
+      expect(got, isNull, reason: '$what is absent below two values $why');
+      return;
+    }
+    expect(got, isNotNull, reason: '$what $why');
+    final t = 1e-9 * want + tol;
+    expect((got! - want).abs() <= t, isTrue,
+        reason: '$what $got vs $want (tol $t) $why');
+  }
+
+  sdClose(m.sampleSd, o.sd, 'sample sd');
+  sdClose(m.populationSd, o.pop, 'population sd');
+}
+
+RunningMoments _momOf(List<double> x) {
+  final m = RunningMoments();
+  for (final v in x) {
+    m.add(v);
+  }
+  return m;
+}
+
+String _momText(RunningMoments m) => jsonEncode(m.toJson());
+
+/// (flavour, n, seed, splits, cut seed).
+typedef MomCase = List<int>;
+
+final Gen<MomCase> _momGen = IntsGen([
+  G.intIn(0, _momFlavours.length - 1),
+  SizeGen(400, pool: const [0, 1, 2, 3, 4, 5, 10]),
+  G.intIn(0, 1 << 12),
+  G.intIn(0, 6),
+  G.intIn(0, 1 << 20),
+]);
+
+List<List<double>> _parts(MomCase c, List<double> x) {
+  final b = foldBounds(x.length, c[3], c[4]);
+  return [for (var k = 0; k + 1 < b.length; k++) x.sublist(b[k], b[k + 1])];
+}
+
+void _observeMom(MomCase c, void Function(String) bump) {
+  bump('flavour: ${_momFlavours[c[0]]}');
+  if (c[1] == 0) bump('empty');
+  if (c[1] == 1) bump('one value');
+  if (c[1] >= 100) bump('100 values or more');
+  final b = foldBounds(c[1], c[3], c[4]);
+  if (b.length >= 4) bump('three parts or more');
+  if (hasEmptyChunk(b)) bump('an empty part');
+}
+
+final Map<String, double> _momShares = {
+  for (final f in _momFlavours) 'flavour: $f': .03,
+  'empty': .01,
+  'one value': .01,
+  '100 values or more': .2,
+  'three parts or more': .4,
+  'an empty part': .05,
+};
+
+final List<MomCase> _momForced = [
+  [0, 0, 1, 2, 3], // nothing
+  [0, 1, 1, 2, 3], // one value
+  [0, 2, 1, 2, 3],
+  [1, 300, 1, 3, 5], // large offset
+  [2, 80, 1, 3, 7], // constant
+  [3, 200, 2, 4, 11], // wide
+  [4, 51, 1, 6, 13], // two valued, odd
+  [5, 120, 4, 5, 17],
+  [0, 100, 3, 6, 19], // heart rate
+];
+
+void _momMerge(MomCase c) {
+  final x = _momValues(c[0], c[1], c[2]);
+  final parts = _parts(c, x);
+  final tag = 'moments $c parts=${[for (final p in parts) p.length]}';
+  final ms = [for (final p in parts) _momOf(p)];
+  final before = [for (final m in ms) _momText(m)];
+  // Left to right: merging the summaries of the parts is the summary of the
+  // concatenation.
+  final left = RunningMoments();
+  for (final m in ms) {
+    left.merge(m);
+  }
+  _momentsMatch(left, x, '$tag: left fold');
+  for (var k = 0; k < ms.length; k++) {
+    expect(_momText(ms[k]), before[k], reason: '$tag: the argument is left unchanged');
+  }
+  // Associativity: (a+b)+c and a+(b+c) read the same as the concatenation; the
+  // state differs only in rounding.
+  if (parts.length >= 3) {
+    final ab = _momOf(parts[0])..merge(_momOf(parts[1]));
+    final abc = ab..merge(_momOf([for (final p in parts.skip(2)) ...p]));
+    final bc = _momOf(parts[1])..merge(_momOf([for (final p in parts.skip(2)) ...p]));
+    final a_bc = _momOf(parts[0])..merge(bc);
+    _momentsMatch(abc, x, '$tag: (a+b)+c');
+    _momentsMatch(a_bc, x, '$tag: a+(b+c)');
+  }
+  // Commutativity: the order of two parts does not matter to what is read.
+  if (parts.length >= 2) {
+    final ab = _momOf(parts[0])..merge(_momOf(parts[1]));
+    final ba = _momOf(parts[1])..merge(_momOf(parts[0]));
+    final both = [...parts[0], ...parts[1]];
+    _momentsMatch(ab, both, '$tag: a+b');
+    _momentsMatch(ba, both, '$tag: b+a');
+  }
+  // Identity, exactly: merging the empty summary changes nothing, and merging
+  // into the empty summary copies.
+  final whole = _momOf(x);
+  final text = _momText(whole);
+  whole.merge(RunningMoments());
+  expect(_momText(whole), text, reason: '$tag: x + empty == x');
+  expect(_momText(RunningMoments()..merge(whole)), text, reason: '$tag: empty + x == x');
+  // A summary merged with itself is the multiset twice.
+  final twice = _momOf(x)..merge(whole);
+  _momentsMatch(twice, [...x, ...x], '$tag: x + x');
+  final selfMerged = _momOf(x);
+  selfMerged.merge(selfMerged);
+  _momentsMatch(selfMerged, [...x, ...x], '$tag: merge with itself');
+}
+
+void _momAddRemove(MomCase c) {
+  final x = _momValues(c[0], c[1], c[2]);
+  final tag = 'moments $c';
+  final g = Rng(c[4] + 5);
+  final m = RunningMoments();
+  final held = <double>[];
+  // A walk of adds and removes (of values that are held), checked against two
+  // passes along the way.
+  for (var i = 0; i < x.length; i++) {
+    m.add(x[i]);
+    held.add(x[i]);
+    if (held.length > 2 && g.nextBool(.4)) {
+      final v = held.removeAt(g.nextInt(held.length));
+      m.remove(v);
+    }
+    if (i % 7 == 0 || i == x.length - 1) _momentsMatch(m, held, '$tag step $i');
+  }
+  // add then remove the same value: back where it was. (A value inside the
+  // data's range: removing a downdate of a wild outlier is a numerical limit of
+  // every running variance, not a contract.)
+  final probe = _momOf(held);
+  final text = _momText(probe);
+  final extra = held.isEmpty ? 123.5 : held.last;
+  probe.add(extra);
+  probe.remove(extra);
+  _momentsMatch(probe, held, '$tag: add then remove');
+  if (held.isEmpty) expect(_momText(probe), text, reason: '$tag: back to the empty state exactly');
+  // Emptied again: exactly the fresh state.
+  while (held.isNotEmpty) {
+    m.remove(held.removeLast());
+  }
+  expect(_momText(m), _momText(RunningMoments()), reason: '$tag: emptied is fresh');
+}
+
+void _momJson(MomCase c) {
+  final x = _momValues(c[0], c[1], c[2]);
+  final tag = 'moments $c';
+  final m = _momOf(x);
+  final text = _momText(m);
+  final back = RunningMoments.fromJson((jsonDecode(text) as Map).cast<String, dynamic>());
+  expect(_momText(back), text, reason: '$tag: write(read(b)) == b');
+  _momentsMatch(back, x, '$tag: restored reads the same');
+  // And goes on identically.
+  m.add(77);
+  back.add(77);
+  expect(_momText(back), _momText(m), reason: '$tag: same after one more');
+  _momentsMatch(back, [...x, 77], tag);
+  // Identity and refusals leave the state unchanged.
+  final before = _momText(m);
+  expect(() => m.add(double.nan), throwsArgumentError);
+  expect(() => m.add(double.infinity), throwsArgumentError);
+  expect(() => m.remove(double.negativeInfinity), throwsArgumentError);
+  expect(() => RunningMoments().remove(1), throwsStateError);
+  expect(_momText(m), before, reason: '$tag: refused calls change nothing');
+  expect(m.count, x.length + 1);
+  // Conservation: (n - 1) sample variance and n population variance are the
+  // same sum of squares.
+  if (m.count >= 2) {
+    final a = m.sampleSd! * m.sampleSd! * (m.count - 1);
+    final b = m.populationSd! * m.populationSd! * m.count;
+    expect((a - b).abs() <= 1e-9 * math.max(1, a.abs()), isTrue,
+        reason: '$tag: one sum of squares: $a vs $b');
+  }
+}
+
+(Json, Must) _momMutate(Json src, Mut m) {
+  final j = (deepCopy(src) as Map).cast<String, dynamic>();
+  final (kind, a, b) = m;
+  switch (kind % 8) {
+    case 0:
+      const versions = <Object?>[0, 2, -1, 99, '1', null, true, 1 << 40];
+      j['version'] = versions[a % versions.length];
+      return (j, Must.refuse);
+    case 1:
+      const types = <Object?>['IntHistogram', 'Other', null, '', 1];
+      j['type'] = types[a % types.length];
+      return (j, Must.refuse);
+    case 2:
+      j.remove(const ['count', 'origin', 'meanOffset', 'm2', 'version', 'type'][a % 6]);
+      return (j, Must.refuse);
+    case 3:
+      const junk = <Object?>['x', <String, Object?>{}, <Object?>[], null, 1.5];
+      final k = const ['count', 'origin', 'meanOffset', 'm2'][a % 4];
+      j[k] = k == 'count' ? junk[b % junk.length] : junk[b % 4];
+      return (j, Must.refuse);
+    case 4:
+      // Contradictions a reachable state never shows.
+      switch (a % 5) {
+        case 0:
+          j['count'] = -1 - b % 5;
+        case 1:
+          j['m2'] = -1.0 - b % 5;
+        case 2:
+          j
+            ..['count'] = 0
+            ..['origin'] = 1.0 + b % 7; // nothing counted, yet an origin
+        case 3:
+          j
+            ..['count'] = 1
+            ..['m2'] = 1.0 + b % 7; // one value with a spread
+        default:
+          j
+            ..['count'] = 0
+            ..['m2'] = 1.0;
+      }
+      return (j, jsonEncode(j) == jsonEncode(src) ? Must.faithful : Must.refuse);
+    case 5:
+      // Changes the reader cannot tell from a legal state.
+      switch (a % 4) {
+        case 0:
+          if ((j['count'] as int) >= 2) j['m2'] = (j['m2'] as num) + 1.0;
+        case 1:
+          if ((j['count'] as int) >= 1) j['meanOffset'] = (j['meanOffset'] as num) + 1.0;
+        case 2:
+          if ((j['count'] as int) >= 1) j['origin'] = (j['origin'] as num) + 1.0;
+        default:
+          if ((j['count'] as int) >= 2) j['count'] = (j['count'] as int) + 1 + b % 3;
+      }
+      return (j, Must.faithful);
+    case 6:
+      // Hostile size: the count claims far more than the sums can hold.
+      if ((j['count'] as int) >= 2) j['count'] = const [1 << 40, 1 << 62, 0x7fffffffffffffff][b % 3];
+      return (j, Must.faithful);
+    default:
+      j['futureField${a % 3}'] = const [1, 'x', <Object?>[1]][b % 3];
+      return (j, Must.ignored);
+  }
+}
+
+void _momL3((MomCase, Mut) arg) {
+  final (c, m) = arg;
+  final tag = 'moments $c mutation=${m.$1 % 8}(${m.$2},${m.$3})';
+  final src = (jsonDecode(_momText(_momOf(_momValues(c[0], c[1], c[2])))) as Map).cast<String, dynamic>();
+  final (bad, must) = _momMutate(src, m);
+  String outcome;
+  try {
+    outcome = 'accepted:${_momText(RunningMoments.fromJson((deepCopy(bad) as Map).cast<String, dynamic>()))}';
+  } on FormatException {
+    outcome = 'refused';
+  } catch (e) {
+    outcome = 'WRONG ERROR TYPE: ${e.runtimeType}: $e';
+  }
+  expectMutationOutcome(outcome, must, _text(bad), _text(src), tag);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// IntHistogram
+// ═════════════════════════════════════════════════════════════════════════════
+
+const _histFlavours = [
+  'heart rate', // 40..180 bpm
+  'few values', // 3 distinct
+  'one value',
+  'negatives', // -100..299
+  'wide', // up to +-1e9
+];
+
+List<int> _histValues(int flavour, int n, int seed) {
+  final g = Rng(seed * 4099 + flavour + 1);
+  return [
+    for (var i = 0; i < n; i++)
+      switch (flavour) {
+        0 => 40 + g.nextInt(141),
+        1 => 60 + g.nextInt(3),
+        2 => 61,
+        3 => g.nextInt(400) - 100,
+        _ => g.nextInt(2000000000) - 1000000000,
+      }
+  ];
+}
+
+IntHistogram _histOf(List<int> x) {
+  final h = IntHistogram();
+  for (final v in x) {
+    h.add(v);
+  }
+  return h;
+}
+
+String _histText(IntHistogram h) => jsonEncode(h.toJson());
+
+const _ps = <double>[0, 1, 5, 25, 30, 33.3, 50, 66.6, 75, 90, 95, 99, 100];
+
+/// The histogram reads exactly what the sorted expanded list reads: the very
+/// double `percentileSorted` gives, count and distinct count exact, and a
+/// canonical checkpoint (sorted bins, no zero counts).
+void _histMatches(IntHistogram h, List<int> x, String why) {
+  final sorted = [for (final v in x) v.toDouble()]..sort();
+  expect(h.count, x.length, reason: 'count $why');
+  expect(h.distinct, x.toSet().length, reason: 'distinct $why');
+  if (x.isEmpty) {
+    expect(h.median, isNull, reason: 'no values, no median $why');
+    for (final p in _ps) {
+      expect(h.percentile(p), isNull, reason: 'p$p $why');
+    }
+  } else {
+    for (final p in _ps) {
+      expect(h.percentile(p), percentileSorted(sorted, p), reason: 'p$p $why');
+    }
+    expect(h.median, percentileSorted(sorted, 50), reason: 'median $why');
+  }
+  final j = h.toJson();
+  expect(j['values'], ([...x.toSet()]..sort()), reason: 'sorted distinct bins $why');
+  final counts = <int, int>{};
+  for (final v in x) {
+    counts.update(v, (c) => c + 1, ifAbsent: () => 1);
+  }
+  expect(j['counts'], [for (final v in j['values'] as List) counts[v]], reason: 'counts $why');
+}
+
+void _observeHist(MomCase c, void Function(String) bump) {
+  bump('flavour: ${_histFlavours[c[0]]}');
+  if (c[1] == 0) bump('empty');
+  if (c[1] == 1) bump('one value');
+  if (c[1] >= 100) bump('100 values or more');
+  final b = foldBounds(c[1], c[3], c[4]);
+  if (b.length >= 4) bump('three parts or more');
+  if (hasEmptyChunk(b)) bump('an empty part');
+}
+
+final Map<String, double> _histShares = {
+  for (final f in _histFlavours) 'flavour: $f': .03,
+  'empty': .01,
+  'one value': .01,
+  '100 values or more': .2,
+  'three parts or more': .4,
+  'an empty part': .05,
+};
+
+final Gen<MomCase> _histGen = IntsGen([
+  G.intIn(0, _histFlavours.length - 1),
+  SizeGen(400, pool: const [0, 1, 2, 3, 4, 5, 10]),
+  G.intIn(0, 1 << 12),
+  G.intIn(0, 6),
+  G.intIn(0, 1 << 20),
+]);
+
+final List<MomCase> _histForced = [
+  [0, 0, 1, 2, 3],
+  [0, 1, 1, 2, 3],
+  [2, 2, 1, 2, 3], // two equal values
+  [1, 7, 1, 3, 5],
+  [0, 300, 1, 4, 7],
+  [3, 150, 2, 5, 9],
+  [4, 90, 3, 6, 11],
+  [0, 5, 4, 6, 13],
+];
+
+void _histMerge(MomCase c) {
+  final x = _histValues(c[0], c[1], c[2]);
+  final b = foldBounds(x.length, c[3], c[4]);
+  final parts = [for (var k = 0; k + 1 < b.length; k++) x.sublist(b[k], b[k + 1])];
+  final tag = 'histogram $c parts=${[for (final p in parts) p.length]}';
+  final hs = [for (final p in parts) _histOf(p)];
+  final before = [for (final h in hs) _histText(h)];
+  // The summary of the concatenation, exactly (bins and checkpoint included).
+  final left = IntHistogram();
+  for (final h in hs) {
+    left.merge(h);
+  }
+  _histMatches(left, x, '$tag: left fold');
+  expect(_histText(left), _histText(_histOf(x)), reason: '$tag: same checkpoint as one fold');
+  for (var k = 0; k < hs.length; k++) {
+    expect(_histText(hs[k]), before[k], reason: '$tag: the argument is left unchanged');
+  }
+  // Associative and commutative, exactly: the checkpoint is canonical.
+  if (parts.length >= 3) {
+    final rest = [for (final p in parts.skip(2)) ...p];
+    final ab_c = _histOf(parts[0])..merge(_histOf(parts[1]))..merge(_histOf(rest));
+    final a_bc = _histOf(parts[0])..merge(_histOf(parts[1])..merge(_histOf(rest)));
+    expect(_histText(ab_c), _histText(a_bc), reason: '$tag: associative');
+    expect(_histText(ab_c), _histText(_histOf(x)), reason: '$tag: and the concatenation');
+  }
+  if (parts.length >= 2) {
+    final ab = _histOf(parts[0])..merge(_histOf(parts[1]));
+    final ba = _histOf(parts[1])..merge(_histOf(parts[0]));
+    expect(_histText(ab), _histText(ba), reason: '$tag: commutative');
+  }
+  // Identity.
+  final whole = _histOf(x);
+  final text = _histText(whole);
+  whole.merge(IntHistogram());
+  expect(_histText(whole), text, reason: '$tag: x + empty == x');
+  expect(_histText(IntHistogram()..merge(whole)), text, reason: '$tag: empty + x == x');
+  // Itself, doubled.
+  final self = _histOf(x);
+  self.merge(self);
+  _histMatches(self, [...x, ...x], '$tag: merge with itself');
+}
+
+void _histAddRemove(MomCase c) {
+  final x = _histValues(c[0], c[1], c[2]);
+  final tag = 'histogram $c';
+  final g = Rng(c[4] + 9);
+  final h = IntHistogram();
+  final held = <int>[];
+  for (var i = 0; i < x.length; i++) {
+    if (held.isNotEmpty && g.nextBool(.4)) {
+      final v = held.removeAt(g.nextInt(held.length));
+      h.remove(v);
+    } else {
+      held.add(x[i]);
+      h.add(x[i]);
+    }
+    if (i % 5 == 0 || i == x.length - 1) _histMatches(h, held, '$tag step $i');
+  }
+  // Refusals leave the histogram exactly as it was.
+  final before = _histText(h);
+  final absent = held.fold<int>(0, (a, v) => math.max(a, v.abs())) + 1;
+  expect(() => h.remove(absent), throwsStateError, reason: tag);
+  expect(() => h.remove(double.nan), throwsStateError, reason: tag);
+  expect(() => h.remove(1.5), throwsStateError, reason: tag);
+  expect(() => h.add(double.nan), throwsArgumentError, reason: tag);
+  expect(() => h.add(double.infinity), throwsArgumentError, reason: tag);
+  expect(() => h.add(70.5), throwsArgumentError, reason: tag);
+  expect(() => h.add(70, 0), throwsArgumentError, reason: tag);
+  expect(() => h.add(70, -2), throwsArgumentError, reason: tag);
+  if (h.count > 0) {
+    // (An empty histogram answers null for any p; the range is checked once
+    // there is something to read.)
+    expect(() => h.percentile(-1), throwsArgumentError, reason: tag);
+    expect(() => h.percentile(100.5), throwsArgumentError, reason: tag);
+    expect(() => h.percentile(double.nan), throwsArgumentError, reason: tag);
+  }
+  expect(_histText(h), before, reason: '$tag: refused calls change nothing');
+  // Repeat counts: add(v, k) is k adds of v; removing is one at a time.
+  final r = IntHistogram()..add(60, 3)..add(70, 2);
+  _histMatches(r, [60, 60, 60, 70, 70], '$tag: repeat count');
+  r.remove(60);
+  _histMatches(r, [60, 60, 70, 70], '$tag: removing one of several');
+  expect(_histText(IntHistogram()..add(5, 4)), _histText(_histOf([5, 5, 5, 5])), reason: tag);
+  // A whole-number double is a whole number.
+  final w = IntHistogram()..add(70.0);
+  _histMatches(w, [70], tag);
+  // Add then remove: where it was, no zero-count bin left behind.
+  final t = _histOf(held);
+  final text = _histText(t);
+  t.add(1234567);
+  t.remove(1234567);
+  expect(_histText(t), text, reason: '$tag: add then remove');
+}
+
+void _histJson(MomCase c) {
+  final x = _histValues(c[0], c[1], c[2]);
+  final tag = 'histogram $c';
+  final h = _histOf(x);
+  final text = _histText(h);
+  final back = IntHistogram.fromJson((jsonDecode(text) as Map).cast<String, dynamic>());
+  expect(_histText(back), text, reason: '$tag: write(read(b)) == b');
+  _histMatches(back, x, '$tag: restored');
+  back.add(55);
+  h.add(55);
+  expect(_histText(back), _histText(h), reason: '$tag: same after one more');
+  _histMatches(back, [...x, 55], tag);
+  // Conservation: the counts add up to the count, every bin is held once.
+  final j = back.toJson();
+  expect((j['counts'] as List).fold<int>(0, (a, v) => a + (v as int)), back.count, reason: tag);
+}
+
+(Json, Must) _histMutate(Json src, Mut m) {
+  final j = (deepCopy(src) as Map).cast<String, dynamic>();
+  final (kind, a, b) = m;
+  List l(String k) => j[k] as List;
+  switch (kind % 8) {
+    case 0:
+      const versions = <Object?>[0, 2, -1, 99, '1', null, true, 1 << 40];
+      j['version'] = versions[a % versions.length];
+      return (j, Must.refuse);
+    case 1:
+      const types = <Object?>['RunningMoments', 'Other', null, '', 1];
+      j['type'] = types[a % types.length];
+      return (j, Must.refuse);
+    case 2:
+      j.remove(const ['values', 'counts', 'version', 'type'][a % 4]);
+      return (j, Must.refuse);
+    case 3:
+      const junk = <Object?>['x', <String, Object?>{}, null, 1.5, 3];
+      j[const ['values', 'counts'][a % 2]] = junk[b % junk.length];
+      return (j, Must.refuse);
+    case 4:
+      // The bins contradict themselves.
+      switch (a % 8) {
+        case 0:
+          l('values').add(1 << 40);
+        case 1:
+          if (l('counts').isNotEmpty) l('counts').removeLast();
+        case 2:
+          if (l('counts').isNotEmpty) l('counts')[b % l('counts').length] = 0;
+        case 3:
+          if (l('counts').isNotEmpty) l('counts')[b % l('counts').length] = -1 - b % 4;
+        case 4:
+          if (l('values').length >= 2) {
+            final t = l('values')[0];
+            l('values')[0] = l('values')[1];
+            l('values')[1] = t; // out of order
+          }
+        case 5:
+          if (l('values').isNotEmpty) {
+            l('values').insert(0, l('values')[0]); // a repeated value
+            l('counts').insert(0, 1);
+          }
+        case 6:
+          if (l('values').isNotEmpty) l('values')[0] = 1.5;
+        default:
+          if (l('values').isNotEmpty) l('counts')[0] = 1.5;
+      }
+      return (j, jsonEncode(j) == jsonEncode(src) ? Must.faithful : Must.refuse);
+    case 5:
+      // A bin count changed: legal.
+      if (l('counts').isNotEmpty) l('counts')[b % l('counts').length] = (l('counts')[b % l('counts').length] as int) + 1 + a % 5;
+      return (j, Must.faithful);
+    case 6:
+      // Hostile counts: each bin plausible, the total past what an int can
+      // hold (the skipped FINDING below).
+      if (l('counts').isNotEmpty) l('counts')[0] = const [1 << 40, 1 << 61, 0x7fffffffffffffff][b % 3];
+      return (j, Must.faithful);
+    default:
+      j['futureField${a % 3}'] = const [1, 'x', <Object?>[1]][b % 3];
+      return (j, Must.ignored);
+  }
+}
+
+void _histL3((MomCase, Mut) arg) {
+  final (c, m) = arg;
+  final tag = 'histogram $c mutation=${m.$1 % 8}(${m.$2},${m.$3})';
+  final src = (jsonDecode(_histText(_histOf(_histValues(c[0], c[1], c[2])))) as Map).cast<String, dynamic>();
+  final (bad, must) = _histMutate(src, m);
+  String outcome;
+  try {
+    outcome = 'accepted:${_histText(IntHistogram.fromJson((deepCopy(bad) as Map).cast<String, dynamic>()))}';
+  } on FormatException {
+    outcome = 'refused';
+  } catch (e) {
+    outcome = 'WRONG ERROR TYPE: ${e.runtimeType}: $e';
+  }
+  expectMutationOutcome(outcome, must, _text(bad), _text(src), tag);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CalculationCache
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The cache against a model written from its documented behaviour: bounded
+/// least-recently-used results, each with an owned snapshot of the dependencies
+/// it was computed from; a hit needs the same key and DEEP-equal dependencies
+/// (NaN equals NaN) and no `full` request; a hit and a computation are counted;
+/// a calculation that throws changes nothing; results are copies.
+class _CacheModel {
+  _CacheModel(this.cap);
+  final int cap;
+  final List<(String, Object?, Object?)> entries = []; // oldest first
+  int computations = 0, hits = 0;
+
+  static bool eq(Object? a, Object? b) {
+    if (a is num && b is num) return a == b || (a.isNaN && b.isNaN);
+    if (a is List && b is List) {
+      return a.length == b.length && [for (var i = 0; i < a.length; i++) eq(a[i], b[i])].every((x) => x);
+    }
+    if (a is Map && b is Map) {
+      return a.length == b.length && a.keys.every((k) => b.containsKey(k) && eq(a[k], b[k]));
+    }
+    return a == b;
+  }
+
+  static Object? copy(Object? v) => v is List
+      ? [for (final e in v) copy(e)]
+      : v is Map
+          ? {for (final e in v.entries) e.key: copy(e.value)}
+          : v;
+
+  Object? evaluate(String key, Object? deps, Object? Function() calc, bool full) {
+    final at = entries.indexWhere((e) => e.$1 == key);
+    if (!full && at >= 0 && eq(entries[at].$2, deps)) {
+      final e = entries.removeAt(at);
+      entries.add(e);
+      hits++;
+      return copy(e.$3);
+    }
+    final v = calc(); // may throw: nothing changes
+    if (at >= 0) entries.removeAt(at);
+    entries.add((key, copy(deps), copy(v)));
+    while (entries.length > cap) {
+      entries.removeAt(0);
+    }
+    computations++;
+    return copy(v);
+  }
+}
+
+/// A dependency: a small structure with ties, NaN, nesting and null.
+Object? _dep(Rng g, int depth) {
+  switch (g.nextInt(depth > 0 ? 7 : 5)) {
+    case 0:
+      return g.nextInt(3);
+    case 1:
+      return null;
+    case 2:
+      return g.nextBool() ? double.nan : 1.5;
+    case 3:
+      return 'k${g.nextInt(2)}';
+    case 4:
+      return g.nextBool();
+    case 5:
+      return [for (var i = g.nextInt(3); i > 0; i--) _dep(g, depth - 1)];
+    default:
+      return {for (var i = g.nextInt(3); i > 0; i--) 'a${g.nextInt(3)}': _dep(g, depth - 1)};
+  }
+}
+
+void _cacheModelLaw(List<int> c) {
+  // (steps, capacity, seed)
+  final steps = c[0], cap = c[1] + 1, seed = c[2];
+  final g = Rng(seed * 31 + 7);
+  final cache = CalculationCache(maxEntries: cap);
+  final model = _CacheModel(cap);
+  final tag = 'cache steps=$steps cap=$cap seed=$seed';
+  var made = 0;
+  // A small pool of dependency values, so equal dependencies recur.
+  final pool = [for (var i = 0; i < 4; i++) _dep(Rng(seed + i * 17), 2)];
+  for (var i = 0; i < steps; i++) {
+    final key = 'key${g.nextInt(cap + 2)}';
+    final deps = _CacheModel.copy(pool[g.nextInt(pool.length)]);
+    final full = g.nextBool(.15);
+    final throws = g.nextBool(.1);
+    final value = [made++, made % 3];
+    Object? calc() {
+      if (throws) throw StateError('calculation failed');
+      return [...value];
+    }
+
+    Object? got, want;
+    Object? gotErr, wantErr;
+    try {
+      got = cache.evaluate<Object?>(key, deps, calc, full: full);
+    } catch (e) {
+      gotErr = e;
+    }
+    try {
+      want = model.evaluate(key, deps, calc, full);
+    } catch (e) {
+      wantErr = e;
+    }
+    expect(gotErr.runtimeType, wantErr.runtimeType, reason: '$tag step $i: failures propagate');
+    expect(got, want, reason: '$tag step $i: result');
+    expect(cache.computations, model.computations, reason: '$tag step $i: computations');
+    expect(cache.hits, model.hits, reason: '$tag step $i: hits');
+    // The result is the caller's: changing it changes no later hit.
+    if (got is List && got.isNotEmpty) got[0] = -99;
+    // The dependencies handed in are snapshotted: changing them afterwards
+    // does not turn a later hit into a miss (or the reverse).
+    if (deps is List && deps.isNotEmpty) deps.add('mutated');
+  }
+  // Size: never more than the capacity, each key held once.
+  var held = 0;
+  for (var k = 0; k < cap + 2; k++) {
+    var probeCalls = 0;
+    final before = cache.computations;
+    cache.evaluate<Object?>('key$k', _CacheModel.copy(null), () {
+      probeCalls++;
+      return [0];
+    });
+    if (cache.computations == before) held++;
+    expect(probeCalls <= 1, isTrue);
+  }
+  expect(held <= cap, isTrue, reason: '$tag: at most $cap entries held, held $held');
+  cache.clear();
+  var recomputed = false;
+  cache.evaluate<Object?>('key0', null, () => recomputed = true);
+  expect(recomputed, isTrue, reason: '$tag: clear discards');
+}
+
 void main() {
   _registerSyncLaws(HrvOps(), maxN: 800);
   _registerSyncLaws(EnmoOps(), maxN: 900);
   _registerSyncLaws(LombOps(), maxN: 300);
   _registerSyncLaws(MinOps(), maxN: 300);
+  group('RunningMoments', () {
+    _laws.law<MomCase>(
+      'M RunningMoments.merge: the summary of the parts merged is the summary of '
+      'the concatenation; associative, commutative, the empty summary is the '
+      'identity, a summary merged with itself is the multiset twice',
+      _momGen,
+      _momMerge,
+      examples: _momForced,
+      cases: 120,
+      reach: Reach<MomCase>(_momShares, _observeMom),
+    );
+    _laws.law<MomCase>(
+      'L1b RunningMoments: a walk of adds and removes reads what two passes read',
+      _momGen,
+      _momAddRemove,
+      examples: _momForced,
+      cases: 60,
+      reach: Reach<MomCase>(_momShares, _observeMom),
+    );
+    _laws.law<MomCase>(
+      'L2 RunningMoments: write(read(b)) == b, goes on identically, refused calls '
+      'change nothing, one sum of squares',
+      _momGen,
+      _momJson,
+      examples: _momForced,
+      cases: 60,
+      reach: Reach<MomCase>(_momShares, _observeMom),
+    );
+    _laws.law<(MomCase, Mut)>(
+      'L3 RunningMoments: a mutated checkpoint is refused whole or holds exactly '
+      'what was written',
+      G.pair(_momGen, mutGen(8)),
+      _momL3,
+      examples: [
+        for (var k = 0; k < 8; k++)
+          for (var i = 0; i < 4; i++) (_momForced[3 + i], (k, 2 * k + i, 3 * k + i)),
+        for (var a = 0; a < 5; a++) (_momForced[3], (4, a, 1)),
+        for (var a = 0; a < 5; a++) (_momForced[1], (4, a, 1)),
+      ],
+      cases: 120,
+      reach: Reach<(MomCase, Mut)>({
+        for (var k = 0; k < 8; k++) 'kind: $k': .03,
+      }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
+    );
+  });
+
+  group('IntHistogram', () {
+    _laws.law<MomCase>(
+      'M IntHistogram.merge: the histogram of the parts merged is exactly the '
+      'histogram of the concatenation; associative, commutative, the empty '
+      'histogram is the identity',
+      _histGen,
+      _histMerge,
+      examples: _histForced,
+      cases: 120,
+      reach: Reach<MomCase>(_histShares, _observeHist),
+    );
+    _laws.law<MomCase>(
+      'L1b IntHistogram: a walk of adds and removes reads exactly what the '
+      'sorted list reads; refused calls change nothing',
+      _histGen,
+      _histAddRemove,
+      examples: _histForced,
+      cases: 80,
+      reach: Reach<MomCase>(_histShares, _observeHist),
+    );
+    _laws.law<MomCase>(
+      'L2 IntHistogram: write(read(b)) == b, goes on identically, the counts add '
+      'up',
+      _histGen,
+      _histJson,
+      examples: _histForced,
+      cases: 80,
+      reach: Reach<MomCase>(_histShares, _observeHist),
+    );
+    _laws.law<(MomCase, Mut)>(
+      'L3 IntHistogram: a mutated checkpoint is refused whole or holds exactly '
+      'what was written',
+      G.pair(_histGen, mutGen(8)),
+      _histL3,
+      examples: [
+        for (var k = 0; k < 8; k++)
+          for (var i = 0; i < 4; i++) (_histForced[3 + i], (k, 2 * k + i, 3 * k + i)),
+        for (var a = 0; a < 8; a++) (_histForced[4], (4, a, 1)),
+      ],
+      cases: 120,
+      reach: Reach<(MomCase, Mut)>({
+        for (var k = 0; k < 8; k++) 'kind: $k': .03,
+      }, (arg, bump) => bump('kind: ${arg.$2.$1 % 8}')),
+    );
+  });
+
+  group('CalculationCache', () {
+    _laws.law<List<int>>(
+      'CalculationCache equals a model of bounded LRU results with deep-compared '
+      'dependency snapshots: results, hits, computations, failures, capacity',
+      IntsGen([G.intIn(0, 80), G.intIn(0, 6), G.intIn(0, 1 << 12)]),
+      _cacheModelLaw,
+      examples: [
+        [0, 0, 1],
+        [1, 0, 2],
+        [40, 0, 3], // capacity 1
+        [60, 2, 4], // capacity 3
+        [80, 6, 5], // capacity 7
+        [80, 1, 6],
+      ],
+      cases: 100,
+      reach: Reach<List<int>>({
+        'capacity 1': .05,
+        'capacity 3 or more': .3,
+        'many steps': .4,
+      }, (c, bump) {
+        if (c[1] == 0) bump('capacity 1');
+        if (c[1] >= 2) bump('capacity 3 or more');
+        if (c[0] >= 40) bump('many steps');
+      }),
+    );
+  });
+
+  group('FINDINGS (skipped: suspected gaps against the documented contract)', () {
+    test('IntHistogram.fromJson refuses bin counts whose total does not fit an '
+        'int', () {
+      final bad = <Map<String, dynamic>>[
+        {'version': 1, 'type': 'IntHistogram', 'values': [1, 2, 3], 'counts': [1 << 62, 1 << 62, 1 << 62]},
+        {'version': 1, 'type': 'IntHistogram', 'values': [1, 2], 'counts': [0x7fffffffffffffff, 1]},
+      ];
+      for (final j in bad) {
+        // Today: accepted, `count` wraps negative, and a later `percentile`
+        // throws StateError('Order statistic out of range'), not the
+        // FormatException a malformed checkpoint is documented to raise.
+        expect(() => IntHistogram.fromJson(j), throwsFormatException, reason: '$j');
+      }
+    }, skip: 'FINDING (hostile counts, no output change for any real '
+        'checkpoint): fromJson accepts bin counts that overflow int64 when '
+        'summed; the histogram then reports a negative count and percentile() '
+        'throws StateError. Reported, not fixed.');
+  });
+
   _laws.registerReachTest();
 }
