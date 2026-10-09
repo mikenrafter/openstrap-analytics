@@ -190,13 +190,13 @@ class RrCorrector {
     if (c._n > 0 && c._wall == null) {
       throw const FormatException('invalid wall');
     }
-    if (c._dropped < 0 || c._dropped > c._n) {
+    if (c._dropped < 0 || c._dropped > c._ce) {
       throw const FormatException('invalid dropped');
     }
-    if (c._corrected < 0 || c._corrected > c._n) {
+    if (c._corrected < 0 || c._corrected > c._ce - c._dropped) {
       throw const FormatException('invalid corrected');
     }
-    if (c._normalFinal < 0 || c._normalFinal > c._n) {
+    if (c._normalFinal < 0 || c._normalFinal > c._c2) {
       throw const FormatException('invalid normalFinal');
     }
     final buffered = c._n - c._off;

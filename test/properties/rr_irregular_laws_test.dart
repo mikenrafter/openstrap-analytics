@@ -2569,6 +2569,43 @@ void main() {
       }
     });
 
+    test('RrCorrector.fromJson bounds counters by their pipeline stages', () {
+      final short = RrCorrector()..fold([800.0, 800.0, 800.0]);
+      Map<String, dynamic> shortJson() =>
+          (jsonDecode(jsonEncode(short.toJson())) as Map).cast<String, dynamic>();
+      final shortCheckpoint = shortJson();
+      expect(shortCheckpoint['n'], 3);
+      expect(shortCheckpoint['c2'], 0);
+      expect(shortCheckpoint['ce'], 0);
+      expect(RrCorrector.fromJson(shortCheckpoint).toJson(), shortCheckpoint);
+      for (final (field, value) in [
+        ('normalFinal', 1),
+        ('dropped', 1),
+        ('corrected', 1),
+      ]) {
+        final bad = shortJson()..[field] = value;
+        expect(() => RrCorrector.fromJson(bad), throwsFormatException,
+            reason: '$field: $value');
+      }
+
+      final long = RrCorrector()..fold([for (var i = 0; i < 300; i++) 800.0]);
+      final longCheckpoint =
+          (jsonDecode(jsonEncode(long.toJson())) as Map).cast<String, dynamic>();
+      final c2 = longCheckpoint['c2'] as int;
+      final ce = longCheckpoint['ce'] as int;
+      expect(c2, greaterThan(0));
+      expect(ce, greaterThan(0));
+      expect(longCheckpoint['off'], greaterThan(0));
+      expect(RrCorrector.fromJson(longCheckpoint).toJson(), longCheckpoint);
+      final tooManyOutcomes = {
+        ...longCheckpoint,
+        'dropped': ce,
+        'corrected': 1,
+      };
+      expect(() => RrCorrector.fromJson(tooManyOutcomes), throwsFormatException,
+          reason: 'dropped + corrected exceeds ce');
+    });
+
     test('RrCorrector.fromJson refuses a checkpoint whose counters are '
         'impossible', () {
       final c = RrCorrector()
