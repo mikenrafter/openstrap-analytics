@@ -33,6 +33,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -422,6 +423,11 @@ void main() {
       }
       expect(checked, 60);
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final b = _lawSeries(Rng(0xC0DE), 3);
+    expectCheckpointResumes(cosinorAggregator(), b, equals: _eq);
   });
 
   group('lawful', () {

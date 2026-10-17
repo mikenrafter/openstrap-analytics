@@ -31,6 +31,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -363,6 +364,11 @@ void main() {
     test('empty state is tiny', () {
       expect(timeInZoneStateEntries(_agg.empty()), lessThan(10));
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    expectCheckpointResumes(_agg, _gen(Rng(0xC0DE), 45, dropP: .1, offP: .2).stream,
+        equals: _eq);
   });
 
   group('lawful', () {

@@ -17,6 +17,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -127,6 +128,11 @@ void main() {
           // the O(p·w) window search, so the law sweep alone took ~9 s.
           equals: _exact, chunkings: 4, laws: false);
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final x = _cases(0xC0DE, 12, (r) => r.intIn(0, 500).toDouble()).last;
+    expectCheckpointResumes(circadianNpAggregator(12), x, equals: _exact);
   });
 
   group('absent cases and extremes', () {

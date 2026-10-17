@@ -22,6 +22,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -207,6 +208,11 @@ void main() {
           (c) => _want(c, params[c]!.$1, params[c]!.$2, params[c]!.$3),
           equals: _eq);
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final a = _agg(55, 190, Sex.male);
+    expectCheckpointResumes(a, _hrColumn(Rng(0xC0DE), 120), equals: _eq);
   });
 
   group('lawful', () {

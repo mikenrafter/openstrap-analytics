@@ -16,6 +16,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/hrv_beats.dart';
 import '../support/property.dart' show Rng;
@@ -309,6 +310,12 @@ void main() {
       final v = hrvTimeAggregator(gapAware: false).run(beats);
       expect(v.nBeats, 50);
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final b = hrvSeries(Rng(0xC0DE), 90, 1, gapP: .08);
+    expectCheckpointResumes(hrvTimeAggregator(originMs: hrvOrigin(b)), b,
+        equals: hrvEqAll);
   });
 
   group('laws', () {

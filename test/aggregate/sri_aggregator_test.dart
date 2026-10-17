@@ -30,6 +30,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -478,6 +479,11 @@ void main() {
       final a = sriAggregator(5);
       _allPaths(a, rec.epochs, singletonBounds(rec.n), want, 'singletons');
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final b = _record(Rng(0xC0DE), 53, 4, masked: true, flipP: .3).epochs;
+    expectCheckpointResumes(sriAggregator(4), b, equals: _eq);
   });
 
   group('lawful (exact equality)', () {

@@ -12,6 +12,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
 
@@ -412,6 +413,13 @@ void main() {
             'case $t left-nested $b');
       }
     });
+  });
+
+  test('persistable: a mid-stream checkpoint resumes to the one-pass result', () {
+    final g = _tidy(Rng(0xC0DE));
+    expectCheckpointResumes(
+        HypnogramAggregator(g.start, g.end), _batch(_sorted(g.segs)),
+        equals: fieldsEqual<HypnogramMetrics>(_fields));
   });
 
   group('laws', () {
