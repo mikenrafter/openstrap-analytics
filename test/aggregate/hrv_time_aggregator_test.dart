@@ -187,12 +187,16 @@ void main() {
       expect(a.run(contiguous).rmssd, closeTo(100.0, 1e-9));
       expect(a.run(holed).rmssd, closeTo(100.0, 1e-9)); // only 800->900 counts
       // exactly nn + 0.5 is still contiguous; nn + 1.0 is a hole
+      // diffs +100 then -30: contiguous keeps both (pNN50 50 %); a hole drops
+      // the -30 (pNN50 100 %).
       final edge = <Beat>[
         (nnMs: 800.0, timeMs: 1000.0),
-        (nnMs: 900.0, timeMs: 1900.5),
-        (nnMs: 800.0, timeMs: 2701.5),
+        (nnMs: 900.0, timeMs: 1900.5), // dt 900.5 = nn + 0.5
+        (nnMs: 870.0, timeMs: 2771.0), // dt 870.5 = nn + 0.5
       ];
-      expect(a.run(edge).pnn50, 50.0); // 1 of 2 diffs: |100| > 50, |-100| > 50
+      expect(a.run(edge).pnn50, 50.0);
+      final hole = <Beat>[...edge.take(2), (nnMs: 870.0, timeMs: 2772.0)];
+      expect(a.run(hole).pnn50, 100.0); // dt 871.5 > nn + 0.5
     });
   });
 
