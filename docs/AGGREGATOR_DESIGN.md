@@ -84,6 +84,9 @@ All lawful, so anything assembled from them is lawful too:
   `.map(f)` on the result
 - grouping: `GroupBy(key, inner)` (consecutive equal keys reach `inner` as one
   slice; per-key order kept)
+- prefixes: `Prefix(k, head, tail)` (the first k rows of the whole input go
+  to `head`, kept verbatim, at most k rows; every later row goes to `tail`)
+- recurrences: `Ewma(col, λ)` finishes as an `Affine` map (see below)
 - neighbour context: `Lookback(k, inner)`. `inner` processes every length-k
   window inside each slice it is given. `Lookback` keeps the first and last
   k−1 rows and hands `inner` the seam rows on `combine` and on
@@ -93,6 +96,23 @@ All lawful, so anything assembled from them is lawful too:
 
 Where no block fits, a small hand-written inner (an `Aggregator` with a tight
 loop) is fine. It is still checked by the same laws.
+
+## Two ways to make an "unmergeable" calculation mergeable
+
+Earlier experiments filed some calculations as not mergeable. Two
+techniques moved them across:
+
+- **Summarise a function, not a value.** An EWMA step
+  `c ← (1 − λ)c + λx` is an affine map of the running value. Affine maps
+  compose associatively, so a chunk's summary is the composed map
+  `(scale, offset)`, and `finish` applies it to the seed. CTL/ATL/TSB is
+  `both(Count, Prefix(prime, mean, both(Ewma, Ewma)))`.
+- **Summarise a distribution exactly when its support is small.**
+  Time-in-zone credits each sample with `min(gap, m)`, where `m` is the
+  median gap of the whole stream. The state keeps exact histograms of gap
+  values, which are bounded by the number of distinct gaps (a handful on a
+  1 Hz stream), and the median and crediting move to `finish`. The median is
+  bit-identical to the batch code.
 
 ## Converting a module: recipe
 
@@ -119,21 +139,25 @@ loop) is fine. It is still checked by the same laws.
 | HRV time domain | additive | 1e-9 | `Lookback(2)`, `Lookback(3)`, `Moments`, `GroupBy` over `Beats` |
 | Phillips SRI | rewired in place | exact | `Lookback(epochsPerDay + 1)` + `GroupBy` per day pair over `Epochs` |
 | Banister TRIMP | additive | 1e-12 | `both(Count, SumOf)` |
-| cosinor | additive | 1e-9 (R² 1e-7) | one inner computing cos/sin once per row, ten sums |
+| cosinor | additive | 1e-9 (R² 1e-7) | one inner computing cos/sin once per row; centred co-moments |
+| time in zone | additive | 1e-12 | `Lookback(2)` + exact gap histograms; median at finish |
+| CTL/ATL/TSB | additive | 1e-9 | `Count`, `Prefix`, `Sum`, two `Ewma` maps |
 
 Speed, AOT, Dart 3.11.4 on this box (`tool/bench_aggregate.dart`):
 
 | 30,000 beats, HRV time domain | µs |
 |---|---:|
 | `hrvTime()` (current batch code) | 4,956 |
-| hand loop, same statistics | 596 |
-| composed, one slice | 1,030 |
-| composed, 24 slices + combine | 1,048 |
+| hand loop, same statistics | 639 |
+| composed, one slice | 1,281 |
+| composed, 24 slices + combine | 1,209 |
 | composed, one-row slices | 10,106 |
 | per-element composed (earlier API) | ~24,800 |
 
-The composed version is 1.7× a hand loop and 5× faster than the current batch
-function. Chunking costs nothing extra.
+The composed version is about 2× a hand loop and about 4× faster than the
+current batch function. Chunking costs nothing extra. (It was 1.7× before the
+review fixes switched the lag-1 ACF to centred co-moments, which cost one
+division per row and removed a cancellation bug.)
 
 ## Known limits
 
