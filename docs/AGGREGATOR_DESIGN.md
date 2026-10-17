@@ -164,6 +164,7 @@ techniques moved them across:
 | cosinor | additive | 1e-9 (R² 1e-7) | one inner computing cos/sin once per row; centred co-moments |
 | time in zone | additive | 1e-12 | `Lookback(2)` + exact gap histograms; median at finish |
 | CTL/ATL/TSB | additive | 1e-9 | `Count`, `Prefix`, `Sum`, two `Ewma` maps |
+| PRSA DC/AC | additive | 1e-9 | `Count` + `Lookback(2l + 1)` with a profile-sum inner |
 | circadian IS/IV/M10/L5/RA | additive | 1e-12 int data, 1e-9 real | `Moments`, `GroupBy`, `Lookback(2)` + one 15-line inner |
 
 Every module above is persistable and resumes from a mid-stream checkpoint.
