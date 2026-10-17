@@ -1,166 +1,235 @@
-// Aggregator core: fold / foldRange / run, the combinators, and every
-// primitive on small known inputs plus the laws on random seeded inputs.
+// Aggregator core: the Batch implementations, fold (with ranges) / run /
+// runList, map and both.
 
-import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
-import 'package:openstrap_analytics/onehz.dart' show IntHistogram, RunningMoments;
 import 'package:test/test.dart';
 
 import '../support/aggregator_laws.dart';
-import '../support/fold_law_support.dart' show foldBounds;
 import '../support/property.dart' show Rng;
 
-List<Object?> _momentFields(RunningMoments m) =>
-    [m.count, m.mean, m.sampleSd, m.populationSd];
+/// Sum of the int rows. State is a one-slot list so combine/addSlice can mutate.
+class _SumRows extends Aggregator<List<int>, ListBatch<int>, int> {
+  const _SumRows();
+  @override
+  List<int> empty() => [0];
+  @override
+  List<int> addSlice(List<int> s, ListBatch<int> b, int start, int end) {
+    for (var i = start; i < end; i++) {
+      s[0] += b.rows[i];
+    }
+    return s;
+  }
 
-List<Object?> _histFields(IntHistogram h) =>
-    [h.count, h.distinct, h.median, h.percentile(10), h.percentile(90)];
+  @override
+  List<int> combine(List<int> left, List<int> right) {
+    left[0] += right[0];
+    return left;
+  }
 
-bool _listEq<T>(List<T> a, List<T> b) => a.toString() == b.toString();
+  @override
+  int finish(List<int> s) => s[0];
+}
+
+/// Rows seen, in order, as a list (state mutated in place).
+class _Rows extends Aggregator<List<int>, ListBatch<int>, List<int>> {
+  const _Rows();
+  @override
+  List<int> empty() => <int>[];
+  @override
+  List<int> addSlice(List<int> s, ListBatch<int> b, int start, int end) =>
+      s..addAll(b.rows.sublist(start, end));
+  @override
+  List<int> combine(List<int> left, List<int> right) => left..addAll(right);
+  @override
+  List<int> finish(List<int> s) => List<int>.of(s);
+}
+
+bool _same<T>(T a, T b) => a.toString() == b.toString();
 
 void main() {
-  final ints = randomCases<int>(1, (r) => r.intIn(-1000, 1000));
-  final smallInts = randomCases<int>(2, (r) => r.intIn(0, 9));
-  final doubles = randomCases<double>(
-      3, (r) => (r.nextDouble() - .5) * math.pow(10, r.intIn(0, 8)));
-  final pos = randomCases<double>(4, (r) => 1 + r.nextDouble() * 100);
+  group('ListBatch', () {
+    test('length, rows and copyRange', () {
+      final b = ListBatch<String>(['a', 'b', 'c', 'd']);
+      expect(b.length, 4);
+      expect(b.rows, ['a', 'b', 'c', 'd']);
+      expect(b.copyRange(1, 3).rows, ['b', 'c']);
+      expect(b.copyRange(0, 4).rows, ['a', 'b', 'c', 'd']);
+      expect(b.copyRange(2, 2).length, 0);
+      expect(b.copyRange(4, 4).length, 0);
+      expect(b.copyRange(1, 3).length, 2);
+    });
 
-  group('fold, foldRange, run', () {
-    final sum = IntSum<int>(_id);
+    test('copyRange is a copy: later changes to the source do not show', () {
+      final rows = [1, 2, 3, 4];
+      final b = ListBatch<int>(rows);
+      final c = b.copyRange(1, 4);
+      rows[1] = 99;
+      rows[3] = 77;
+      expect(c.rows, [2, 3, 4]);
+    });
+
+    test('join puts this before other and leaves both unchanged', () {
+      final a = ListBatch<int>([1, 2]), b = ListBatch<int>([3, 4, 5]);
+      final j = a.join(b);
+      expect(j.rows, [1, 2, 3, 4, 5]);
+      expect(j.length, 5);
+      expect(a.rows, [1, 2]);
+      expect(b.rows, [3, 4, 5]);
+      expect(a.join(ListBatch<int>([])).rows, [1, 2]);
+      expect(ListBatch<int>([]).join(b).rows, [3, 4, 5]);
+      expect(ListBatch<int>([]).join(ListBatch<int>([])).length, 0);
+    });
+  });
+
+  group('DoubleColumn', () {
+    test('length, values and copyRange', () {
+      final c = col([1, 2, 3, 4]);
+      expect(c.length, 4);
+      expect(c.copyRange(1, 3).values, [2.0, 3.0]);
+      expect(c.copyRange(0, 4).values, [1.0, 2.0, 3.0, 4.0]);
+      expect(c.copyRange(3, 3).length, 0);
+    });
+
+    test('copyRange is a copy: later changes to the source do not show', () {
+      final v = Float64List.fromList([1, 2, 3, 4]);
+      final c = DoubleColumn(v).copyRange(1, 3);
+      v[1] = 99;
+      v[2] = 77;
+      expect(c.values, [2.0, 3.0]);
+    });
+
+    test('join, with NaN kept as a missing value', () {
+      final a = col([1, double.nan]), b = col([3]);
+      final j = a.join(b);
+      expect(j.length, 3);
+      expect(j.values[0], 1.0);
+      expect(j.values[1].isNaN, isTrue);
+      expect(j.values[2], 3.0);
+      expect(a.length, 2);
+      expect(b.values, [3.0]);
+      expect(a.join(col([])).length, 2);
+      expect(col([]).join(b).values, [3.0]);
+    });
+  });
+
+  group('fold, run, runList', () {
+    const sum = _SumRows();
+    final batch = ListBatch<int>([for (var i = 1; i <= 5; i++) i]);
 
     test('run of nothing is the identity result', () {
-      expect(sum.run(<int>[]), 0);
-      expect(Count<int>().run(<int>[]), 0);
+      expect(sum.run(ListBatch<int>([])), 0);
+      expect(sum.runList(<int>[]), 0);
     });
 
-    test('run folds in order and finishes', () {
-      expect(sum.run([1, 2, 3, 4]), 10);
-      expect(Last<int>().run([1, 2, 3]), 3);
-      expect(First<int>().run([1, 2, 3]), 1);
+    test('run equals finish(fold) and folds in order', () {
+      expect(sum.run(batch), 15);
+      expect(sum.finish(sum.fold(batch)), 15);
+      expect(const _Rows().run(batch), [1, 2, 3, 4, 5]);
     });
 
-    test('run accepts any Iterable', () {
-      expect(sum.run(Iterable<int>.generate(5, (i) => i + 1)), 15);
-      expect(sum.run({1, 2, 3}), 6);
+    test('runList is run over a ListBatch', () {
+      expect(sum.runList([4, 5, 6]), 15);
+      expect(const _Rows().runList([9, 8, 7]), [9, 8, 7]);
     });
 
-    test('run equals finish(fold)', () {
-      final xs = [4, 5, 6];
-      expect(sum.finish(sum.fold(xs)), sum.run(xs));
+    test('fold takes a half-open range; end defaults to the length', () {
+      expect(sum.finish(sum.fold(batch, 1, 4)), 2 + 3 + 4);
+      expect(sum.finish(sum.fold(batch, 0, 5)), 15);
+      expect(sum.finish(sum.fold(batch, 2)), 3 + 4 + 5);
+      expect(sum.finish(sum.fold(batch, 5)), 0);
+      expect(sum.finish(sum.fold(batch, 2, 2)), 0);
+      expect(sum.finish(sum.fold(batch, 5, 5)), 0);
+      expect(const _Rows().finish(const _Rows().fold(batch, 1, 3)), [2, 3]);
     });
 
-    test('foldRange folds the half-open slice', () {
-      final xs = [1, 2, 3, 4, 5];
-      expect(sum.finish(sum.foldRange(xs, 1, 4)), 9);
-      expect(sum.finish(sum.foldRange(xs, 0, 5)), 15);
-      expect(sum.finish(sum.foldRange(xs, 2, 2)), 0);
-      expect(sum.finish(sum.foldRange(xs, 5, 5)), 0);
-    });
-
-    test('foldRange slices combine back to the whole', () {
-      final xs = [for (var i = 1; i <= 20; i++) i];
-      for (var k = 0; k <= xs.length; k++) {
-        final s = sum.combine(sum.foldRange(xs, 0, k), sum.foldRange(xs, k, 20));
+    test('fold ranges combine back to the whole at every split', () {
+      final xs = ListBatch<int>([for (var i = 1; i <= 20; i++) i]);
+      for (var k = 0; k <= 20; k++) {
+        final s = sum.combine(sum.fold(xs, 0, k), sum.fold(xs, k, 20));
         expect(sum.finish(s), 210, reason: 'split at $k');
       }
     });
 
-    test('empty() returns independent states', () {
-      final a = sum.empty(), b = sum.empty();
-      sum.add(a, 5);
-      expect(sum.finish(b), 0);
-      final m = Moments<double>(_idD);
-      final ma = m.empty(), mb = m.empty();
-      m.add(ma, 3.0);
-      expect(m.finish(mb).count, 0);
-      final h = Histogram<int>(_id);
-      final ha = h.empty(), hb = h.empty();
-      h.add(ha, 3);
-      expect(h.finish(hb).count, 0);
+    test('addSlice continues a state: several slices equal one', () {
+      var s = sum.empty();
+      s = sum.addSlice(s, batch, 0, 2);
+      s = sum.addSlice(s, batch, 2, 2);
+      s = sum.addSlice(s, batch, 2, 5);
+      expect(sum.finish(s), 15);
     });
 
-    test('finish does not mutate the state: finish twice, keep adding', () {
-      final m = Moments<double>(_idD);
-      var s = m.fold([1.0, 2.0, 3.0]);
-      final first = _momentFields(m.finish(s));
-      expect(_momentFields(m.finish(s)), first);
-      s = m.add(s, 10.0);
-      expect(m.finish(s).count, 4);
-      expect(m.finish(m.fold([1.0, 2.0, 3.0, 10.0])).mean, m.finish(s).mean);
+    test('empty() returns independent states', () {
+      final a = sum.empty(), b = sum.empty();
+      sum.addSlice(a, batch, 0, 5);
+      expect(sum.finish(b), 0);
+    });
 
-      final h = Histogram<int>(_id);
-      var hs = h.fold([1, 2, 2]);
-      expect(h.finish(hs).count, 3);
-      expect(h.finish(hs).count, 3);
-      hs = h.add(hs, 9);
-      expect(h.finish(hs).count, 4);
+    test('chunked and sliced runs agree with the whole run', () {
+      const agg = _Rows();
+      final r = Rng(99);
+      for (final b in randomIntBatches(1)) {
+        for (var t = 0; t < 6; t++) {
+          final bounds = randomBounds(r, b.length);
+          expect(runChunked(agg, b, bounds), b.rows, reason: '$bounds');
+          expect(runChunked(agg, b, bounds, copy: true), b.rows,
+              reason: 'copy $bounds');
+          expect(runChunkedRight(agg, b, bounds), b.rows, reason: '$bounds');
+          expect(runSliced(agg, b, bounds), b.rows, reason: '$bounds');
+        }
+      }
     });
   });
 
-  group('combinators', () {
-    test('map transforms the result only', () {
-      final a = IntSum<int>(_id).map((n) => 'n=$n');
-      expect(a.run([1, 2, 3]), 'n=6');
-      expect(a.run(<int>[]), 'n=0');
-      expectLawful(a, ints);
+  group('map', () {
+    test('transforms the result only', () {
+      final a = const _SumRows().map((n) => 'n=$n');
+      expect(a.runList([1, 2, 3]), 'n=6');
+      expect(a.runList(<int>[]), 'n=0');
+      expectLawful(a, randomIntBatches(2));
     });
 
-    test('map composes', () {
-      final a = Count<int>().map((n) => n * 2).map((n) => n + 1);
-      expect(a.run([7, 7, 7]), 7);
+    test('composes', () {
+      final a = Count<ListBatch<int>>().map((n) => n * 2).map((n) => n + 1);
+      expect(a.runList([7, 7, 7]), 7);
     });
 
-    test('contramap changes the input type', () {
-      final a = IntSum<int>(_id).contramap<String>((s) => s.length);
-      expect(a.run(['a', 'bb', 'ccc']), 6);
-      final b = Max<double>(_idD).contramap<(int, double)>((p) => p.$2);
-      expect(b.run([(1, 2.5), (2, 9.0), (3, 1.0)]), 9.0);
+    test('keeps ranges and seams working', () {
+      final a = const _SumRows().map((n) => n * 10);
+      final b = ListBatch<int>([1, 2, 3, 4]);
+      expect(a.finish(a.combine(a.fold(b, 0, 2), a.fold(b, 2, 4))), 100);
+      expect(a.finish(a.fold(b, 1, 3)), 50);
+    });
+  });
+
+  group('both', () {
+    final a = both(const _SumRows(), Count<ListBatch<int>>());
+
+    test('runs two aggregators over the same rows', () {
+      expect(a.runList([3, 4, 5]), (12, 3));
+      expect(a.runList(<int>[]), (0, 0));
     });
 
-    test('where filters the input before the aggregator sees it', () {
-      final even = IntSum<int>(_id).where((x) => x.isEven);
-      expect(even.run([1, 2, 3, 4, 5, 6]), 12);
-      expect(even.run([1, 3]), 0);
-      expectLawful(even, ints);
+    test('nests and stays lawful', () {
+      final n = both(a, const _Rows());
+      final r = n.runList([3, 9, 5]); // records holding lists compare by identity
+      expect(r.$1, (17, 3));
+      expect(r.$2, [3, 9, 5]);
+      expectLawful(n, randomIntBatches(3), equals: _same);
     });
 
-    test('where applies across a seam', () {
-      final even = Count<int>().where((x) => x.isEven);
-      final xs = [2, 3, 4, 5, 6];
-      final s = even.combine(even.foldRange(xs, 0, 2), even.foldRange(xs, 2, 5));
-      expect(even.finish(s), 3);
-    });
-
-    test('where then map then contramap compose and stay lawful', () {
-      final a = IntSum<int>(_id)
-          .where((x) => x > 0)
-          .map((n) => n * 10)
-          .contramap<int>((x) => x - 5);
-      expect(a.run([1, 6, 10, 3]), (1 + 5) * 10);
-      expectLawful(a, ints);
-    });
-
-    test('both runs two aggregators over the same input', () {
-      final a = both(Count<int>(), IntSum<int>(_id));
-      expect(a.run([3, 4, 5]), (3, 12));
-      expect(a.run(<int>[]), (0, 0));
-    });
-
-    test('both nests and stays lawful', () {
-      final a = both(
-          both(Count<int>(), IntSum<int>(_id)),
-          Max<int>(_id));
-      expect(a.run([3, 9, 5]), ((3, 17), 9));
-      expectLawful(a, ints);
-    });
-
-    test('both gives each side an independent fresh state', () {
-      final a = both(Count<int>(), IntSum<int>(_id));
-      final p = a.add(a.empty(), 5);
+    test('each side has its own fresh state', () {
+      final p = a.addSlice(a.empty(), ListBatch<int>([5]), 0, 1);
       final q = a.empty();
       expect(a.finish(q), (0, 0));
-      expect(a.finish(p), (1, 5));
+      expect(a.finish(p), (5, 1));
+    });
+
+    test('combines across a seam and honours fold ranges', () {
+      final b = ListBatch<int>([1, 2, 3, 4]);
+      expect(a.finish(a.combine(a.fold(b, 0, 2), a.fold(b, 2, 4))), (10, 4));
+      expect(a.finish(a.fold(b, 1, 3)), (5, 2));
     });
 
     test('Pair is a mutable holder', () {
@@ -169,187 +238,5 @@ void main() {
       p.second = 'b';
       expect((p.first, p.second), (2, 'b'));
     });
-
-    test('both combines across a seam', () {
-      final a = both(First<int>(), Last<int>());
-      final xs = [1, 2, 3, 4];
-      final s = a.combine(a.foldRange(xs, 0, 2), a.foldRange(xs, 2, 4));
-      expect(a.finish(s), (1, 4));
-    });
-  });
-
-  group('primitives: known values', () {
-    test('Count', () {
-      expect(Count<String>().run(['a', 'b', 'c']), 3);
-      expect(Count<String>().run([]), 0);
-    });
-
-    test('IntSum applies the projection', () {
-      expect(IntSum<String>((s) => s.length).run(['ab', 'c', '']), 3);
-      expect(IntSum<int>(_id).run([-5, 5, 7]), 7);
-    });
-
-    test('DoubleSum: empty is 0.0 and plain sums are right', () {
-      expect(DoubleSum<double>(_idD).run([]), 0.0);
-      expect(DoubleSum<double>(_idD).run([1.5, 2.5, -1.0]), 3.0);
-    });
-
-    test('DoubleSum is compensated (ten times 0.1 is exactly 1.0)', () {
-      expect(DoubleSum<int>((_) => 0.1).run(List.filled(10, 0)), 1.0);
-    });
-
-    test('DoubleSum is Neumaier compensated (big, small, minus big)', () {
-      expect(DoubleSum<double>(_idD).run([1e16, 1.0, -1e16]), 1.0);
-      expect(DoubleSum<double>(_idD).run([1.0, 1e16, -1e16]), 1.0);
-    });
-
-    test('DoubleSum compensation survives chunking', () {
-      final a = DoubleSum<double>(_idD);
-      final xs = [1e16, 1.0, -1e16, 1.0];
-      for (var k = 0; k <= xs.length; k++) {
-        final s = a.combine(a.foldRange(xs, 0, k), a.foldRange(xs, k, 4));
-        expect(a.finish(s), 2.0, reason: 'split at $k');
-      }
-    });
-
-    test('Min and Max, null when empty', () {
-      final mn = Min<int>(_id), mx = Max<int>(_id);
-      expect(mn.run([3, -1, 2]), -1);
-      expect(mx.run([3, -1, 2]), 3);
-      expect(mn.run(<int>[]), isNull);
-      expect(mx.run(<int>[]), isNull);
-      expect(mn.run([7]), 7);
-      expect(Min<double>(_idD).run([2.5, 1.5]), 1.5);
-      expect(Max<double>(_idD).run([2.5, 1.5]), 2.5);
-      expect(mx.run([-4, -9]), -4);
-    });
-
-    test('Min and Max use the projection and return the number', () {
-      expect(Min<String>((s) => s.length).run(['abc', 'a', 'ab']), 1);
-      expect(Max<String>((s) => s.length).run(['abc', 'a', 'ab']), 3);
-    });
-
-    test('Min and Max with an empty side on either end of a seam', () {
-      final mx = Max<int>(_id);
-      expect(mx.finish(mx.combine(mx.empty(), mx.fold([4, 2]))), 4);
-      expect(mx.finish(mx.combine(mx.fold([4, 2]), mx.empty())), 4);
-      expect(mx.finish(mx.combine(mx.empty(), mx.empty())), isNull);
-    });
-
-    test('First and Last, null when empty', () {
-      expect(First<String>().run(['x', 'y', 'z']), 'x');
-      expect(Last<String>().run(['x', 'y', 'z']), 'z');
-      expect(First<String>().run([]), isNull);
-      expect(Last<String>().run([]), isNull);
-    });
-
-    test('First and Last keep a seam in order, skipping empty chunks', () {
-      final f = First<int>(), l = Last<int>();
-      final xs = [10, 20, 30];
-      final fs = f.combine(f.combine(f.foldRange(xs, 0, 0), f.foldRange(xs, 0, 2)),
-          f.foldRange(xs, 2, 3));
-      expect(f.finish(fs), 10);
-      final ls = l.combine(l.combine(l.foldRange(xs, 0, 2), l.foldRange(xs, 2, 3)),
-          l.foldRange(xs, 3, 3));
-      expect(l.finish(ls), 30);
-    });
-
-    test('Moments on a textbook sample', () {
-      final m = Moments<double>(_idD)
-          .run([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]);
-      expect(m.count, 8);
-      expect(m.mean, closeTo(5.0, 1e-12));
-      expect(m.populationSd, closeTo(2.0, 1e-12));
-      expect(m.sampleSd, closeTo(math.sqrt(32 / 7), 1e-12));
-    });
-
-    test('Moments: empty and one value', () {
-      final e = Moments<double>(_idD).run([]);
-      expect((e.count, e.mean, e.sampleSd), (0, null, null));
-      final one = Moments<double>(_idD).run([4.0]);
-      expect((one.count, one.mean, one.sampleSd), (1, 4.0, null));
-    });
-
-    test('Moments merged across a seam matches the whole', () {
-      final a = Moments<double>(_idD);
-      final xs = [for (var i = 0; i < 30; i++) math.sin(i) * 100 + 500];
-      final whole = a.run(xs);
-      for (final k in [0, 1, 15, 29, 30]) {
-        final r = a.finish(a.combine(a.foldRange(xs, 0, k), a.foldRange(xs, k, 30)));
-        expect(r.count, whole.count);
-        expect(r.mean, closeTo(whole.mean!, 1e-9));
-        expect(r.sampleSd, closeTo(whole.sampleSd!, 1e-9));
-      }
-    });
-
-    test('Histogram counts, distinct, median', () {
-      final h = Histogram<int>(_id).run([3, 1, 3, 2]);
-      expect(h.count, 4);
-      expect(h.distinct, 3);
-      expect(h.median, 2.5);
-      expect(Histogram<int>(_id).run(<int>[]).median, isNull);
-    });
-
-    test('Histogram uses the projection and merges across a seam', () {
-      final a = Histogram<String>((s) => s.length);
-      final xs = ['a', 'bb', 'ccc', 'bb', 'a', 'a'];
-      final r = a.finish(a.combine(a.foldRange(xs, 0, 3), a.foldRange(xs, 3, 6)));
-      expect(_histFields(r), _histFields(a.run(xs)));
-      expect(r.count, 6);
-      expect(r.distinct, 3);
-    });
-  });
-
-  group('primitives: laws on random cases', () {
-    test('Count', () => expectLawful(Count<int>(), ints));
-    test('IntSum', () => expectLawful(IntSum<int>(_id), ints));
-    test('IntSum with a projection',
-        () => expectLawful(IntSum<int>((x) => x * x), ints));
-    test('Min', () => expectLawful(Min<int>(_id), ints));
-    test('Max', () => expectLawful(Max<int>(_id), ints));
-    test('Min on doubles', () => expectLawful(Min<double>(_idD), doubles));
-    test('First', () => expectLawful(First<int>(), ints));
-    test('Last', () => expectLawful(Last<int>(), ints));
-
-    test('DoubleSum (tolerance)', () {
-      expectLawful(DoubleSum<double>(_idD), doubles,
-          equals: fieldsEqual<double>((x) => [x], relTol: 1e-12, absTol: 1e-6));
-    });
-
-    test('Moments (tolerance)', () {
-      expectLawful(Moments<double>(_idD), pos,
-          equals: fieldsEqual<RunningMoments>(_momentFields,
-              relTol: 1e-9, absTol: 1e-9));
-    });
-
-    test('Histogram (exact)', () {
-      expectLawful(Histogram<int>(_id), smallInts,
-          equals: fieldsEqual<IntHistogram>(_histFields));
-    });
-
-    test('both of primitives with mixed result types', () {
-      expectLawful(
-          both(Min<int>(_id), Histogram<int>(_id))
-              .map((r) => [r.$1, ..._histFields(r.$2)]),
-          smallInts,
-          equals: _listEq);
-    });
-  });
-
-  group('chunked runs agree with the unchunked run', () {
-    test('random chunk bounds, sum and compound aggregator', () {
-      final agg = both(IntSum<int>(_id), Max<int>(_id));
-      final r = Rng(99);
-      for (final xs in ints) {
-        final want = agg.run(xs);
-        for (var t = 0; t < 8; t++) {
-          final b = foldBounds(xs.length, r.intIn(0, 6), r.nextInt(1 << 20));
-          expect(runChunked(agg, xs, b), want, reason: '$b');
-        }
-      }
-    });
   });
 }
-
-int _id(int x) => x;
-double _idD(double x) => x;

@@ -1,5 +1,8 @@
-// Shared helpers for the aggregator tests: the law assertion, seeded case
-// generation, and chunked evaluation.
+// Shared helpers for the column-slice aggregator tests: the law assertion,
+// seeded batch generation, and the three ways to evaluate an aggregator over a
+// batch (whole, chunked + combined, one state sliced).
+
+import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:test/test.dart';
@@ -9,12 +12,12 @@ import 'property.dart' show Rng;
 
 /// Asserts that [agg] satisfies every aggregator law on [cases]. The failure
 /// message lists each violated law with its detail.
-void expectLawful<S, A, R>(
-  Aggregator<S, A, R> agg,
-  List<List<A>> cases, {
+void expectLawful<S, B extends Batch<B>, R>(
+  Aggregator<S, B, R> agg,
+  List<B> cases, {
   ResultEquals<R>? equals,
 }) {
-  final violations = checkLaws<S, A, R>(agg, cases, equals: equals);
+  final violations = checkLaws<S, B, R>(agg, cases, equals: equals);
   expect(violations, isEmpty,
       reason: violations.isEmpty
           ? null
@@ -22,31 +25,83 @@ void expectLawful<S, A, R>(
               '${violations.map((v) => '  ${v.law}: ${v.detail}').join('\n')}');
 }
 
-/// Seeded random input lists. Always includes the empty list, a singleton and
-/// a pair, then [count] lists of length `0..maxLen`.
-List<List<A>> randomCases<A>(int seed, A Function(Rng) elem,
-    {int count = 30, int maxLen = 40}) {
+/// Seeded random double columns. Always starts with the empty column, a
+/// singleton and a pair, then [count] columns of length `0..maxLen`. A value
+/// is NaN with probability [nanP]; [value] draws the finite ones.
+List<DoubleColumn> randomColumns(int seed,
+    {int count = 30,
+    int maxLen = 40,
+    double nanP = .15,
+    double Function(Rng)? value}) {
   final r = Rng(seed);
-  List<A> list(int n) => [for (var i = 0; i < n; i++) elem(r)];
+  final draw = value ?? (Rng r) => (r.nextDouble() - .5) * 2000;
+  DoubleColumn col(int n) => DoubleColumn(Float64List.fromList(
+      [for (var i = 0; i < n; i++) r.nextBool(nanP) ? double.nan : draw(r)]));
   return [
-    <A>[],
-    list(1),
-    list(2),
-    for (var i = 0; i < count; i++) list(r.intIn(0, maxLen)),
+    col(0),
+    col(1),
+    col(2),
+    for (var i = 0; i < count; i++) col(r.intIn(0, maxLen)),
   ];
 }
 
-/// Folds each chunk `xs[bounds[k]..bounds[k+1])` from a fresh state and
-/// combines the chunk states left to right, then finishes. Bounds are as from
-/// [foldBounds] (`[0, ...cuts, n]`, cuts may repeat so chunks may be empty).
-R runChunked<S, A, R>(Aggregator<S, A, R> agg, List<A> xs, List<int> bounds) {
-  var acc = agg.foldRange(xs, bounds[0], bounds[1]);
+/// Seeded random int batches, same shape as [randomColumns].
+List<ListBatch<int>> randomIntBatches(int seed,
+    {int count = 30, int maxLen = 40, int lo = -1000, int hi = 1000}) {
+  final r = Rng(seed);
+  ListBatch<int> b(int n) =>
+      ListBatch<int>([for (var i = 0; i < n; i++) r.intIn(lo, hi)]);
+  return [b(0), b(1), b(2), for (var i = 0; i < count; i++) b(r.intIn(0, maxLen))];
+}
+
+/// A column of the given values.
+DoubleColumn col(List<double> xs) => DoubleColumn(Float64List.fromList(xs));
+
+/// Chunk bounds `[0, ...cuts, n]` for a batch of [n] rows. Cuts may repeat or
+/// sit on 0 / 1 / 2 / 3 / n-1 / n, so there are empty, singleton and very short
+/// chunks.
+List<int> randomBounds(Rng r, int n) =>
+    foldBounds(n, r.intIn(0, 6), r.nextInt(1 << 30), special: [0, 1, 2, 3]);
+
+/// Folds each chunk `[bounds[k], bounds[k+1])` from a fresh state and combines
+/// the chunk states left to right, then finishes. With [copy] each chunk is
+/// first cut out with `copyRange` and folded as a batch of its own (so the
+/// inner aggregator cannot peek at rows before the chunk); otherwise chunks are
+/// ranges of the one batch.
+R runChunked<S, B extends Batch<B>, R>(
+    Aggregator<S, B, R> agg, B batch, List<int> bounds,
+    {bool copy = false}) {
+  S chunk(int a, int b) => copy
+      ? agg.fold(batch.copyRange(a, b))
+      : agg.fold(batch, a, b);
+  var acc = chunk(bounds[0], bounds[1]);
   for (var k = 1; k + 1 < bounds.length; k++) {
-    acc = agg.combine(acc, agg.foldRange(xs, bounds[k], bounds[k + 1]));
+    acc = agg.combine(acc, chunk(bounds[k], bounds[k + 1]));
   }
   return agg.finish(acc);
 }
 
-/// Random chunk bounds for a list of [n] elements.
-List<int> randomBounds(Rng r, int n) =>
-    foldBounds(n, r.intIn(0, 6), r.nextInt(1 << 30), special: [0, 1, 2, 3]);
+/// Same chunks, combined right to left: `c0 + (c1 + (c2 + ...))`.
+R runChunkedRight<S, B extends Batch<B>, R>(
+    Aggregator<S, B, R> agg, B batch, List<int> bounds) {
+  var acc = agg.fold(batch, bounds[bounds.length - 2], bounds.last);
+  for (var k = bounds.length - 3; k >= 0; k--) {
+    acc = agg.combine(agg.fold(batch, bounds[k], bounds[k + 1]), acc);
+  }
+  return agg.finish(acc);
+}
+
+/// The 'slicing' path: ONE state, repeated `addSlice` over the consecutive
+/// slices `[bounds[k], bounds[k+1])` (empty slices included), then finish.
+R runSliced<S, B extends Batch<B>, R>(
+    Aggregator<S, B, R> agg, B batch, List<int> bounds) {
+  var state = agg.empty();
+  for (var k = 0; k + 1 < bounds.length; k++) {
+    state = agg.addSlice(state, batch, bounds[k], bounds[k + 1]);
+  }
+  return agg.finish(state);
+}
+
+/// Plain bounds for the chunk-size-one case: `[0, 1, 2, ..., n]` (`[0, 0]` for
+/// an empty batch).
+List<int> singletonBounds(int n) => n == 0 ? [0, 0] : [for (var i = 0; i <= n; i++) i];

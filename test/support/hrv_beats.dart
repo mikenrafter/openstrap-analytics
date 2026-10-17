@@ -1,5 +1,7 @@
-// Shared HRV test helpers: beat-series generators and the hrvTime parity
-// check. Copied from test/aggregate/hrv_time_aggregator_test.dart.
+// Shared HRV test helpers: Beats builders, beat-series generators and the
+// hrvTime parity check.
+
+import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
@@ -18,10 +20,28 @@ List<Object?> hrvFields(HrvTime v) =>
 final hrvEqAll = fieldsEqual<HrvTime>((v) => [...hrvFields(v), v.nBeats],
     relTol: hrvTol, absTol: hrvTol);
 
+/// Beats from records. A null time becomes NaN (missing double).
+Beats hrvBeats(List<Beat> xs) => Beats(
+      Float64List.fromList([for (final b in xs) b.nnMs]),
+      Float64List.fromList([for (final b in xs) b.timeMs ?? double.nan]),
+    );
+
+/// The beat time of the first row, or null for an empty batch. This is the
+/// origin the tests give the aggregator.
+double? hrvOrigin(Beats b) => b.length == 0 ? null : b.timeMs[0];
+
+/// [b] with every time moved so the first beat sits at [origin].
+Beats hrvShifted(Beats b, double origin) {
+  if (b.length == 0) return b;
+  final d = origin - b.timeMs[0];
+  return Beats(Float64List.fromList(b.nnMs),
+      Float64List.fromList([for (final t in b.timeMs) t + d]));
+}
+
 /// What hrvTime says, mapped to the aggregator's expectation.
-HrvTime hrvExpected(List<Beat> beats, {required bool gapAware}) {
-  final nn = [for (final b in beats) b.nnMs];
-  final times = [for (final b in beats) b.timeMs ?? 0.0];
+HrvTime hrvExpected(Beats beats, {required bool gapAware}) {
+  final nn = beats.nnMs.toList();
+  final times = [for (final t in beats.timeMs) t.isNaN ? 0.0 : t];
   final m = hrvTime(nn, nnTimesMs: gapAware ? times : null);
   return m.value ?? HrvTime(nBeats: beats.length);
 }
@@ -50,8 +70,8 @@ void expectHrvParity(HrvTime got, HrvTime want, String tag) {
 ///  RMSSD/pNN50 floor nulls them), mode 2: slow beats (spans several 5-minute
 ///  bins in few beats).
 /// [gapP] is the chance a beat is preceded by a hole; [withTimes] false leaves
-/// every timeMs null.
-List<Beat> hrvSeries(Rng r, int n, int mode,
+/// every time NaN.
+Beats hrvSeries(Rng r, int n, int mode,
     {double gapP = .05, bool withTimes = true}) {
   final out = <Beat>[];
   var t = hrvT0;
@@ -81,9 +101,9 @@ List<Beat> hrvSeries(Rng r, int n, int mode,
     t += nn + extra;
     out.add((nnMs: nn, timeMs: withTimes ? t : null));
   }
-  return out;
+  return hrvBeats(out);
 }
 
 /// Contiguous series with exact constant nn (acf1 undefined: zero variance).
-List<Beat> hrvConstant(int n, double nn) =>
-    [for (var i = 1; i <= n; i++) (nnMs: nn, timeMs: hrvT0 + i * nn)];
+Beats hrvConstant(int n, double nn) =>
+    hrvBeats([for (var i = 1; i <= n; i++) (nnMs: nn, timeMs: hrvT0 + i * nn)]);

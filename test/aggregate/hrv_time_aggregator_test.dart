@@ -1,165 +1,123 @@
-// HrvTimeAggregator parity with hrvTime(): same numbers (within float
-// tolerance) for any beat series and any chunking.
+// hrvTimeAggregator (assembled from lawful blocks) must agree with hrvTime()
+// for any beat series and any chunking or slicing, and obey the laws.
 //
 // Contract used here:
 //  * gapAware (default): every beat carries its time; originMs is the first
 //    beat's time. run(beats) == hrvTime(nn, nnTimesMs: times).value.
-//  * gapAware false: times are ignored; run(beats) == hrvTime(nn).value
-//    (so sdann / sdnnIndex are null and seams are not skipped).
+//  * gapAware false: times are ignored (they may even be NaN); run(beats) ==
+//    hrvTime(nn).value, so sdann / sdnnIndex are null and seams are not
+//    skipped.
 //  * hrvTime returns an absent Metric below 2 beats. The aggregator then
 //    reports nBeats = the beat count and null for every other field.
+//  * originMs is needed as soon as a beat is binned; without it that is a
+//    StateError. Empty input with a null origin is fine.
 
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
 import '../support/aggregator_laws.dart';
-import '../support/fold_law_support.dart' show foldBounds;
+import '../support/hrv_beats.dart';
 import '../support/property.dart' show Rng;
 
-typedef Beat = ({double nnMs, double? timeMs});
+Aggregator<dynamic, Beats, HrvTime> _agg(Beats beats, {bool gapAware = true}) =>
+    hrvTimeAggregator(
+        originMs: gapAware ? hrvOrigin(beats) : null, gapAware: gapAware);
 
-const double _t0 = 1000000.0;
-const _tol = 1e-9;
-
-List<Object?> _fields(HrvTime v) =>
-    [v.rmssd, v.sdnn, v.sdann, v.sdnnIndex, v.pnn50, v.diffAcf1];
-
-final _eqAll = fieldsEqual<HrvTime>(
-    (v) => [..._fields(v), v.nBeats],
-    relTol: _tol,
-    absTol: _tol);
-
-/// What hrvTime says, mapped to the aggregator's expectation.
-HrvTime _expected(List<Beat> beats, {required bool gapAware}) {
-  final nn = [for (final b in beats) b.nnMs];
-  final times = [for (final b in beats) b.timeMs ?? 0.0];
-  final m = hrvTime(nn, nnTimesMs: gapAware ? times : null);
-  return m.value ?? HrvTime(nBeats: beats.length);
+/// Every way of evaluating [bounds] against [want]: left-nested chunks (as
+/// ranges and as copies), right-nested chunks, and one state sliced.
+void _expectAllPaths(Aggregator<dynamic, Beats, HrvTime> agg, Beats beats,
+    List<int> bounds, HrvTime want, String tag) {
+  expectHrvParity(runChunked(agg, beats, bounds), want, '$tag chunks $bounds');
+  expectHrvParity(runChunked(agg, beats, bounds, copy: true), want,
+      '$tag copies $bounds');
+  expectHrvParity(
+      runChunkedRight(agg, beats, bounds), want, '$tag right $bounds');
+  expectHrvParity(runSliced(agg, beats, bounds), want, '$tag sliced $bounds');
 }
 
-HrvTimeAggregator _agg(List<Beat> beats, {bool gapAware = true}) =>
-    HrvTimeAggregator(
-        originMs: gapAware && beats.isNotEmpty ? beats.first.timeMs : null,
-        gapAware: gapAware);
-
-void _expectParity(HrvTime got, HrvTime want, String tag) {
-  expect(got.nBeats, want.nBeats, reason: '$tag: nBeats');
-  for (final (name, a, b) in [
-    ('rmssd', got.rmssd, want.rmssd),
-    ('sdnn', got.sdnn, want.sdnn),
-    ('sdann', got.sdann, want.sdann),
-    ('sdnnIndex', got.sdnnIndex, want.sdnnIndex),
-    ('pnn50', got.pnn50, want.pnn50),
-    ('diffAcf1', got.diffAcf1, want.diffAcf1),
-  ]) {
-    expect(a == null, b == null, reason: '$tag: $name null-ness ($a vs $b)');
-    if (a != null && b != null) {
-      expect((a - b).abs() <= _tol + _tol * b.abs(), isTrue,
-          reason: '$tag: $name $a vs $b');
-    }
-  }
-}
-
-/// Builds a beat series with times. Values are multiples of 0.5 so the gap
-/// rule's float arithmetic is exact in both implementations.
-///  mode 0: smooth (random walk), mode 1: white noise (jittery, so the
-///  RMSSD/pNN50 floor nulls them), mode 2: slow beats (spans several 5-minute
-///  bins in few beats).
-/// [gapP] is the chance a beat is preceded by a hole; [withTimes] false leaves
-/// every timeMs null.
-List<Beat> _series(Rng r, int n, int mode,
-    {double gapP = .05, bool withTimes = true}) {
+/// [segments] runs of 12 beats alternating 860/800 ms, each starting at 860,
+/// with a 5 s hole between runs. Inside a run the diffs alternate -60/+60 (diff
+/// acf strongly negative). Run k ends with a -60 diff and run k+1 opens with a
+/// -60 diff, so a lag pair formed across the hole would be (-60, -60), a
+/// positive product that drags acf1 up.
+Beats _alternatingRuns(int segments) {
   final out = <Beat>[];
-  var t = _t0;
-  var nn = mode == 2 ? 1700.0 : 800.0;
-  for (var i = 0; i < n; i++) {
-    switch (mode) {
-      case 1:
-        nn = 600 + r.intIn(0, 800) / 1.0;
-      case 2:
-        nn = (nn + r.intIn(-60, 60)).clamp(1200, 2000).toDouble();
-      default:
-        nn = (nn + r.intIn(-40, 40)).clamp(450, 1300).toDouble();
+  var t = hrvT0;
+  for (var s = 0; s < segments; s++) {
+    for (var i = 0; i < 12; i++) {
+      final nn = i.isEven ? 860.0 : 800.0;
+      t += nn + (s > 0 && i == 0 ? 5000 : 0);
+      out.add((nnMs: nn, timeMs: t));
     }
-    if (r.nextBool(.04)) nn += r.intIn(40, 200); // an occasional big step
-    var extra = 0.0;
-    if (i > 0) {
-      final p = r.nextDouble();
-      if (p < gapP) {
-        // a hole; sometimes a whole 5-minute bin or more
-        extra = r.nextBool(.15)
-            ? r.intIn(300000, 700000).toDouble()
-            : r.intIn(600, 30000).toDouble();
-      } else if (p < gapP + .04) {
-        extra = [0.5, 1.0, 0.0][r.nextInt(3)]; // right at the 0.5 ms tolerance
-      }
-    }
-    t += nn + extra;
-    out.add((nnMs: nn, timeMs: withTimes ? t : null));
   }
-  return out;
+  return hrvBeats(out);
 }
-
-/// Contiguous series with exact constant nn (acf1 undefined: zero variance).
-List<Beat> _constant(int n, double nn) =>
-    [for (var i = 1; i <= n; i++) (nnMs: nn, timeMs: _t0 + i * nn)];
 
 void main() {
   group('named series', () {
-    final named = <String, List<Beat>>{
-      'no beats': [],
-      'one beat': [(nnMs: 800.0, timeMs: _t0 + 800)],
-      'two beats': _series(Rng(1), 2, 0),
-      'three beats': _series(Rng(2), 3, 0),
-      '30 beats (29 diffs, acf1 absent)': _series(Rng(3), 30, 0, gapP: 0),
-      '31 beats (30 diffs, acf1 present)': _series(Rng(4), 31, 0, gapP: 0),
-      '60 smooth beats, no gaps': _series(Rng(5), 60, 0, gapP: 0),
+    final named = <String, Beats>{
+      'no beats': hrvBeats([]),
+      'one beat': hrvBeats([(nnMs: 800.0, timeMs: hrvT0 + 800)]),
+      'two beats': hrvSeries(Rng(1), 2, 0),
+      'three beats': hrvSeries(Rng(2), 3, 0),
+      '30 beats (29 diffs, acf1 absent)': hrvSeries(Rng(3), 30, 0, gapP: 0),
+      '31 beats (30 diffs, acf1 present)': hrvSeries(Rng(4), 31, 0, gapP: 0),
+      '60 smooth beats, no gaps': hrvSeries(Rng(5), 60, 0, gapP: 0),
       '300 white-noise beats (jitter floor nulls rmssd and pnn50)':
-          _series(Rng(6), 300, 1, gapP: 0),
+          hrvSeries(Rng(6), 300, 1, gapP: 0),
       'constant 1000 ms, 400 beats (zero variance, bin edge at beat 300)':
-          _constant(400, 1000),
-      'constant 2000 ms, 400 beats (3 bins)': _constant(400, 2000),
-      'slow beats spanning many bins': _series(Rng(7), 380, 2, gapP: .02),
-      'many holes': _series(Rng(8), 200, 0, gapP: .3),
-      'a hole of several bins': [
-        ..._series(Rng(9), 40, 0, gapP: 0),
-        (nnMs: 900.0, timeMs: _t0 + 40 * 800 + 900000),
-        (nnMs: 910.0, timeMs: _t0 + 40 * 800 + 900910),
-        (nnMs: 905.0, timeMs: _t0 + 40 * 800 + 901815),
-      ],
+          hrvConstant(400, 1000),
+      'constant 2000 ms, 400 beats (3 bins)': hrvConstant(400, 2000),
+      'slow beats spanning many bins': hrvSeries(Rng(7), 380, 2, gapP: .02),
+      'many holes': hrvSeries(Rng(8), 200, 0, gapP: .3),
+      'alternating runs': _alternatingRuns(4),
+      'a hole of several bins': hrvBeats([
+        for (var i = 0; i < 40; i++)
+          (nnMs: 800.0, timeMs: hrvT0 + (i + 1) * 800.0),
+        (nnMs: 900.0, timeMs: hrvT0 + 40 * 800 + 900000),
+        (nnMs: 910.0, timeMs: hrvT0 + 40 * 800 + 900910),
+        (nnMs: 905.0, timeMs: hrvT0 + 40 * 800 + 901815),
+      ]),
     };
 
     named.forEach((name, beats) {
       test('$name: gap aware matches hrvTime', () {
-        _expectParity(_agg(beats).run(beats),
-            _expected(beats, gapAware: true), name);
+        final want = hrvExpected(beats, gapAware: true);
+        final a = _agg(beats);
+        expectHrvParity(a.run(beats), want, name);
+        final r = Rng(name.hashCode & 0xffff);
+        for (var t = 0; t < 3; t++) {
+          _expectAllPaths(a, beats, randomBounds(r, beats.length), want, name);
+        }
       });
       test('$name: gapAware false matches hrvTime without times', () {
-        _expectParity(_agg(beats, gapAware: false).run(beats),
-            _expected(beats, gapAware: false), name);
+        final want = hrvExpected(beats, gapAware: false);
+        final a = _agg(beats, gapAware: false);
+        expectHrvParity(a.run(beats), want, name);
+        final r = Rng(name.hashCode & 0xfffe);
+        _expectAllPaths(a, beats, randomBounds(r, beats.length), want, name);
       });
     });
 
     test('fewer than two beats: nBeats set, everything else null', () {
       for (final n in [0, 1]) {
-        final beats = _series(Rng(n), n, 0);
-        final v = _agg(beats).run(beats);
-        expect(v.nBeats, n);
-        expect(_fields(v), everyElement(isNull));
-        final w = _agg(beats, gapAware: false).run(beats);
-        expect(w.nBeats, n);
-        expect(_fields(w), everyElement(isNull));
+        final beats = hrvSeries(Rng(n), n, 0);
+        for (final ga in [true, false]) {
+          final v = _agg(beats, gapAware: ga).run(beats);
+          expect(v.nBeats, n);
+          expect(hrvFields(v), everyElement(isNull));
+        }
       }
     });
 
     test('hand-worked: nn 800, 810, 790 contiguous', () {
-      final beats = <Beat>[
+      final beats = hrvBeats([
         (nnMs: 800.0, timeMs: 1000.0),
         (nnMs: 810.0, timeMs: 1810.0),
         (nnMs: 790.0, timeMs: 2600.0),
-      ];
-      final v = HrvTimeAggregator(originMs: 1000.0).run(beats);
+      ]);
+      final v = hrvTimeAggregator(originMs: 1000.0).run(beats);
       expect(v.nBeats, 3);
       // diffs 10, -20 -> rmssd sqrt((100+400)/2)
       expect(v.rmssd, closeTo(15.811388300841896, 1e-9));
@@ -169,183 +127,227 @@ void main() {
       expect(v.sdann, isNull); // a single 5-minute segment
       expect(v.sdnnIndex, isNull);
     });
-
-    test('the hole rule: a gap above nn + 0.5 ms drops the seam difference',
-        () {
-      // Same nn values; in the second series beat 2 follows a long hole.
-      final contiguous = <Beat>[
-        (nnMs: 800.0, timeMs: 1000.0),
-        (nnMs: 900.0, timeMs: 1900.0),
-        (nnMs: 800.0, timeMs: 2700.0),
-      ];
-      final holed = <Beat>[
-        (nnMs: 800.0, timeMs: 1000.0),
-        (nnMs: 900.0, timeMs: 1900.0),
-        (nnMs: 800.0, timeMs: 9700.0),
-      ];
-      final a = HrvTimeAggregator(originMs: 1000.0);
-      expect(a.run(contiguous).rmssd, closeTo(100.0, 1e-9));
-      expect(a.run(holed).rmssd, closeTo(100.0, 1e-9)); // only 800->900 counts
-      // exactly nn + 0.5 is still contiguous; nn + 1.0 is a hole
-      // diffs +100 then -30: contiguous keeps both (pNN50 50 %); a hole drops
-      // the -30 (pNN50 100 %).
-      final edge = <Beat>[
-        (nnMs: 800.0, timeMs: 1000.0),
-        (nnMs: 900.0, timeMs: 1900.5), // dt 900.5 = nn + 0.5
-        (nnMs: 870.0, timeMs: 2771.0), // dt 870.5 = nn + 0.5
-      ];
-      expect(a.run(edge).pnn50, 50.0);
-      final hole = <Beat>[...edge.take(2), (nnMs: 870.0, timeMs: 2772.0)];
-      expect(a.run(hole).pnn50, 100.0); // dt 871.5 > nn + 0.5
-    });
   });
 
   group('random parity (seeded)', () {
-    test('gap aware, whole series', () {
-      final r = Rng(0x4A11);
-      for (var t = 0; t < 60; t++) {
+    test('gap aware: whole series, chunked, sliced', () {
+      final r = Rng(0x5C11);
+      for (var t = 0; t < 40; t++) {
         final n = r.nextBool(.1) ? r.intIn(0, 3) : r.intIn(0, 400);
-        final beats = _series(r, n, r.intIn(0, 2), gapP: r.nextBool() ? .02 : .15);
-        _expectParity(_agg(beats).run(beats), _expected(beats, gapAware: true),
-            'case $t n=$n');
-      }
-    });
-
-    test('gap aware, random chunkings', () {
-      final r = Rng(0x4A12);
-      for (var t = 0; t < 60; t++) {
-        final n = r.intIn(0, 400);
-        final beats = _series(r, n, r.intIn(0, 2), gapP: r.nextBool() ? .02 : .15);
-        final want = _expected(beats, gapAware: true);
-        final agg = _agg(beats);
-        for (var c = 0; c < 4; c++) {
-          final b = foldBounds(n, r.intIn(0, 8), r.nextInt(1 << 20));
-          _expectParity(runChunked(agg, beats, b), want, 'case $t chunks $b');
+        final beats =
+            hrvSeries(r, n, r.intIn(0, 2), gapP: r.nextBool() ? .02 : .15);
+        final want = hrvExpected(beats, gapAware: true);
+        final a = _agg(beats);
+        expectHrvParity(a.run(beats), want, 'case $t n=$n whole');
+        for (var c = 0; c < 2; c++) {
+          _expectAllPaths(a, beats, randomBounds(r, n), want, 'case $t n=$n');
         }
       }
     });
 
-    test('gapAware false (times present but ignored), chunked', () {
-      final r = Rng(0x4A13);
-      for (var t = 0; t < 40; t++) {
-        final n = r.intIn(0, 300);
-        final beats = _series(r, n, r.intIn(0, 1));
-        final want = _expected(beats, gapAware: false);
-        final agg = _agg(beats, gapAware: false);
-        _expectParity(agg.run(beats), want, 'case $t whole');
-        final b = foldBounds(n, r.intIn(0, 8), r.nextInt(1 << 20));
-        _expectParity(runChunked(agg, beats, b), want, 'case $t chunks $b');
-      }
-    });
-
-    test('gapAware false with no times at all', () {
-      final r = Rng(0x4A14);
+    test('gapAware false (times present but ignored)', () {
+      final r = Rng(0x5C12);
       for (var t = 0; t < 30; t++) {
+        final n = r.intIn(0, 300);
+        final beats = hrvSeries(r, n, r.intIn(0, 1));
+        final want = hrvExpected(beats, gapAware: false);
+        final a = _agg(beats, gapAware: false);
+        expectHrvParity(a.run(beats), want, 'case $t whole');
+        _expectAllPaths(a, beats, randomBounds(r, n), want, 'case $t');
+      }
+    });
+
+    test('gapAware false with no times at all (NaN times)', () {
+      final r = Rng(0x5C13);
+      for (var t = 0; t < 20; t++) {
         final n = r.intIn(0, 250);
-        final beats = _series(r, n, r.intIn(0, 1), withTimes: false);
-        final want = _expected(beats, gapAware: false);
-        final agg = HrvTimeAggregator(gapAware: false);
-        final b = foldBounds(n, r.intIn(0, 8), r.nextInt(1 << 20));
-        _expectParity(runChunked(agg, beats, b), want, 'case $t chunks $b');
+        final beats = hrvSeries(r, n, r.intIn(0, 1), withTimes: false);
+        final want = hrvExpected(beats, gapAware: false);
+        final a = hrvTimeAggregator(gapAware: false);
+        _expectAllPaths(a, beats, randomBounds(r, n), want, 'case $t');
       }
     });
 
-    test('every single split point of a series with holes and several bins', () {
-      final beats = _series(Rng(31), 120, 2, gapP: .1);
-      final want = _expected(beats, gapAware: true);
-      final agg = _agg(beats);
+    test('every single split point (combine and slicing) of a series with '
+        'holes and several bins', () {
+      final beats = hrvSeries(Rng(31), 120, 2, gapP: .1);
+      final want = hrvExpected(beats, gapAware: true);
+      final a = _agg(beats);
       for (var k = 0; k <= beats.length; k++) {
-        final s = agg.combine(
-            agg.foldRange(beats, 0, k), agg.foldRange(beats, k, beats.length));
-        _expectParity(agg.finish(s), want, 'split at $k');
+        final s = a.combine(
+            a.fold(beats, 0, k), a.fold(beats, k, beats.length));
+        expectHrvParity(a.finish(s), want, 'split at $k');
+        expectHrvParity(runSliced(a, beats, [0, k, beats.length]), want,
+            'sliced at $k');
       }
     });
 
-    test('splits that fall on a hole, a bin edge and a 5-minute boundary', () {
-      // constant 1000 ms: beat 299 (index) sits exactly on the edge of bin 1.
-      final beats = _constant(400, 1000);
-      final want = _expected(beats, gapAware: true);
-      final agg = _agg(beats);
+    test('splits on and around a 5-minute bin edge', () {
+      final beats = hrvConstant(400, 1000);
+      final want = hrvExpected(beats, gapAware: true);
+      final a = _agg(beats);
       for (final k in [1, 2, 298, 299, 300, 301, 399]) {
-        final s = agg.combine(
-            agg.foldRange(beats, 0, k), agg.foldRange(beats, k, 400));
-        _expectParity(agg.finish(s), want, 'split at $k');
+        final s = a.combine(a.fold(beats, 0, k), a.fold(beats, k, 400));
+        expectHrvParity(a.finish(s), want, 'split at $k');
+        expectHrvParity(runSliced(a, beats, [0, k, 400]), want, 'sliced $k');
       }
     });
 
-    test('one beat per chunk', () {
-      final beats = _series(Rng(41), 80, 0, gapP: .1);
-      final want = _expected(beats, gapAware: true);
-      final agg = _agg(beats);
-      var acc = agg.foldRange(beats, 0, 1);
-      for (var i = 1; i < beats.length; i++) {
-        acc = agg.combine(acc, agg.foldRange(beats, i, i + 1));
+    test('one beat per chunk and per slice', () {
+      final beats = hrvSeries(Rng(41), 80, 0, gapP: .1);
+      final want = hrvExpected(beats, gapAware: true);
+      final a = _agg(beats);
+      final b = singletonBounds(beats.length);
+      expectHrvParity(runChunked(a, beats, b), want, 'singleton chunks');
+      expectHrvParity(runChunked(a, beats, b, copy: true), want, 'copies');
+      expectHrvParity(runSliced(a, beats, b), want, 'singleton slices');
+    });
+  });
+
+  group('gaps and lags', () {
+    test('lag pairs are not formed across a gap', () {
+      final beats = _alternatingRuns(4); // 44 diffs, seams dropped
+      final want = hrvExpected(beats, gapAware: true);
+      expect(want.diffAcf1, isNotNull);
+      // The scenario discriminates: bridging the gap (ignoring times) moves acf1.
+      final bridged = hrvExpected(beats, gapAware: false);
+      expect((bridged.diffAcf1! - want.diffAcf1!).abs(), greaterThan(.02));
+      final a = _agg(beats);
+      expect(a.run(beats).diffAcf1, closeTo(want.diffAcf1!, 1e-9));
+      // And in chunks and slices cut on and around the seams.
+      for (final k in [11, 12, 13, 23, 24, 25, 35, 36, 37]) {
+        final bounds = [0, k, beats.length];
+        final s = a.combine(a.fold(beats, 0, k), a.fold(beats, k, beats.length));
+        expect(a.finish(s).diffAcf1, closeTo(want.diffAcf1!, 1e-9),
+            reason: 'split at $k');
+        expect(runSliced(a, beats, bounds).diffAcf1, closeTo(want.diffAcf1!, 1e-9),
+            reason: 'sliced at $k');
+        expect(runChunked(a, beats, bounds, copy: true).diffAcf1,
+            closeTo(want.diffAcf1!, 1e-9),
+            reason: 'copies at $k');
       }
-      _expectParity(agg.finish(acc), want, 'singletons');
+      // Three-way cuts that put whole runs apart.
+      for (final b in [
+        [0, 12, 24, 36, 48],
+        [0, 11, 13, 25, 48],
+        [0, 12, 12, 13, 36, 47, 48],
+      ]) {
+        _expectAllPaths(a, beats, b, want, 'runs');
+      }
+    });
+
+    test('the hole rule: nn + 0.5 ms is contiguous, nn + 1.0 ms is a hole', () {
+      // diffs +100 then -30: contiguous keeps both (pNN50 50 %); a hole drops
+      // the -30 (pNN50 100 %).
+      final edge = hrvBeats([
+        (nnMs: 800.0, timeMs: 1000.0),
+        (nnMs: 900.0, timeMs: 1900.5), // dt 900.5 = nn + 0.5
+        (nnMs: 870.0, timeMs: 2771.0), // dt 870.5 = nn + 0.5
+      ]);
+      final hole = hrvBeats([
+        (nnMs: 800.0, timeMs: 1000.0),
+        (nnMs: 900.0, timeMs: 1900.5),
+        (nnMs: 870.0, timeMs: 2772.0), // dt 871.5 > nn + 0.5
+      ]);
+      final a = hrvTimeAggregator(originMs: 1000.0);
+      expect(a.run(edge).pnn50, 50.0);
+      expect(a.run(hole).pnn50, 100.0);
+      expect(a.run(edge).nBeats, 3);
+      expect(a.run(hole).nBeats, 3);
+      // The same across every cut, because the gap check reads times at the seam.
+      for (final bounds in [
+        [0, 1, 3],
+        [0, 2, 3],
+        [0, 1, 2, 3],
+        [0, 0, 1, 1, 3, 3]
+      ]) {
+        expect(runChunked(a, edge, bounds).pnn50, 50.0, reason: 'edge $bounds');
+        expect(runSliced(a, edge, bounds).pnn50, 50.0, reason: 'edge $bounds');
+        expect(runChunked(a, hole, bounds, copy: true).pnn50, 100.0,
+            reason: 'hole $bounds');
+        expect(runSliced(a, hole, bounds).pnn50, 100.0, reason: 'hole $bounds');
+      }
+    });
+
+    test('a contiguous seam with a hole in the gapAware false case is bridged',
+        () {
+      final hole = hrvBeats([
+        (nnMs: 800.0, timeMs: 1000.0),
+        (nnMs: 900.0, timeMs: 1900.5),
+        (nnMs: 870.0, timeMs: 2772.0),
+      ]);
+      final a = hrvTimeAggregator(gapAware: false);
+      expect(a.run(hole).pnn50, 50.0); // times ignored: both diffs count
+      expect(a.run(hole).sdann, isNull);
+      expect(a.run(hole).sdnnIndex, isNull);
+    });
+  });
+
+  group('origin', () {
+    test('a binned beat without an origin is a StateError', () {
+      final beats = hrvSeries(Rng(51), 20, 0, gapP: 0);
+      final a = hrvTimeAggregator(); // gapAware, no origin
+      expect(() => a.run(beats), throwsStateError);
+      expect(() => runChunked(a, beats, [0, 7, 20]), throwsStateError);
+      expect(() => runSliced(a, beats, [0, 7, 20]), throwsStateError);
+      expect(() => a.run(hrvBeats([(nnMs: 800.0, timeMs: hrvT0 + 800)])),
+          throwsStateError);
+    });
+
+    test('empty input with a null origin is fine', () {
+      final a = hrvTimeAggregator();
+      final v = a.run(hrvBeats([]));
+      expect(v.nBeats, 0);
+      expect(hrvFields(v), everyElement(isNull));
+      expect(a.finish(a.empty()).nBeats, 0);
+      expect(a.finish(a.combine(a.empty(), a.empty())).nBeats, 0);
+      expect(a.finish(a.fold(hrvSeries(Rng(52), 5, 0), 2, 2)).nBeats, 0);
+    });
+
+    test('gapAware false never needs an origin', () {
+      final beats = hrvSeries(Rng(53), 50, 0);
+      final v = hrvTimeAggregator(gapAware: false).run(beats);
+      expect(v.nBeats, 50);
     });
   });
 
   group('laws', () {
-    // All cases share one origin (_t0 + the first nn): a series starting at the
-    // same instant, so a single instance is valid for all of them.
-    List<List<Beat>> cases(int seed, {int count = 14, int maxN = 150}) {
+    List<Beats> cases(int seed, {int count = 8, int maxN = 120}) {
       final r = Rng(seed);
       return [
-        <Beat>[],
-        _series(Rng(seed), 1, 0),
-        [
-          for (var i = 0; i < count; i++)
-            _series(r, r.intIn(0, maxN), r.intIn(0, 2), gapP: .08),
-        ].first,
+        hrvBeats([]),
+        hrvSeries(Rng(seed), 1, 0),
         for (var i = 0; i < count; i++)
-          _series(r, r.intIn(0, maxN), r.intIn(0, 2), gapP: .08),
+          hrvSeries(r, r.intIn(0, maxN), r.intIn(0, 2), gapP: .08),
       ];
     }
 
-    test('gap aware is lawful (relTol 1e-9)', () {
-      // Origin: the first beat time of each case. Cases start at different
-      // first times only through their first nn, so group by origin.
-      final all = cases(0x1A01);
-      final byOrigin = <double?, List<List<Beat>>>{};
-      for (final c in all) {
-        (byOrigin[c.isEmpty ? null : c.first.timeMs] ??= []).add(c);
+    test('gap aware is lawful (cases grouped by origin)', () {
+      final byOrigin = <double?, List<Beats>>{};
+      for (final c in cases(0x5D01)) {
+        (byOrigin[hrvOrigin(c)] ??= []).add(c);
       }
       byOrigin.forEach((origin, group) {
-        expectLawful(HrvTimeAggregator(originMs: origin), group, equals: _eqAll);
+        expectLawful(hrvTimeAggregator(originMs: origin), group,
+            equals: hrvEqAll);
       });
     });
 
     test('gap aware with a shared origin is lawful', () {
-      // Re-anchor every case so the first beat sits at the same time.
-      final shifted = [
-        for (final c in cases(0x1A02))
-          if (c.isNotEmpty)
-            [
-              for (final b in c)
-                (nnMs: b.nnMs, timeMs: b.timeMs! - c.first.timeMs! + 5000.0)
-            ]
-          else
-            c,
-      ];
-      expectLawful(HrvTimeAggregator(originMs: 5000.0), shifted, equals: _eqAll);
+      final shifted = [for (final c in cases(0x5D02)) hrvShifted(c, 5000.0)];
+      expectLawful(hrvTimeAggregator(originMs: 5000.0), shifted,
+          equals: hrvEqAll);
     });
 
     test('gapAware false is lawful', () {
-      expectLawful(HrvTimeAggregator(gapAware: false), cases(0x1A03),
-          equals: _eqAll);
+      expectLawful(hrvTimeAggregator(gapAware: false), cases(0x5D03),
+          equals: hrvEqAll);
     });
 
-    test('the harness catches nothing on a series with a single 5-min bin', () {
-      final r = Rng(0x1A04);
-      final c = [
-        for (var i = 0; i < 6; i++) _series(r, r.intIn(0, 40), 0, gapP: 0.1),
-      ];
-      final byOrigin = <double?, List<List<Beat>>>{};
-      for (final s in c) {
-        (byOrigin[s.isEmpty ? null : s.first.timeMs] ??= []).add(s);
-      }
-      byOrigin.forEach((o, g) =>
-          expectLawful(HrvTimeAggregator(originMs: o), g, equals: _eqAll));
+    test('alternating runs are lawful at every split', () {
+      final beats = _alternatingRuns(4);
+      expectLawful(hrvTimeAggregator(originMs: hrvOrigin(beats)), [beats],
+          equals: hrvEqAll);
     });
   });
 }

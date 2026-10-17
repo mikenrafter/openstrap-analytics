@@ -13,7 +13,6 @@ import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
 import '../support/aggregator_laws.dart';
-import '../support/fold_law_support.dart' show foldBounds;
 import '../support/property.dart' show Rng;
 
 // ── frozen reference ────────────────────────────────────────────────────────
@@ -127,6 +126,21 @@ List<Object?> _fields(HypnogramMetrics m) => [
       m.disturbances, m.deepMin, m.remMin, m.lightMin, m.deepPct, m.remPct,
       m.lightPct,
     ];
+
+typedef _Agg = Aggregator<dynamic, ListBatch<StageSegment>, HypnogramMetrics>;
+
+ListBatch<StageSegment> _batch(List<StageSegment> xs) => ListBatch(xs);
+
+/// Whole run, then every chunked / sliced evaluation of [bounds], against [want].
+void _expectAllPaths(_Agg agg, List<StageSegment> sorted, List<int> bounds,
+    HypnogramMetrics want, String tag) {
+  final b = _batch(sorted);
+  _expectSame(runChunked(agg, b, bounds), want, '$tag chunks $bounds');
+  _expectSame(runChunked(agg, b, bounds, copy: true), want,
+      '$tag copied chunks $bounds');
+  _expectSame(runChunkedRight(agg, b, bounds), want, '$tag right $bounds');
+  _expectSame(runSliced(agg, b, bounds), want, '$tag sliced $bounds');
+}
 
 const _stages = [
   'wake', 'light', 'deep', 'rem', 'wake', 'light', 'deep', 'rem', //
@@ -296,22 +310,21 @@ void main() {
         final sorted = _sorted(sc.segs);
         final session = _session(sc.start, sc.end, sc.segs);
         final want = _referenceHypnogram(session);
-        final Aggregator<dynamic, StageSegment, HypnogramMetrics> agg =
-            HypnogramAggregator(sc.start, sc.end);
-        _expectSame(agg.run(sorted), want, 'run vs reference');
+        final _Agg agg = HypnogramAggregator(sc.start, sc.end);
+        _expectSame(agg.runList(sorted), want, 'run vs reference');
         _expectSame(AdvancedSleepStager.hypnogramMetrics(session), want,
             'public vs reference');
-        _expectSame(agg.run(sorted), AdvancedSleepStager.hypnogramMetrics(session),
-            'run vs public');
+        _expectSame(agg.runList(sorted),
+            AdvancedSleepStager.hypnogramMetrics(session), 'run vs public');
         for (final b in allBounds(sorted.length)) {
-          _expectSame(runChunked(agg, sorted, b), want, 'chunks $b');
+          _expectAllPaths(agg, sorted, b, want, name);
         }
       });
     });
 
     test('no sleep: solS is null and remLatency is NaN', () {
       final m = HypnogramAggregator(0, 600)
-          .run([const StageSegment(0, 600, 'wake')]);
+          .runList([const StageSegment(0, 600, 'wake')]);
       expect(m.solS, isNull);
       expect(m.remLatencyS.isNaN, isTrue);
       expect(m.tstS, 0);
@@ -322,7 +335,7 @@ void main() {
 
     test('a known night, worked by hand', () {
       // 0-100 wake, 100-400 light, 400-500 wake, 500-700 rem, 700-800 wake.
-      final m = HypnogramAggregator(0, 800).run(const [
+      final m = HypnogramAggregator(0, 800).runList(const [
         StageSegment(0, 100, 'wake'),
         StageSegment(100, 400, 'light'),
         StageSegment(400, 500, 'wake'),
@@ -351,7 +364,7 @@ void main() {
         final g = _messy(r, 30);
         final session = _session(g.start, g.end, g.segs);
         final want = _referenceHypnogram(session);
-        final got = HypnogramAggregator(g.start, g.end).run(_sorted(g.segs));
+        final got = HypnogramAggregator(g.start, g.end).runList(_sorted(g.segs));
         _expectSame(got, want, 'case $t ${_show(want)}');
         _expectSame(AdvancedSleepStager.hypnogramMetrics(session), want,
             'public, case $t');
@@ -364,24 +377,23 @@ void main() {
         final g = _tidy(r);
         final session = _session(g.start, g.end, g.segs);
         final want = _referenceHypnogram(session);
-        _expectSame(HypnogramAggregator(g.start, g.end).run(_sorted(g.segs)),
+        _expectSame(HypnogramAggregator(g.start, g.end).runList(_sorted(g.segs)),
             want, 'case $t');
         _expectSame(AdvancedSleepStager.hypnogramMetrics(session), want,
             'public, case $t');
       }
     });
 
-    test('random chunkings: fold chunks, combine left to right', () {
+    test('random chunkings and slicings, every evaluation path', () {
       final r = Rng(0xC0DE);
       for (var t = 0; t < 150; t++) {
         final g = t.isEven ? _messy(r, 30) : _tidy(r);
         final sorted = _sorted(g.segs);
         final want = _referenceHypnogram(_session(g.start, g.end, g.segs));
-        final Aggregator<dynamic, StageSegment, HypnogramMetrics> agg =
-            HypnogramAggregator(g.start, g.end);
+        final _Agg agg = HypnogramAggregator(g.start, g.end);
         for (var c = 0; c < 4; c++) {
-          final b = foldBounds(sorted.length, r.intIn(0, 8), r.nextInt(1 << 20));
-          _expectSame(runChunked(agg, sorted, b), want, 'case $t chunks $b');
+          _expectAllPaths(agg, sorted, randomBounds(r, sorted.length), want,
+              'case $t');
         }
       }
     });
@@ -392,15 +404,12 @@ void main() {
         final g = _messy(r, 30);
         final sorted = _sorted(g.segs);
         final want = _referenceHypnogram(_session(g.start, g.end, g.segs));
-        final Aggregator<dynamic, StageSegment, HypnogramMetrics> agg =
-            HypnogramAggregator(g.start, g.end);
-        final n = sorted.length;
-        final b = foldBounds(n, 3, t);
-        var acc = agg.foldRange(sorted, b[b.length - 2], b.last);
-        for (var k = b.length - 3; k >= 0; k--) {
-          acc = agg.combine(agg.foldRange(sorted, b[k], b[k + 1]), acc);
-        }
-        _expectSame(agg.finish(acc), want, 'case $t right-nested $b');
+        final _Agg agg = HypnogramAggregator(g.start, g.end);
+        final b = randomBounds(r, sorted.length);
+        _expectSame(runChunkedRight(agg, _batch(sorted), b), want,
+            'case $t right-nested $b');
+        _expectSame(runChunked(agg, _batch(sorted), b), want,
+            'case $t left-nested $b');
       }
     });
   });
@@ -413,12 +422,12 @@ void main() {
       for (var t = 0; t < 12; t++) {
         final g = t.isEven ? _messy(r, 30) : _tidy(r);
         final sorted = _sorted(g.segs);
-        final cases = <List<StageSegment>>[
-          <StageSegment>[],
-          if (sorted.isNotEmpty) [sorted.first],
-          sorted,
-          sorted.sublist(0, sorted.length ~/ 2),
-          sorted.sublist(sorted.length ~/ 2),
+        final cases = <ListBatch<StageSegment>>[
+          _batch([]),
+          if (sorted.isNotEmpty) _batch([sorted.first]),
+          _batch(sorted),
+          _batch(sorted.sublist(0, sorted.length ~/ 2)),
+          _batch(sorted.sublist(sorted.length ~/ 2)),
         ];
         expectLawful(HypnogramAggregator(g.start, g.end), cases,
             equals: fieldsEqual<HypnogramMetrics>(_fields));
@@ -426,19 +435,19 @@ void main() {
     });
 
     test('finish does not mutate: finishing twice and then adding more', () {
-      final Aggregator<dynamic, StageSegment, HypnogramMetrics> agg =
-          HypnogramAggregator(0, 1000);
-      final segs = const [
+      final _Agg agg = HypnogramAggregator(0, 1000);
+      const segs = [
         StageSegment(0, 100, 'wake'),
         StageSegment(100, 300, 'light'),
         StageSegment(300, 400, 'wake'),
         StageSegment(400, 600, 'rem'),
       ];
-      var s = agg.fold(segs.sublist(0, 3));
+      final batch = _batch(segs);
+      var s = agg.fold(batch, 0, 3);
       final a = agg.finish(s), b = agg.finish(s);
       _expectSame(a, b, 'twice');
-      s = agg.add(s, segs[3]);
-      _expectSame(agg.finish(s), agg.run(segs), 'continued');
+      s = agg.addSlice(s, batch, 3, 4);
+      _expectSame(agg.finish(s), agg.runList(segs), 'continued');
     });
   });
 }

@@ -1,18 +1,29 @@
 // The law harness itself: lawful aggregators pass, deliberately broken ones are
-// caught under the right law name, and fieldsEqual compares as documented.
+// caught under the right law name (including 'slicing'), and fieldsEqual
+// compares as documented.
 
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:test/test.dart';
 
 import '../support/aggregator_laws.dart';
 
-/// A correct sum over ints.
-class _Sum extends Aggregator<int, int, int> {
+typedef _B = ListBatch<int>;
+
+int _sliceSum(_B b, int start, int end) {
+  var t = 0;
+  for (var i = start; i < end; i++) {
+    t += b.rows[i];
+  }
+  return t;
+}
+
+/// A correct sum over int rows.
+class _Sum extends Aggregator<int, _B, int> {
   const _Sum();
   @override
   int empty() => 0;
   @override
-  int add(int s, int x) => s + x;
+  int addSlice(int s, _B b, int start, int end) => s + _sliceSum(b, start, end);
   @override
   int combine(int left, int right) => left + right;
   @override
@@ -33,15 +44,35 @@ class _DropRight extends _Sum {
   int combine(int left, int right) => left;
 }
 
+/// addSlice ignores the state it is given (restarts from the slice), so a
+/// second addSlice onto a state that already holds data loses it. fold (one
+/// addSlice onto empty) and combine are both correct, so only 'slicing' sees it.
+class _IgnoresState extends _Sum {
+  const _IgnoresState();
+  @override
+  int addSlice(int s, _B b, int start, int end) => _sliceSum(b, start, end);
+}
+
+/// addSlice always sums the whole batch, whatever range it is asked for.
+class _IgnoresRange extends _Sum {
+  const _IgnoresRange();
+  @override
+  int addSlice(int s, _B b, int start, int end) =>
+      s + _sliceSum(b, 0, b.length);
+}
+
 /// Mean kept as (mean, count); combine averages the two means unweighted.
-class _UnweightedMean extends Aggregator<List<double>, int, double> {
+class _UnweightedMean extends Aggregator<List<double>, _B, double> {
   const _UnweightedMean();
   @override
   List<double> empty() => [0, 0];
   @override
-  List<double> add(List<double> s, int x) {
-    final n = s[1] + 1;
-    return [s[0] + (x - s[0]) / n, n];
+  List<double> addSlice(List<double> s, _B b, int start, int end) {
+    for (var i = start; i < end; i++) {
+      final n = s[1] + 1;
+      s = [s[0] + (b.rows[i] - s[0]) / n, n];
+    }
+    return s;
   }
 
   @override
@@ -55,14 +86,14 @@ class _UnweightedMean extends Aggregator<List<double>, int, double> {
   double finish(List<double> s) => s[0];
 }
 
-/// add counts 1 per element, but joining two NON-empty chunks adds a bonus, so
+/// addSlice counts 1 per row, but joining two NON-empty chunks adds a bonus, so
 /// the add path and the combine path disagree. Identities still hold.
-class _JoinBonus extends Aggregator<int, int, int> {
+class _JoinBonus extends Aggregator<int, _B, int> {
   const _JoinBonus();
   @override
   int empty() => 0;
   @override
-  int add(int s, int x) => s + 1;
+  int addSlice(int s, _B b, int start, int end) => s + (end - start);
   @override
   int combine(int left, int right) =>
       left > 0 && right > 0 ? left + right + 1 : left + right;
@@ -70,13 +101,14 @@ class _JoinBonus extends Aggregator<int, int, int> {
   int finish(int s) => s;
 }
 
-/// Wrong only when exactly 3 elements meet exactly 2 (a split of a 5 list).
-class _WrongAtThreeTwo extends Aggregator<List<int>, int, int> {
+/// Wrong only when exactly 3 rows meet exactly 2 (a split of a 5-row batch).
+class _WrongAtThreeTwo extends Aggregator<List<int>, _B, int> {
   const _WrongAtThreeTwo();
   @override
   List<int> empty() => [0, 0]; // sum, count
   @override
-  List<int> add(List<int> s, int x) => [s[0] + x, s[1] + 1];
+  List<int> addSlice(List<int> s, _B b, int start, int end) =>
+      [s[0] + _sliceSum(b, start, end), s[1] + (end - start)];
   @override
   List<int> combine(List<int> l, List<int> r) =>
       [l[0] + r[0] + (l[1] == 3 && r[1] == 2 ? 1000 : 0), l[1] + r[1]];
@@ -84,14 +116,14 @@ class _WrongAtThreeTwo extends Aggregator<List<int>, int, int> {
   int finish(List<int> s) => s[0];
 }
 
-/// A correct sum that consumes (poisons) both arguments in combine.
-class _MutatingSum extends Aggregator<List<int>, int, int> {
+/// A correct sum that mutates and consumes both arguments in combine.
+class _MutatingSum extends Aggregator<List<int>, _B, int> {
   const _MutatingSum();
   @override
   List<int> empty() => [0];
   @override
-  List<int> add(List<int> s, int x) {
-    s[0] += x;
+  List<int> addSlice(List<int> s, _B b, int start, int end) {
+    s[0] += _sliceSum(b, start, end);
     return s;
   }
 
@@ -107,16 +139,8 @@ class _MutatingSum extends Aggregator<List<int>, int, int> {
 }
 
 /// Same, but wipes `left` too and returns a brand new state.
-class _ConsumingSum extends Aggregator<List<int>, int, int> {
+class _ConsumingSum extends _MutatingSum {
   const _ConsumingSum();
-  @override
-  List<int> empty() => [0];
-  @override
-  List<int> add(List<int> s, int x) {
-    s[0] += x;
-    return s;
-  }
-
   @override
   List<int> combine(List<int> left, List<int> right) {
     final out = [left[0] + right[0]];
@@ -124,15 +148,12 @@ class _ConsumingSum extends Aggregator<List<int>, int, int> {
     right[0] = -1;
     return out;
   }
-
-  @override
-  int finish(List<int> s) => s[0];
 }
 
 Set<String> _laws(List<LawViolation> v) => {for (final x in v) x.law};
 
 void main() {
-  final cases = randomCases<int>(11, (r) => r.intIn(1, 50));
+  final cases = randomIntBatches(11, lo: 1, hi: 50);
 
   group('lawful aggregators', () {
     test('a correct sum has no violations', () {
@@ -143,16 +164,22 @@ void main() {
       expect(checkLaws(const _ConsumingSum(), cases), isEmpty);
     });
     test('no cases is vacuously lawful', () {
-      expect(checkLaws(const _Sum(), <List<int>>[]), isEmpty);
+      expect(checkLaws(const _Sum(), <_B>[]), isEmpty);
+    });
+    test('empty and one-row cases alone are fine', () {
+      expect(checkLaws(const _Sum(), [_B([]), _B([5])]), isEmpty);
     });
     test('long cases are bounded by maxSplits and still pass', () {
-      final long = [
-        for (var i = 0; i < 300; i++) i,
-      ];
+      final long = _B([for (var i = 0; i < 300; i++) i]);
       expect(checkLaws(const _Sum(), [long], maxSplits: 8), isEmpty);
     });
-    test('expectLawful passes for a lawful aggregator and fails for a broken one',
-        () {
+    test('the harness leaves the case batches unchanged', () {
+      final b = _B([5, 6, 7, 8]);
+      checkLaws(const _Sum(), [b]);
+      expect(b.rows, [5, 6, 7, 8]);
+    });
+    test('expectLawful passes for a lawful aggregator and fails for a broken '
+        'one', () {
       expectLawful(const _Sum(), cases);
       expect(() => expectLawful(const _DropRight(), cases),
           throwsA(isA<TestFailure>()));
@@ -173,12 +200,13 @@ void main() {
 
     test('(c) unweighted mean combine fires split or associativity', () {
       bool close(double a, double b) => (a - b).abs() < 1e-9;
-      final laws = _laws(checkLaws(const _UnweightedMean(), cases, equals: close));
+      final laws =
+          _laws(checkLaws(const _UnweightedMean(), cases, equals: close));
       expect(laws.intersection({'split', 'associativity'}), isNotEmpty);
     });
 
-    test('(d) add inconsistent with combine fires singletons (identities hold)',
-        () {
+    test('(d) addSlice inconsistent with combine fires singletons (identities '
+        'hold)', () {
       final laws = _laws(checkLaws(const _JoinBonus(), cases));
       expect(laws, contains('singletons'));
       expect(laws, contains('split'));
@@ -186,10 +214,21 @@ void main() {
       expect(laws, isNot(contains('rightIdentity')));
     });
 
+    test('(e) addSlice that ignores the state on a second call fires only '
+        '"slicing"', () {
+      final laws = _laws(checkLaws(const _IgnoresState(), cases));
+      expect(laws, {'slicing'});
+    });
+
+    test('(f) addSlice that ignores its range fires split and slicing', () {
+      final laws = _laws(checkLaws(const _IgnoresRange(), cases));
+      expect(laws, containsAll(['split', 'slicing']));
+    });
+
     test('every split point of a short case is tried', () {
-      // Only the 3|2 split of a five-element list is wrong.
+      // Only the 3|2 split of a five-row batch is wrong.
       final laws = _laws(checkLaws(const _WrongAtThreeTwo(), [
-        [1, 2, 3, 4, 5]
+        _B([1, 2, 3, 4, 5])
       ]));
       expect(laws, contains('split'));
     });
@@ -197,9 +236,9 @@ void main() {
     test('a lawful case alongside a broken one still reports the broken one',
         () {
       final v = checkLaws(const _DropRight(), [
-        <int>[],
-        [5],
-        [1, 2, 3]
+        _B([]),
+        _B([5]),
+        _B([1, 2, 3])
       ]);
       expect(_laws(v), contains('split'));
     });
@@ -207,14 +246,17 @@ void main() {
     test('results are deterministic for a given seed', () {
       String render(List<LawViolation> v) =>
           v.map((x) => '${x.law}|${x.detail}').join('\n');
-      final a = checkLaws(const _DropRight(), cases, seed: 5);
-      final b = checkLaws(const _DropRight(), cases, seed: 5);
+      final a = checkLaws(const _IgnoresState(), cases, seed: 5);
+      final b = checkLaws(const _IgnoresState(), cases, seed: 5);
       expect(render(a), render(b));
+      expect(a, isNotEmpty);
     });
 
     test('a custom equals is honoured', () {
       // Everything is "equal", so even a broken aggregator passes.
       expect(checkLaws(const _DropRight(), cases, equals: (a, b) => true),
+          isEmpty);
+      expect(checkLaws(const _IgnoresState(), cases, equals: (a, b) => true),
           isEmpty);
     });
   });
@@ -277,7 +319,8 @@ void main() {
     });
 
     test('the projection is applied to both sides', () {
-      final eq = fieldsEqual<({int a, double b})>((r) => [r.a, r.b], absTol: 1e-6);
+      final eq =
+          fieldsEqual<({int a, double b})>((r) => [r.a, r.b], absTol: 1e-6);
       expect(eq((a: 1, b: 2.0), (a: 1, b: 2.0000001)), isTrue);
       expect(eq((a: 1, b: 2.0), (a: 2, b: 2.0)), isFalse);
     });
