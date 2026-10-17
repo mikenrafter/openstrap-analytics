@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import 'hypnogram.dart';
 
 /// Mergeable AASM-style hypnogram metrics over start-sorted segments.
@@ -71,6 +72,52 @@ class HypnogramAggregator
   }
 
   @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_HypnogramState state) => {
+        'tst': state.tst,
+        'deep': state.deep,
+        'rem': state.rem,
+        'light': state.light,
+        'hasSleep': state.hasSleep,
+        'onset': state.onset,
+        'sptEnd': state.sptEnd,
+        'hasRem': state.hasRem,
+        'firstRemStart': state.firstRemStart,
+        'wakes': [
+          for (final wake in state.wakes) [wake.$1, wake.$2]
+        ],
+      };
+
+  @override
+  _HypnogramState decodeState(Object? json) {
+    final map = decodeMap(json);
+    final state = _HypnogramState()
+      ..tst = _int(field(map, 'tst'))
+      ..deep = _int(field(map, 'deep'))
+      ..rem = _int(field(map, 'rem'))
+      ..light = _int(field(map, 'light'))
+      ..hasSleep = _bool(field(map, 'hasSleep'))
+      ..onset = _int(field(map, 'onset'))
+      ..sptEnd = _int(field(map, 'sptEnd'))
+      ..hasRem = _bool(field(map, 'hasRem'))
+      ..firstRemStart = _int(field(map, 'firstRemStart'));
+    for (final item in decodeList(field(map, 'wakes'))) {
+      final pair = decodeList(item);
+      if (pair.length != 2) throw const FormatException('Expected a wake pair');
+      state.wakes.add((_int(pair[0]), _int(pair[1])));
+    }
+    if (state.deep + state.rem + state.light != state.tst) {
+      throw const FormatException('Stage totals disagree with tst');
+    }
+    if (state.hasRem && !state.hasSleep) {
+      throw const FormatException('REM without sleep');
+    }
+    return state;
+  }
+
+  @override
   HypnogramMetrics finish(_HypnogramState state) {
     final tib = math.max(0, sessionEnd - sessionStart);
     final onset = state.hasSleep ? state.onset : sessionEnd;
@@ -118,4 +165,14 @@ class _HypnogramState {
   var hasRem = false;
   var firstRemStart = 0;
   final wakes = <(int, int)>[];
+}
+
+int _int(Object? value) {
+  if (value is! int) throw const FormatException('Expected an int');
+  return value;
+}
+
+bool _bool(Object? value) {
+  if (value is! bool) throw const FormatException('Expected a bool');
+  return value;
 }

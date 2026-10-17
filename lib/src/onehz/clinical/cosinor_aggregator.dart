@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../types.dart';
 import 'cosinor.dart';
 
@@ -9,8 +10,22 @@ import 'cosinor.dart';
 class TimedValues extends Batch<TimedValues> {
   TimedValues(this.tHours, this.y) : assert(tHours.length == y.length);
 
+  factory TimedValues.fromJson(Object? json) {
+    final map = decodeMap(json);
+    final times = decodeDoubles(field(map, 'tHours'));
+    final values = decodeDoubles(field(map, 'y'));
+    if (times.length != values.length) {
+      throw const FormatException('TimedValues columns differ in length');
+    }
+    return TimedValues(times, values);
+  }
+
   final Float64List tHours;
   final Float64List y;
+
+  @override
+  Object? toJson() =>
+      {'tHours': encodeDoubles(tHours), 'y': encodeDoubles(y)};
 
   @override
   int get length => y.length;
@@ -130,6 +145,39 @@ class _CosinorStats
 
   @override
   _CosinorState finish(_CosinorState state) => state;
+
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_CosinorState state) => {
+        'n': state.n,
+        'meanC': encodeDouble(state.meanC),
+        'meanS': encodeDouble(state.meanS),
+        'meanY': encodeDouble(state.meanY),
+        'mCC': encodeDouble(state.mCC),
+        'mSS': encodeDouble(state.mSS),
+        'mYY': encodeDouble(state.mYY),
+        'mCS': encodeDouble(state.mCS),
+        'mCY': encodeDouble(state.mCY),
+        'mSY': encodeDouble(state.mSY),
+      };
+
+  @override
+  _CosinorState decodeState(Object? json) {
+    final map = decodeMap(json);
+    return _CosinorState()
+      ..n = decodeCount(field(map, 'n'))
+      ..meanC = decodeDouble(field(map, 'meanC'))
+      ..meanS = decodeDouble(field(map, 'meanS'))
+      ..meanY = decodeDouble(field(map, 'meanY'))
+      ..mCC = decodeDouble(field(map, 'mCC'))
+      ..mSS = decodeDouble(field(map, 'mSS'))
+      ..mYY = decodeDouble(field(map, 'mYY'))
+      ..mCS = decodeDouble(field(map, 'mCS'))
+      ..mCY = decodeDouble(field(map, 'mCY'))
+      ..mSY = decodeDouble(field(map, 'mSY'));
+  }
 }
 
 /// Builds a mergeable single-component cosinor fit over [TimedValues].

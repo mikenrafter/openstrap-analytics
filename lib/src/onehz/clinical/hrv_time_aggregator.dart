@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../incremental_core.dart';
 import 'hrv_time.dart';
@@ -12,8 +13,22 @@ const double _fiveMinutesMs = 300000.0;
 class Beats extends Batch<Beats> {
   Beats(this.nnMs, this.timeMs) : assert(nnMs.length == timeMs.length);
 
+  factory Beats.fromJson(Object? json) {
+    final map = decodeMap(json);
+    final nn = decodeDoubles(field(map, 'nnMs'));
+    final times = decodeDoubles(field(map, 'timeMs'));
+    if (nn.length != times.length) {
+      throw const FormatException('Beats columns differ in length');
+    }
+    return Beats(nn, times);
+  }
+
   final Float64List nnMs;
   final Float64List timeMs;
+
+  @override
+  Object? toJson() =>
+      {'nnMs': encodeDoubles(nnMs), 'timeMs': encodeDoubles(timeMs)};
 
   @override
   int get length => nnMs.length;
@@ -46,9 +61,11 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
 }) {
   final diffs = both(
     Lookback<Beats, _DiffState, _DiffSummary>(
-        2, _DiffStats(gapAware: gapAware)),
+        2, _DiffStats(gapAware: gapAware),
+        batchFromJson: Beats.fromJson),
     Lookback<Beats, _LagState, _LagSummary>(
-        3, _LagStats(gapAware: gapAware)),
+        3, _LagStats(gapAware: gapAware),
+        batchFromJson: Beats.fromJson),
   );
   final levels = Moments<Beats>((batch) => batch.nnMs);
 
@@ -158,6 +175,32 @@ class _DiffStats extends Aggregator<_DiffState, Beats, _DiffSummary> {
   }
 
   @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_DiffState state) => {
+        'pairs': state.pairs,
+        'over50': state.over50,
+        'mean': encodeDouble(state.mean),
+        'm2': encodeDouble(state.m2),
+        'squares': encodeDouble(state.squares),
+      };
+
+  @override
+  _DiffState decodeState(Object? json) {
+    final map = decodeMap(json);
+    final pairs = decodeCount(field(map, 'pairs'));
+    final over50 = decodeCount(field(map, 'over50'));
+    if (over50 > pairs) throw const FormatException('over50 exceeds pairs');
+    return _DiffState()
+      ..pairs = pairs
+      ..over50 = over50
+      ..mean = decodeDouble(field(map, 'mean'))
+      ..m2 = decodeDouble(field(map, 'm2'))
+      ..squares = decodeDouble(field(map, 'squares'));
+  }
+
+  @override
   _DiffSummary finish(_DiffState state) =>
       _DiffSummary(
           state.pairs, state.over50, state.mean, state.m2, state.squares);
@@ -236,6 +279,27 @@ class _LagStats extends Aggregator<_LagState, Beats, _LagSummary> {
   _LagState combine(_LagState left, _LagState right) {
     left.merge(right);
     return left;
+  }
+
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_LagState state) => {
+        'pairs': state.pairs,
+        'meanA': encodeDouble(state.meanA),
+        'meanB': encodeDouble(state.meanB),
+        'coMoment': encodeDouble(state.coMoment),
+      };
+
+  @override
+  _LagState decodeState(Object? json) {
+    final map = decodeMap(json);
+    return _LagState()
+      ..pairs = decodeCount(field(map, 'pairs'))
+      ..meanA = decodeDouble(field(map, 'meanA'))
+      ..meanB = decodeDouble(field(map, 'meanB'))
+      ..coMoment = decodeDouble(field(map, 'coMoment'));
   }
 
   @override

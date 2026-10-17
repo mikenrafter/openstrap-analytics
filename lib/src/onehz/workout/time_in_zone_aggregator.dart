@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../util.dart';
 import 'hr_zones.dart';
@@ -10,8 +11,22 @@ import 'hr_zones.dart';
 class HrStream extends Batch<HrStream> {
   HrStream(this.tsMs, this.hr) : assert(tsMs.length == hr.length);
 
+  factory HrStream.fromJson(Object? json) {
+    final map = decodeMap(json);
+    final timestamps = decodeDoubles(field(map, 'tsMs'));
+    final heartRates = decodeDoubles(field(map, 'hr'));
+    if (timestamps.length != heartRates.length) {
+      throw const FormatException('HrStream columns differ in length');
+    }
+    return HrStream(timestamps, heartRates);
+  }
+
   final Float64List tsMs;
   final Float64List hr;
+
+  @override
+  Object? toJson() =>
+      {'tsMs': encodeDoubles(tsMs), 'hr': encodeDoubles(hr)};
 
   @override
   int get length => tsMs.length;
@@ -59,7 +74,8 @@ class _TimeInZoneAggregator
     extends Aggregator<_TimeInZoneState, HrStream, TimeInHeartRateZone?> {
   _TimeInZoneAggregator(this.zoneSet)
       : _windows = Lookback<HrStream, _ZoneHistograms, _ZoneHistograms>(
-            2, _PairHistograms(zoneSet));
+            2, _PairHistograms(zoneSet),
+            batchFromJson: HrStream.fromJson);
 
   final HeartRateZoneSet zoneSet;
   final Lookback<HrStream, _ZoneHistograms, _ZoneHistograms> _windows;
@@ -90,6 +106,29 @@ class _TimeInZoneAggregator
       left.tailHr = right.tailHr;
     }
     return left;
+  }
+
+  @override
+  bool get persistable => _windows.persistable;
+
+  @override
+  Object? encodeState(_TimeInZoneState state) => {
+        'windows': _windows.encodeState(state.windows),
+        'hasTail': state.hasTail,
+        'tailTimestampMs': encodeDouble(state.tailTimestampMs),
+        'tailHr': encodeDouble(state.tailHr),
+      };
+
+  @override
+  _TimeInZoneState decodeState(Object? json) {
+    final map = decodeMap(json);
+    final hasTail = field(map, 'hasTail');
+    if (hasTail is! bool) throw const FormatException('Expected a bool');
+    return empty()
+      ..windows = _windows.decodeState(field(map, 'windows'))
+      ..hasTail = hasTail
+      ..tailTimestampMs = decodeDouble(field(map, 'tailTimestampMs'))
+      ..tailHr = decodeDouble(field(map, 'tailHr'));
   }
 
   @override
@@ -174,6 +213,32 @@ class _PairHistograms
 
   @override
   _ZoneHistograms finish(_ZoneHistograms state) => state;
+
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_ZoneHistograms state) => {
+        'cadence': _encodeHistogram(state.cadence),
+        'credits': [
+          for (final histogram in state.credits) _encodeHistogram(histogram)
+        ],
+      };
+
+  @override
+  _ZoneHistograms decodeState(Object? json) {
+    final map = decodeMap(json);
+    final state = _ZoneHistograms();
+    _decodeHistogram(field(map, 'cadence'), state.cadence);
+    final credits = decodeList(field(map, 'credits'));
+    if (credits.length != state.credits.length) {
+      throw const FormatException('Expected six credit histograms');
+    }
+    for (var zone = 0; zone < credits.length; zone++) {
+      _decodeHistogram(credits[zone], state.credits[zone]);
+    }
+    return state;
+  }
 }
 
 class _ZoneHistograms {
@@ -193,6 +258,25 @@ class _ZoneHistograms {
     for (var zone = 0; zone < credits.length; zone++) {
       _merge(credits[zone], other.credits[zone]);
     }
+  }
+}
+
+/// A double-keyed histogram as `[[gap, count], ...]`; keys stay lossless.
+List<Object> _encodeHistogram(Map<double, int> histogram) => [
+      for (final entry in histogram.entries)
+        [encodeDouble(entry.key), entry.value]
+    ];
+
+void _decodeHistogram(Object? json, Map<double, int> into) {
+  for (final item in decodeList(json)) {
+    final pair = decodeList(item);
+    if (pair.length != 2) throw const FormatException('Expected [gap, count]');
+    final gap = decodeDouble(pair[0]);
+    final count = decodeCount(pair[1]);
+    if (count == 0 || into.containsKey(gap)) {
+      throw const FormatException('Invalid histogram entry');
+    }
+    into[gap] = count;
   }
 }
 

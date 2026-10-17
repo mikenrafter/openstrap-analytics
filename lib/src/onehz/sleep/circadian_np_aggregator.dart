@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'circadian_np.dart';
@@ -13,8 +14,17 @@ import 'circadian_window.dart';
 class EpochSeries extends Batch<EpochSeries> {
   EpochSeries(this.x, {this.firstIndex = 0});
 
+  factory EpochSeries.fromJson(Object? json) {
+    final map = decodeMap(json);
+    return EpochSeries(decodeDoubles(field(map, 'x')),
+        firstIndex: decodeCount(field(map, 'firstIndex')));
+  }
+
   final Float64List x;
   final int firstIndex;
+
+  @override
+  Object? toJson() => {'x': encodeDoubles(x), 'firstIndex': firstIndex};
 
   @override
   int get length => x.length;
@@ -54,6 +64,12 @@ class _SquaredDiffs extends Aggregator<double, EpochSeries, double> {
   double combine(double left, double right) => left + right;
   @override
   double finish(double state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(double state) => encodeDouble(state);
+  @override
+  double decodeState(Object? json) => decodeDouble(json);
 }
 
 /// Mergeable nonparametric circadian metrics, matching
@@ -83,7 +99,8 @@ Aggregator<dynamic, EpochSeries, Metric<CircadianNp>> circadianNpAggregator(
         (EpochSeries batch, int row) => (batch.firstIndex + row) % p,
         both(Count<EpochSeries>(), Sum<EpochSeries>(column)),
       ),
-      Lookback<EpochSeries, double, double>(2, const _SquaredDiffs()),
+      Lookback<EpochSeries, double, double>(2, const _SquaredDiffs(),
+          batchFromJson: EpochSeries.fromJson),
     ),
   );
   return core.map((result) {

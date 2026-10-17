@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'sri.dart';
@@ -12,9 +13,28 @@ import 'sri.dart';
 class Epochs extends Batch<Epochs> {
   Epochs(this.asleep, {this.valid, this.firstIndex = 0});
 
+  factory Epochs.fromJson(Object? json) {
+    final map = decodeMap(json);
+    final asleep = _readBytes(field(map, 'asleep'));
+    final rawValid = field(map, 'valid');
+    final valid = rawValid == null ? null : _readBytes(rawValid);
+    if (valid != null && valid.length != asleep.length) {
+      throw const FormatException('Epochs columns differ in length');
+    }
+    return Epochs(asleep,
+        valid: valid, firstIndex: decodeCount(field(map, 'firstIndex')));
+  }
+
   final Uint8List asleep;
   final Uint8List? valid;
   final int firstIndex;
+
+  @override
+  Object? toJson() => {
+        'asleep': asleep.toList(),
+        'valid': valid?.toList(),
+        'firstIndex': firstIndex,
+      };
 
   @override
   int get length => asleep.length;
@@ -53,6 +73,19 @@ class Epochs extends Batch<Epochs> {
   }
 }
 
+Uint8List _readBytes(Object? json) {
+  final list = decodeList(json);
+  final bytes = Uint8List(list.length);
+  for (var i = 0; i < list.length; i++) {
+    final value = list[i];
+    if (value is! int || value < 0 || value > 255) {
+      throw const FormatException('Expected a byte');
+    }
+    bytes[i] = value;
+  }
+  return bytes;
+}
+
 class _PairCounts {
   var agreement = 0;
   var cases = 0;
@@ -86,6 +119,26 @@ class _PairCountsAggregator
       ..agreement += right.agreement
       ..cases += right.cases;
     return left;
+  }
+
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_PairCounts state) =>
+      {'agreement': state.agreement, 'cases': state.cases};
+
+  @override
+  _PairCounts decodeState(Object? json) {
+    final map = decodeMap(json);
+    final agreement = decodeCount(field(map, 'agreement'));
+    final cases = decodeCount(field(map, 'cases'));
+    if (agreement > cases) {
+      throw const FormatException('agreement exceeds cases');
+    }
+    return _PairCounts()
+      ..agreement = agreement
+      ..cases = cases;
   }
 
   @override
@@ -129,6 +182,17 @@ class _GroupedPairWindows
   @override
   Map<int, _PairCounts> finish(Map<int, _PairCounts> state) =>
       _groups.finish(state);
+
+  @override
+  bool get persistable => _groups.persistable;
+
+  @override
+  Object? encodeState(Map<int, _PairCounts> state) =>
+      _groups.encodeState(state);
+
+  @override
+  Map<int, _PairCounts> decodeState(Object? json) =>
+      _groups.decodeState(json);
 }
 
 /// Mergeable Phillips SRI over [Epochs].
@@ -149,6 +213,7 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
   final pairs = Lookback<Epochs, Map<int, _PairCounts>, Map<int, _PairCounts>>(
     epochsPerDay + 1,
     _GroupedPairWindows(epochsPerDay),
+    batchFromJson: Epochs.fromJson,
   );
   return both(Count<Epochs>(), pairs).map((result) {
     const inputs = ['sleep_wake_epochs'];

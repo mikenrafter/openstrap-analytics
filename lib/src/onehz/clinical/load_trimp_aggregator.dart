@@ -80,6 +80,7 @@ Aggregator<dynamic, DoubleColumn, Metric<LoadState>> ctlAtlTsbAggregator({
         Ewma<DoubleColumn>((batch) => batch.values, lc),
         Ewma<DoubleColumn>((batch) => batch.values, la),
       ),
+      batchFromJson: DoubleColumn.fromJson,
     ),
   );
   return core.map((result) {
