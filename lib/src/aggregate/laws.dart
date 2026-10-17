@@ -123,6 +123,129 @@ List<LawViolation> checkLaws<S, B extends Batch<B>, R>(
   return violations;
 }
 
+class ConversionFailure {
+  const ConversionFailure(this.path, this.caseIndex, this.detail);
+  final String path;
+  final int caseIndex;
+  final String detail;
+}
+
+/// Checks that an aggregator reproduces [reference] on every evaluation path.
+///
+/// Paths: 'whole', 'chunked' (left-to-right combine of ranges of the original
+/// batch), 'chunkedRight' (same bounds, right-nested combine), 'copies' (each
+/// chunk cut with copyRange first), 'sliced' (one state, consecutive slices)
+/// and 'singletons'. With [laws], checkLaws violations appear as 'law:<name>'.
+/// Deterministic per [seed].
+List<ConversionFailure> checkConversion<S, B extends Batch<B>, R>(
+  Aggregator<S, B, R> Function(B input) build,
+  List<B> cases,
+  R Function(B input) reference, {
+  ResultEquals<R>? equals,
+  int chunkings = 8,
+  int seed = 0,
+  bool laws = true,
+}) {
+  final equal = equals ?? (R left, R right) => left == right;
+  final failures = <ConversionFailure>[];
+
+  for (var caseIndex = 0; caseIndex < cases.length; caseIndex++) {
+    final batch = cases[caseIndex];
+    final aggregator = build(batch);
+    final expected = reference(batch);
+    final seen = <String>{};
+
+    void check(String path, R Function() actual, [String where = '']) {
+      if (seen.contains(path)) return;
+      final got = actual();
+      if (equal(got, expected)) return;
+      seen.add(path);
+      failures.add(ConversionFailure(path, caseIndex,
+          'case $caseIndex: $batch$where; got $got, expected $expected'));
+    }
+
+    check('whole', () => aggregator.finish(aggregator.fold(batch)));
+
+    final rng = _Lcg(seed * 7919 + caseIndex);
+    for (var c = 0; c < chunkings; c++) {
+      final bounds = _chunkBounds(batch.length, rng);
+      final where = '; bounds $bounds';
+      List<S> states({bool copy = false}) => [
+            for (var i = 0; i + 1 < bounds.length; i++)
+              copy
+                  ? aggregator.fold(batch.copyRange(bounds[i], bounds[i + 1]))
+                  : aggregator.fold(batch, bounds[i], bounds[i + 1]),
+          ];
+      S leftToRight(List<S> parts) {
+        var acc = parts.first;
+        for (var i = 1; i < parts.length; i++) {
+          acc = aggregator.combine(acc, parts[i]);
+        }
+        return acc;
+      }
+
+      check('chunked', () => aggregator.finish(leftToRight(states())), where);
+      check('chunkedRight', () {
+        final parts = states();
+        var acc = parts.last;
+        for (var i = parts.length - 2; i >= 0; i--) {
+          acc = aggregator.combine(parts[i], acc);
+        }
+        return aggregator.finish(acc);
+      }, where);
+      check('copies',
+          () => aggregator.finish(leftToRight(states(copy: true))), where);
+      check('sliced', () {
+        var state = aggregator.empty();
+        for (var i = 0; i + 1 < bounds.length; i++) {
+          state = aggregator.addSlice(state, batch, bounds[i], bounds[i + 1]);
+        }
+        return aggregator.finish(state);
+      }, where);
+    }
+
+    check('singletons', () {
+      var state = aggregator.empty();
+      for (var i = 0; i < batch.length; i++) {
+        state = aggregator.combine(state, aggregator.fold(batch, i, i + 1));
+      }
+      return aggregator.finish(state);
+    });
+
+    if (laws) {
+      for (final v in checkLaws(aggregator, [batch],
+          equals: equals, seed: seed + caseIndex)) {
+        failures.add(ConversionFailure(
+            'law:${v.law}', caseIndex, v.detail.replaceFirst('case 0', 'case $caseIndex')));
+      }
+    }
+  }
+  return failures;
+}
+
+class _Lcg {
+  _Lcg(int seed) : _state = seed & 0x7fffffff;
+  int _state;
+  int next(int bound) {
+    _state = (_state * 1103515245 + 12345) & 0x7fffffff;
+    return (_state >> 8) % bound;
+  }
+}
+
+/// Sorted chunk bounds from 0 to [length]: always cuts at 1 and length - 1 and
+/// a duplicated cut (an empty chunk), plus a few random cuts.
+List<int> _chunkBounds(int length, _Lcg rng) {
+  final cuts = <int>[
+    0,
+    length,
+    math.min(1, length),
+    math.max(0, length - 1),
+    for (var i = rng.next(4); i > 0; i--) rng.next(length + 1),
+  ];
+  cuts.add(cuts[2 + rng.next(cuts.length - 2)]);
+  return cuts..sort();
+}
+
 List<int> _splitPoints(int length, int maxSplits, int seed) {
   if (length == 0) return [0];
   final wanted = math.max(2, maxSplits);

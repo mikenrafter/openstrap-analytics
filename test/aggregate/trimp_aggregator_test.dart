@@ -52,15 +52,6 @@ _Agg _agg(double? rest, double? max, Sex sex) =>
 Metric<double> _want(DoubleColumn c, double? rest, double? max, Sex sex) =>
     banisterTrimp(c.values, restingHr: rest, maxHr: max, sex: sex);
 
-/// All the ways of evaluating the aggregator against [want].
-void _allPaths(_Agg a, DoubleColumn c, List<int> b, Metric<double> want,
-    String tag) {
-  _same(runChunked(a, c, b), want, '$tag chunks $b');
-  _same(runChunked(a, c, b, copy: true), want, '$tag copies $b');
-  _same(runChunkedRight(a, c, b), want, '$tag right $b');
-  _same(runSliced(a, c, b), want, '$tag sliced $b');
-}
-
 double _hr(Rng r) {
   final k = r.nextDouble();
   if (k < .04) return 0;
@@ -96,12 +87,12 @@ void main() {
           final want = _want(rows, a.$1, a.$2, sex);
           expect(want.present, isFalse);
           final agg = _agg(a.$1, a.$2, sex);
-          _same(agg.run(rows), want, name);
-          _allPaths(agg, rows, [0, 1, 1, 3, 4], want, name);
           // Empty and non-finite-only input are absent too, anchors rule.
-          _same(agg.run(col([])), _want(col([]), a.$1, a.$2, sex), name);
-          final junk = col([nan, 0, -5]);
-          _same(agg.run(junk), _want(junk, a.$1, a.$2, sex), name);
+          expectConversion<dynamic, DoubleColumn, Metric<double>>(
+              (_) => agg,
+              [rows, col([]), col([nan, 0, -5])],
+              (c) => _want(c, a.$1, a.$2, sex),
+              equals: _eq);
         });
       }
     });
@@ -129,15 +120,9 @@ void main() {
         final want = _want(c, 55, 190, sex);
         expect(want.present, isTrue);
         expect(want.value, 0.0);
-        for (final b in [
-          [0, 3],
-          [0, 0, 3],
-          [0, 1, 2, 3],
-          [0, 3, 3],
-          [0, 1, 1, 3, 3]
-        ]) {
-          _allPaths(agg, c, b, want, 'unusable rows');
-        }
+        expectConversion<dynamic, DoubleColumn, Metric<double>>(
+            (_) => agg, [c], (c) => _want(c, 55, 190, sex),
+            equals: _eq, chunkings: 24);
       }
     });
   });
@@ -203,8 +188,9 @@ void main() {
   });
 
   group('random parity (seeded)', () {
-    test('random anchors, sex, rows; whole, chunked, sliced', () {
+    test('random anchors, sex, rows; every evaluation path', () {
       final r = Rng(0x7217);
+      final params = Map<DoubleColumn, (double?, double?, Sex)>.identity();
       for (var t = 0; t < 120; t++) {
         final n = r.nextBool(.15) ? r.intIn(0, 3) : r.intIn(0, 300);
         final c = _hrColumn(r, n, nanP: r.nextBool() ? .05 : .4);
@@ -213,15 +199,13 @@ void main() {
         double? max = rest + (r.nextBool(.1) ? -5 : 60) + r.nextDouble() * 80;
         if (r.nextBool(.05)) rest = null;
         if (r.nextBool(.05)) max = nan;
-        final sex = r.nextBool() ? Sex.male : Sex.female;
-        final want = _want(c, rest, max, sex);
-        final a = _agg(rest, max, sex);
-        _same(a.run(c), want, 't$t whole');
-        for (var k = 0; k < 3; k++) {
-          _allPaths(a, c, randomBounds(r, n), want, 't$t');
-        }
-        _allPaths(a, c, singletonBounds(n), want, 't$t singletons');
+        params[c] = (rest, max, r.nextBool() ? Sex.male : Sex.female);
       }
+      expectConversion<dynamic, DoubleColumn, Metric<double>>(
+          (c) => _agg(params[c]!.$1, params[c]!.$2, params[c]!.$3),
+          params.keys.toList(),
+          (c) => _want(c, params[c]!.$1, params[c]!.$2, params[c]!.$3),
+          equals: _eq);
     });
   });
 

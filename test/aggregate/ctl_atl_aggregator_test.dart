@@ -40,6 +40,10 @@ List<Object?> _fields(Metric<LoadState> m) => [
 
 final _eq = fieldsEqual<Metric<LoadState>>(_fields, relTol: 1e-9, absTol: 1e-9);
 
+/// _same, as a predicate: the fields within tolerance, confidence exact.
+bool _eqExact(Metric<LoadState> got, Metric<LoadState> want) =>
+    _eq(got, want) && got.confidence == want.confidence;
+
 void _same(Metric<LoadState> got, Metric<LoadState> want, String tag) {
   expect(_eq(got, want), isTrue,
       reason: '$tag\n got ${_fields(got)}\nwant ${_fields(want)}');
@@ -91,14 +95,16 @@ void main() {
   group('absent below minDays', () {
     test('identical to the reference for every short length', () {
       for (final p in _params) {
-        final a = p.agg;
-        for (var n = 0; n < p.min && n < 16; n++) {
-          final c = col([for (var i = 0; i < n; i++) 10.0 + i]);
-          final want = p.want(c);
-          expect(want.present, isFalse, reason: '${p.name} n=$n');
-          _same(a.run(c), want, '${p.name} n=$n');
-          _allPaths(a, c, singletonBounds(n), want, '${p.name} n=$n');
+        final cols = [
+          for (var n = 0; n < p.min && n < 16; n++)
+            col([for (var i = 0; i < n; i++) 10.0 + i])
+        ];
+        for (final c in cols) {
+          expect(p.want(c).present, isFalse, reason: '${p.name} n=${c.length}');
         }
+        expectConversion<dynamic, DoubleColumn, Metric<LoadState>>(
+            (_) => p.agg, cols, p.want,
+            equals: _eqExact);
       }
     });
 
@@ -179,30 +185,28 @@ void main() {
     for (final p in _params) {
       test(p.name, () {
         final r = Rng(0xC71 + p.name.length * 31 + p.min * 7 + p.prime);
-        final a = p.agg;
+        final cols = <DoubleColumn>[];
         for (var t = 0; t < 30; t++) {
           final n = r.nextBool(.2) ? r.intIn(0, 20) : r.intIn(0, 200);
-          final c = _series(r, n);
-          final want = p.want(c);
-          final tag = '${p.name} t$t n=$n';
-          _same(a.run(c), want, '$tag whole');
-          for (var k = 0; k < 2; k++) {
-            _allPaths(a, c, randomBounds(r, n), want, tag);
-          }
-          if (n <= 60) _allPaths(a, c, singletonBounds(n), want, '$tag singles');
+          cols.add(_series(r, n));
         }
+        expectConversion<dynamic, DoubleColumn, Metric<LoadState>>(
+            (_) => p.agg, cols, p.want,
+            equals: _eqExact);
       });
     }
 
     test('constant series of random lengths and values', () {
       final r = Rng(0xC72);
-      final a = ctlAtlTsbAggregator();
+      final cols = <DoubleColumn>[];
       for (var t = 0; t < 30; t++) {
         final n = r.intIn(0, 120);
         final v = r.nextBool(.3) ? 0.0 : r.nextDouble() * 400;
-        final c = col(List.filled(n, v));
-        _allPaths(a, c, randomBounds(r, n), ctlAtlTsb(List.filled(n, v)), 't$t');
+        cols.add(col(List.filled(n, v)));
       }
+      expectConversion<dynamic, DoubleColumn, Metric<LoadState>>(
+          (_) => ctlAtlTsbAggregator(), cols, (c) => ctlAtlTsb(c.values.toList()),
+          equals: _eqExact);
     });
 
     test('chunks straddle the prime boundary (primeDays 7)', () {
