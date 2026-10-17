@@ -105,3 +105,24 @@ R runSliced<S, B extends Batch<B>, R>(
 /// Plain bounds for the chunk-size-one case: `[0, 1, 2, ..., n]` (`[0, 0]` for
 /// an empty batch).
 List<int> singletonBounds(int n) => n == 0 ? [0, 0] : [for (var i = 0; i <= n; i++) i];
+
+/// Asserts that [build] over every case in [cases] reproduces [reference] on
+/// every evaluation path of [checkConversion] (and, with [laws], the aggregator
+/// laws). The failure reason lists the first few failures, one per line.
+void expectConversion<S, B extends Batch<B>, R>(
+  Aggregator<S, B, R> Function(B input) build,
+  List<B> cases,
+  R Function(B input) reference, {
+  ResultEquals<R>? equals,
+  int chunkings = 8,
+  int seed = 0,
+  bool laws = true,
+}) {
+  final failures = checkConversion<S, B, R>(build, cases, reference,
+      equals: equals, chunkings: chunkings, seed: seed, laws: laws);
+  expect(failures, isEmpty,
+      reason: failures.isEmpty
+          ? null
+          : 'conversion check failed (${failures.length}):\n'
+              '${failures.take(5).map((f) => '  ${f.path} (case ${f.caseIndex}): ${f.detail}').join('\n')}');
+}
