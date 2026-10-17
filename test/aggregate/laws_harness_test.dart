@@ -150,6 +150,59 @@ class _ConsumingSum extends _MutatingSum {
   }
 }
 
+/// A sum whose finish reads the state and then clears it. A single finish per
+/// fresh state looks right, so only a law that finishes the SAME state twice
+/// (or keeps using it afterwards) can see the damage.
+class _DestructiveSum extends Aggregator<List<int>, _B, int> {
+  const _DestructiveSum();
+  @override
+  List<int> empty() => [0];
+  @override
+  List<int> addSlice(List<int> s, _B b, int start, int end) {
+    s[0] += _sliceSum(b, start, end);
+    return s;
+  }
+
+  @override
+  List<int> combine(List<int> left, List<int> right) {
+    left[0] += right[0];
+    return left;
+  }
+
+  @override
+  int finish(List<int> s) {
+    final out = s[0];
+    s[0] = 0; // destructive
+    return out;
+  }
+}
+
+/// finish returns the right number the first time, but marks the state as
+/// closed so later rows are ignored. Two finishes in a row agree; continuing to
+/// add afterwards does not.
+class _FinishFreezes extends Aggregator<List<int>, _B, int> {
+  const _FinishFreezes();
+  @override
+  List<int> empty() => [0, 0]; // sum, frozen
+  @override
+  List<int> addSlice(List<int> s, _B b, int start, int end) {
+    if (s[1] == 0) s[0] += _sliceSum(b, start, end);
+    return s;
+  }
+
+  @override
+  List<int> combine(List<int> left, List<int> right) {
+    if (left[1] == 0) left[0] += right[0];
+    return left;
+  }
+
+  @override
+  int finish(List<int> s) {
+    s[1] = 1;
+    return s[0];
+  }
+}
+
 Set<String> _laws(List<LawViolation> v) => {for (final x in v) x.law};
 
 void main() {
@@ -261,8 +314,83 @@ void main() {
     });
   });
 
+  group('finishPure', () {
+    test('a sum whose finish clears the state is caught with exactly '
+        '{finishPure}', () {
+      expect(_laws(checkLaws(const _DestructiveSum(), cases)), {'finishPure'});
+    });
+
+    test('a finish that closes the state to later rows is caught with exactly '
+        '{finishPure}', () {
+      expect(_laws(checkLaws(const _FinishFreezes(), cases)), {'finishPure'});
+    });
+
+    test('the violation names the case', () {
+      final v = checkLaws(const _DestructiveSum(), [
+        _B([1, 2, 3])
+      ]);
+      expect(v, isNotEmpty);
+      expect(v.every((x) => x.law == 'finishPure' && x.detail.isNotEmpty),
+          isTrue);
+    });
+
+    test('lawful aggregators report no finishPure violation', () {
+      for (final agg in <Aggregator<dynamic, _B, int>>[
+        const _Sum(),
+        const _MutatingSum(),
+        const _ConsumingSum(),
+      ]) {
+        expect(checkLaws(agg, cases), isEmpty, reason: '$agg');
+      }
+    });
+
+    test('expectLawful fails for a destructive finish', () {
+      expect(() => expectLawful(const _DestructiveSum(), cases),
+          throwsA(isA<TestFailure>()));
+    });
+  });
+
   group('fieldsEqual', () {
     List<Object?> same(List<Object?> x) => x;
+
+    test('two ints compare exactly, with no double conversion', () {
+      final eq = fieldsEqual<List<Object?>>(same, relTol: 1e-9, absTol: 1e-9);
+      expect(eq([9007199254740992], [9007199254740993]), isFalse);
+      expect(eq([9007199254740993], [9007199254740993]), isTrue);
+      final loose = fieldsEqual<List<Object?>>(same, relTol: 0.5, absTol: 10);
+      expect(loose([100], [101]), isFalse);
+    });
+
+    test('tolerance is absTol + relTol * max(|a|, |b|)', () {
+      final eq = fieldsEqual<List<Object?>>(same, absTol: 0.1, relTol: 0.05);
+      // 0.15 <= 0.1 + 0.05 * 1.15; the max(absTol, rel) rule would say no.
+      expect(eq([1.0], [1.15]), isTrue);
+      expect(eq([1.15], [1.0]), isTrue);
+      expect(eq([1.0], [1.2]), isFalse);
+    });
+
+    test('a finite value never equals a non-finite one', () {
+      final eq = fieldsEqual<List<Object?>>(same, absTol: 1e300, relTol: 1);
+      expect(eq([1.0], [double.infinity]), isFalse);
+      expect(eq([double.negativeInfinity], [1.0]), isFalse);
+      expect(eq([double.maxFinite], [double.infinity]), isFalse);
+      expect(eq([1.0], [double.nan]), isFalse);
+      expect(eq([double.nan], [double.infinity]), isFalse);
+    });
+
+    test('NaN equals NaN and each infinity only itself, tolerances or not', () {
+      final eq = fieldsEqual<List<Object?>>(same, absTol: 1, relTol: 1);
+      expect(eq([double.nan], [double.nan]), isTrue);
+      expect(eq([double.infinity], [double.infinity]), isTrue);
+      expect(eq([double.negativeInfinity], [double.negativeInfinity]), isTrue);
+      expect(eq([double.infinity], [double.negativeInfinity]), isFalse);
+    });
+
+    test('an int and a double compare with tolerance', () {
+      final eq = fieldsEqual<List<Object?>>(same, absTol: 0.1);
+      expect(eq([1], [1.05]), isTrue);
+      expect(eq([1], [1.5]), isFalse);
+    });
 
     test('identical lists are equal; length mismatch is not', () {
       final eq = fieldsEqual<List<Object?>>(same);

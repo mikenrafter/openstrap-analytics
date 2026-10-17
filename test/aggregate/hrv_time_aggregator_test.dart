@@ -350,4 +350,41 @@ void main() {
           equals: hrvEqAll);
     });
   });
+
+  group('numerical stability', () {
+    // The review's series: a steady 5 ms/beat ramp with a tiny odd-beat bump.
+    // Diffs are ~5 +- 1e-8, so raw sums of d and d^2 cancel catastrophically
+    // for the lag-1 autocorrelation; centred statistics do not.
+    Beats ramp(double bump) => hrvBeats([
+          for (var i = 0; i <= 100; i++)
+            (nnMs: 800.0 + 5 * i + (i.isOdd ? bump : 0.0), timeMs: null),
+        ]);
+
+    test('1e-8 perturbation: acf1 within 1e-6 of hrvTime, same RMSSD nullness',
+        () {
+      final beats = ramp(1e-8);
+      final want = hrvTime(beats.nnMs.toList()).value!;
+      final got = hrvTimeAggregator(gapAware: false).run(beats);
+      expect(want.diffAcf1, isNotNull);
+      expect(got.diffAcf1, isNotNull, reason: 'aggregator acf1 is null');
+      expect((got.diffAcf1! - want.diffAcf1!).abs(), lessThan(1e-6),
+          reason: 'acf1 ${got.diffAcf1} vs ${want.diffAcf1}');
+      expect(got.rmssd == null, want.rmssd == null,
+          reason: 'rmssd ${got.rmssd} vs ${want.rmssd}');
+    });
+
+    test('1e-4 perturbation: whole vs split at 50 agree to 1e-9', () {
+      final beats = ramp(1e-4);
+      final agg = hrvTimeAggregator(gapAware: false);
+      final whole = agg.run(beats);
+      expect(whole.diffAcf1, isNotNull);
+      for (final copy in [false, true]) {
+        final split = runChunked(agg, beats, [0, 50, beats.length], copy: copy);
+        expect(split.diffAcf1, isNotNull);
+        expect((split.diffAcf1! - whole.diffAcf1!).abs(), lessThan(1e-9),
+            reason: 'copy=$copy split ${split.diffAcf1} whole ${whole.diffAcf1}');
+        expect(split.rmssd == null, whole.rmssd == null);
+      }
+    });
+  });
 }

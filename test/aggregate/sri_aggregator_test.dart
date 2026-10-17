@@ -503,4 +503,79 @@ void main() {
       expectLawful(sriAggregator(1), cases(1, count: 10), equals: _eq);
     });
   });
+
+  group('malformed input', () {
+    // Runs the frozen reference and the rewired phillipsSri on the same input:
+    // equal results, or the same exception type when the reference throws.
+    void sameAsReference(
+        String name, List<bool> sw, int epd, List<bool>? valid) {
+      test(name, () {
+        Metric<SriResult>? want;
+        Object? wantError;
+        try {
+          want = _referenceSri(sw, epd, valid: valid);
+        } catch (e) {
+          wantError = e;
+        }
+        if (wantError != null) {
+          expect(() => phillipsSri(sw, epd, valid: valid),
+              throwsA(predicate((e) => e.runtimeType == wantError.runtimeType)),
+              reason: 'reference threw $wantError');
+        } else {
+          _same(phillipsSri(sw, epd, valid: valid), want!, name);
+        }
+      });
+    }
+
+    List<bool> pattern(int n) => [for (var i = 0; i < n; i++) i % 3 == 0];
+
+    sameAsReference('trailing partial day, mask one short of n (spec case)',
+        List.filled(9, true), 4, List.filled(8, true));
+    sameAsReference('mask longer than n', pattern(8), 4, List.filled(12, true));
+    sameAsReference('mask longer than n, with falses', pattern(9), 4,
+        [for (var i = 0; i < 20; i++) i % 5 != 0]);
+    sameAsReference('mask = complete span, partial day present', pattern(10), 4,
+        [for (var i = 0; i < 8; i++) i != 2]);
+    sameAsReference('mask shorter than n but covering complete days',
+        pattern(11), 4, [for (var i = 0; i < 9; i++) i != 5]);
+    sameAsReference('mask shorter than complete days, absent case',
+        pattern(8), 4, List.filled(4, false));
+    sameAsReference('mask shorter than complete days, throwing case',
+        pattern(8), 4, List.filled(4, true));
+    sameAsReference('mask shorter than complete days, throws later in the day',
+        pattern(12), 4, [for (var i = 0; i < 6; i++) i < 2 ? true : i != 4]);
+    sameAsReference('empty mask', pattern(8), 4, <bool>[]);
+
+    test('the shorter-mask cases really split into absent and throwing', () {
+      expect(_referenceSri(List.filled(8, true), 4, valid: List.filled(4, false)).present,
+          isFalse);
+      expect(() => _referenceSri(List.filled(8, true), 4, valid: List.filled(4, true)),
+          throwsRangeError);
+    });
+  });
+
+  group('sriAggregator with epochsPerDay <= 0', () {
+    for (final epd in [0, -1, -5]) {
+      test('epochsPerDay $epd finishes as the absent phillipsSri metric', () {
+        final inputs = <List<bool>>[
+          [],
+          [true],
+          List.filled(10, true),
+          [for (var i = 0; i < 40; i++) i % 3 == 0],
+        ];
+        for (final sw in inputs) {
+          final want = _referenceSri(sw, epd);
+          expect(want.present, isFalse);
+          final got = sriAggregator(epd).run(_epochs(sw));
+          _same(got, want, 'epd $epd n ${sw.length}');
+        }
+      });
+      test('epochsPerDay $epd never throws, masked or with minPairCases', () {
+        final sw = [for (var i = 0; i < 12; i++) i.isEven];
+        final got = sriAggregator(epd, minPairCases: 2)
+            .run(_epochs(sw, List.filled(12, true)));
+        _same(got, _referenceSri(sw, epd, minPairCases: 2), 'masked');
+      });
+    }
+  });
 }

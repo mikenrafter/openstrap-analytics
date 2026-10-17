@@ -50,6 +50,15 @@ double _circ(double a, double b, double period) {
   return math.min(d, period - d);
 }
 
+/// True when a finite/non-finite mismatch (or two different non-finite values)
+/// makes a tolerance comparison meaningless: NaN fails every `>` check, so
+/// without this guard a NaN field would slip through as "equal".
+bool _nonFiniteMismatch(double a, double b) {
+  if (a.isFinite && b.isFinite) return false;
+  if (a.isNaN && b.isNaN) return false;
+  return a != b;
+}
+
 /// Null when [got] matches [want] per the spec tolerances, else why not.
 String? _diff(Metric<CosinorFit> got, Metric<CosinorFit> want) {
   if (got.present != want.present) {
@@ -61,11 +70,22 @@ String? _diff(Metric<CosinorFit> got, Metric<CosinorFit> want) {
     return 'metadata ${got.tier}/${got.inputs_used}/${got.note} vs '
         '${want.tier}/${want.inputs_used}/${want.note}';
   }
-  if ((got.confidence - want.confidence).abs() > 1e-7) {
+  if (_nonFiniteMismatch(got.confidence, want.confidence) ||
+      (got.confidence - want.confidence).abs() > 1e-7) {
     return 'confidence ${got.confidence} vs ${want.confidence}';
   }
   final g = got.value, w = want.value;
   if (g == null || w == null) return null;
+  for (final (name, a, b) in [
+    ('mesor', g.mesor, w.mesor),
+    ('amplitude', g.amplitude, w.amplitude),
+    ('acrophaseRad', g.acrophaseRad, w.acrophaseRad),
+    ('acrophaseHours', g.acrophaseHours, w.acrophaseHours),
+    ('r2', g.r2, w.r2),
+    ('r2Adj', g.r2Adj, w.r2Adj),
+  ]) {
+    if (_nonFiniteMismatch(a, b)) return '$name non-finite mismatch $a vs $b';
+  }
   bool rel(double a, double b, [double floor = 0]) =>
       (a - b).abs() <= math.max(floor, 1e-9 * math.max(a.abs(), b.abs()));
   // A mesor near zero (data centred on 0) has no relative accuracy either:
@@ -422,6 +442,119 @@ void main() {
     });
     test('periodHours 0 (always absent)', () {
       expectLawful(cosinorAggregator(periodHours: 0), cases, equals: _eq);
+    });
+  });
+
+  group('_diff comparator', () {
+    final base = cosinor(_series(Rng(1), 48, noise: .05).tHours,
+        _series(Rng(1), 48, noise: .05).y);
+    Metric<CosinorFit> with_(
+            {double? mesor,
+            double? amplitude,
+            double? rad,
+            double? hours,
+            double? r2,
+            double? r2Adj,
+            double? confidence}) =>
+        Metric<CosinorFit>(
+          value: CosinorFit(
+            mesor: mesor ?? base.value!.mesor,
+            amplitude: amplitude ?? base.value!.amplitude,
+            acrophaseRad: rad ?? base.value!.acrophaseRad,
+            acrophaseHours: hours ?? base.value!.acrophaseHours,
+            periodHours: base.value!.periodHours,
+            r2: r2 ?? base.value!.r2,
+            r2Adj: r2Adj ?? base.value!.r2Adj,
+          ),
+          confidence: confidence ?? base.confidence,
+          tier: base.tier,
+          inputs_used: base.inputs_used,
+          note: base.note,
+        );
+
+    test('identical metrics are equal', () {
+      expect(_diff(with_(), base), isNull);
+    });
+    test('r2 replaced by NaN is reported', () {
+      expect(_diff(with_(r2: double.nan), base), isNotNull);
+      expect(_diff(base, with_(r2: double.nan)), isNotNull);
+    });
+    test('every field turned NaN or infinite is reported', () {
+      for (final bad in [double.nan, double.infinity]) {
+        expect(_diff(with_(r2Adj: bad), base), isNotNull, reason: 'r2Adj $bad');
+        expect(_diff(with_(confidence: bad), base), isNotNull,
+            reason: 'confidence $bad');
+        expect(_diff(with_(rad: bad), base), isNotNull, reason: 'rad $bad');
+        expect(_diff(with_(hours: bad), base), isNotNull, reason: 'hours $bad');
+        expect(_diff(with_(mesor: bad), base), isNotNull, reason: 'mesor $bad');
+        expect(_diff(with_(amplitude: bad), base), isNotNull,
+            reason: 'amplitude $bad');
+      }
+    });
+  });
+
+  group('narrow phase coverage', () {
+    // 16 samples in 0.15 h of a 24 h period: the (c, s) design is almost
+    // collinear. cosinor()'s own 3x3 solve is not trustworthy here, so these
+    // tests make NO parity claim against cosinor(); they only demand that the
+    // aggregator agrees with itself across chunking.
+    TimedValues narrow(int n, {double step = .01}) {
+      final w = _twoPi / 24;
+      final t = [for (var i = 0; i < n; i++) step * i];
+      return _tv(t, [
+        for (final ti in t) 33 + .3 * math.cos(w * ti) + .1 * math.sin(w * ti)
+      ]);
+    }
+
+    bool relClose(double a, double b, double tol) =>
+        (a - b).abs() <= tol * math.max(a.abs(), b.abs());
+
+    test('whole vs split at 8 agree to 1e-9 relative (review case)', () {
+      final d = narrow(16);
+      final a = cosinorAggregator();
+      final whole = a.run(d);
+      for (final split in [
+        runChunked(a, d, [0, 8, 16]),
+        runChunked(a, d, [0, 8, 16], copy: true),
+        runChunkedRight(a, d, [0, 8, 16]),
+      ]) {
+        expect(split.present, whole.present,
+            reason: 'present ${split.present} vs ${whole.present}');
+        if (!whole.present) continue;
+        final g = split.value!, w = whole.value!;
+        expect(relClose(g.amplitude, w.amplitude, 1e-9), isTrue,
+            reason: 'amplitude ${g.amplitude} vs ${w.amplitude}');
+        expect(relClose(g.mesor, w.mesor, 1e-9), isTrue,
+            reason: 'mesor ${g.mesor} vs ${w.mesor}');
+      }
+    });
+
+    test('every single split point of the review case agrees', () {
+      final d = narrow(16);
+      final a = cosinorAggregator();
+      final whole = a.run(d);
+      for (var k = 1; k < 16; k++) {
+        final split = runChunked(a, d, [0, k, 16]);
+        expect(split.present, whole.present, reason: 'split $k presence');
+        if (!whole.present) continue;
+        expect(
+            relClose(split.value!.amplitude, whole.value!.amplitude, 1e-9),
+            isTrue,
+            reason: 'split $k amplitude '
+                '${split.value!.amplitude} vs ${whole.value!.amplitude}');
+        expect(relClose(split.value!.mesor, whole.value!.mesor, 1e-9), isTrue,
+            reason: 'split $k mesor');
+      }
+    });
+
+    test('narrow-coverage cases are lawful', () {
+      expectLawful(cosinorAggregator(), [
+        _tv([], []),
+        narrow(16),
+        narrow(24),
+        narrow(16, step: .02),
+        narrow(20, step: .005),
+      ], equals: _eq);
     });
   });
 }
