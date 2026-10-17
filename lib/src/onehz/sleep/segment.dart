@@ -44,6 +44,7 @@ import '../util.dart';
 import 'van_hees.dart';
 import 'accounting.dart' show SleepStage;
 import 'advanced_stager.dart';
+import 'hypnogram.dart';
 
 /// Minimum in-bed duration to qualify as the main sleep (ARCHITECTURE_V2: ~3 h).
 const int _minQualifyingSleepSec = 3 * 3600;

@@ -30,6 +30,7 @@ export 'nap.dart';
 export 'segment.dart';
 export 'hr_fallback.dart';
 export 'advanced_stager.dart';
+export 'hypnogram.dart';
 export 'sri.dart';
 export 'accounting.dart';
 // stager.dart provides StagerResult + the shared Webster/consolidation
