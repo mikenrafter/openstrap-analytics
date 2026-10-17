@@ -16,8 +16,12 @@
 // fixed number of epochs per day (e.g. 1440 one-minute epochs, or 86400 one-
 // second epochs). The vector spans ≥2 days.
 
+import 'dart:typed_data';
+
+import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
+import 'sri_aggregator.dart';
 
 /// One adjacent-day comparison, broken out of the total.
 ///
@@ -104,47 +108,10 @@ Metric<SriResult> phillipsSri(
     );
   }
 
-  final pairFloor = minPairCases ?? (epochsPerDay ~/ 2);
-  var agreement = 0;
-  var cases = 0;
-  final pairs = <SriPair>[];
-  for (var d = 1; d < days; d++) {
-    var pairAgreement = 0;
-    var pairCases = 0;
-    for (var e = 0; e < epochsPerDay; e++) {
-      final iPrev = (d - 1) * epochsPerDay + e;
-      final iCur = d * epochsPerDay + e;
-      if (iCur >= n) break;
-      if (valid != null && (!valid[iPrev] || !valid[iCur])) continue;
-      pairCases++;
-      if (sleepWake[iPrev] == sleepWake[iCur]) pairAgreement++;
-    }
-    agreement += pairAgreement;
-    cases += pairCases;
-    // `> 0` is not redundant with the floor: a caller may pass
-    // `minPairCases: 0`, and a zero-case pair would make SriPair.sri NaN.
-    if (pairCases > 0 && pairCases >= pairFloor) {
-      pairs.add(SriPair(d, pairAgreement, pairCases));
-    }
-  }
-  if (cases == 0) {
-    return const Metric<SriResult>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: 'no valid epoch pairs for SRI',
-    );
-  }
-
-  final sri = 200.0 * agreement / cases - 100.0;
-  // Confidence: scales with the number of day-comparisons (more days, more
-  // stable). Saturates around a typical 7-day record.
-  final conf = ((days - 1) / 7.0).clamp(0.3, 0.95);
-  return Metric<SriResult>(
-    value: SriResult(sri, days, cases, pairs),
-    confidence: conf,
-    tier: Tier.high,
-    inputs_used: inputs,
-    note: 'epoch-by-epoch 24-h concordance (Phillips 2017), '
-        'SRI=200·agreement/cases−100; NOT SD-of-midsleep',
-  );
+  return sriAggregator(epochsPerDay, minPairCases: minPairCases).run(Epochs(
+    Uint8List.fromList([for (final asleep in sleepWake) asleep ? 1 : 0]),
+    valid: valid == null
+        ? null
+        : Uint8List.fromList([for (final accepted in valid) accepted ? 1 : 0]),
+  ));
 }

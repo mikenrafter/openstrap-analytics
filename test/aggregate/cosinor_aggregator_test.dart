@@ -68,7 +68,13 @@ String? _diff(Metric<CosinorFit> got, Metric<CosinorFit> want) {
   if (g == null || w == null) return null;
   bool rel(double a, double b, [double floor = 0]) =>
       (a - b).abs() <= math.max(floor, 1e-9 * math.max(a.abs(), b.abs()));
-  if (!rel(g.mesor, w.mesor)) return 'mesor ${g.mesor} vs ${w.mesor}';
+  // A mesor near zero (data centred on 0) has no relative accuracy either:
+  // its rounding scales with the amplitude, so it gets the same data-scale
+  // floor.
+  final scale = math.max(1.0, math.max(w.mesor.abs(), w.amplitude));
+  if (!rel(g.mesor, w.mesor, 1e-12 * scale)) {
+    return 'mesor ${g.mesor} vs ${w.mesor}';
+  }
   // An amplitude that is pure rounding noise (constant data) has no relative
   // accuracy and no phase: compare it against a floor and skip the phases.
   final floor = 1e-12 * math.max(1, w.mesor.abs());

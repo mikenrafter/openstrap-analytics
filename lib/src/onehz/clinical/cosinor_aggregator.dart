@@ -1,0 +1,233 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import '../../aggregate/aggregator.dart';
+import '../types.dart';
+import 'cosinor.dart';
+import 'cosinor_solver.dart';
+
+/// Sample times and values for a cosinor fit.
+class TimedValues extends Batch<TimedValues> {
+  TimedValues(this.tHours, this.y) : assert(tHours.length == y.length);
+
+  final Float64List tHours;
+  final Float64List y;
+
+  @override
+  int get length => y.length;
+
+  @override
+  TimedValues copyRange(int start, int end) => TimedValues(
+      Float64List.fromList(tHours.sublist(start, end)),
+      Float64List.fromList(y.sublist(start, end)));
+
+  @override
+  TimedValues join(TimedValues other) {
+    final times = Float64List(length + other.length);
+    final values = Float64List(length + other.length);
+    times
+      ..setRange(0, length, tHours)
+      ..setRange(length, times.length, other.tHours);
+    values
+      ..setRange(0, length, y)
+      ..setRange(length, values.length, other.y);
+    return TimedValues(times, values);
+  }
+}
+
+class _CosinorState {
+  var n = 0;
+  var c = 0.0;
+  var s = 0.0;
+  var cc = 0.0;
+  var ss = 0.0;
+  var cs = 0.0;
+  var y = 0.0;
+  var yc = 0.0;
+  var ys = 0.0;
+  var yy = 0.0;
+  var meanC = 0.0;
+  var meanS = 0.0;
+  var meanY = 0.0;
+  var mCC = 0.0;
+  var mSS = 0.0;
+  var mYY = 0.0;
+  var mCS = 0.0;
+  var mCY = 0.0;
+  var mSY = 0.0;
+
+  void addCentered(double c, double s, double y) {
+    final nextN = n + 1;
+    final dc = c - meanC;
+    final ds = s - meanS;
+    final dy = y - meanY;
+    final nextMeanC = meanC + dc / nextN;
+    final nextMeanS = meanS + ds / nextN;
+    final nextMeanY = meanY + dy / nextN;
+    mCC += dc * (c - nextMeanC);
+    mSS += ds * (s - nextMeanS);
+    mYY += dy * (y - nextMeanY);
+    mCS += dc * (s - nextMeanS);
+    mCY += dc * (y - nextMeanY);
+    mSY += ds * (y - nextMeanY);
+    meanC = nextMeanC;
+    meanS = nextMeanS;
+    meanY = nextMeanY;
+  }
+
+  void mergeCentered(_CosinorState other) {
+    if (other.n == 0) return;
+    if (n == 0) {
+      meanC = other.meanC;
+      meanS = other.meanS;
+      meanY = other.meanY;
+      mCC = other.mCC;
+      mSS = other.mSS;
+      mYY = other.mYY;
+      mCS = other.mCS;
+      mCY = other.mCY;
+      mSY = other.mSY;
+      return;
+    }
+    final total = n + other.n;
+    final factor = n * other.n / total;
+    final dc = other.meanC - meanC;
+    final ds = other.meanS - meanS;
+    final dy = other.meanY - meanY;
+    mCC += other.mCC + dc * dc * factor;
+    mSS += other.mSS + ds * ds * factor;
+    mYY += other.mYY + dy * dy * factor;
+    mCS += other.mCS + dc * ds * factor;
+    mCY += other.mCY + dc * dy * factor;
+    mSY += other.mSY + ds * dy * factor;
+    meanC += dc * other.n / total;
+    meanS += ds * other.n / total;
+    meanY += dy * other.n / total;
+  }
+}
+
+class _CosinorStats
+    extends Aggregator<_CosinorState, TimedValues, _CosinorState> {
+  const _CosinorStats(this.periodHours);
+
+  final double periodHours;
+
+  @override
+  _CosinorState empty() => _CosinorState();
+
+  @override
+  _CosinorState addSlice(
+      _CosinorState state, TimedValues batch, int start, int end) {
+    final w = 2 * math.pi / periodHours;
+    for (var i = start; i < end; i++) {
+      final c = math.cos(w * batch.tHours[i]);
+      final s = math.sin(w * batch.tHours[i]);
+      final y = batch.y[i];
+      state
+        ..addCentered(c, s, y)
+        ..n += 1
+        ..c += c
+        ..s += s
+        ..cc += c * c
+        ..ss += s * s
+        ..cs += c * s
+        ..y += y
+        ..yc += y * c
+        ..ys += y * s
+        ..yy += y * y;
+    }
+    return state;
+  }
+
+  @override
+  _CosinorState combine(_CosinorState left, _CosinorState right) {
+    final leftN = left.n;
+    left.mergeCentered(right);
+    left
+      ..n = leftN + right.n
+      ..c += right.c
+      ..s += right.s
+      ..cc += right.cc
+      ..ss += right.ss
+      ..cs += right.cs
+      ..y += right.y
+      ..yc += right.yc
+      ..ys += right.ys
+      ..yy += right.yy;
+    return left;
+  }
+
+  @override
+  _CosinorState finish(_CosinorState state) => state;
+}
+
+/// Builds a mergeable single-component cosinor fit over [TimedValues].
+Aggregator<_CosinorState, TimedValues, Metric<CosinorFit>> cosinorAggregator({
+  double periodHours = 24,
+  int minPoints = cosinorMinPoints,
+}) =>
+    _CosinorStats(periodHours).map((state) =>
+        _finishCosinor(state, periodHours: periodHours, minPoints: minPoints));
+
+Metric<CosinorFit> _finishCosinor(
+  _CosinorState state, {
+  required double periodHours,
+  required int minPoints,
+}) {
+  const inputs = ['signal_timeseries'];
+  final n = state.n;
+  if (n < math.max(4, minPoints) || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'too few points for cosinor',
+    );
+  }
+  final sol = solveCosinor3([
+    [n.toDouble(), state.c, state.s],
+    [state.c, state.cc, state.cs],
+    [state.s, state.cs, state.ss],
+  ], [state.y, state.yc, state.ys]);
+  if (sol == null) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'singular cosinor design (insufficient phase coverage)',
+    );
+  }
+  final mesor = sol[0];
+  final beta = sol[1];
+  final gamma = sol[2];
+  final amplitude = math.sqrt(beta * beta + gamma * gamma);
+  final acro = math.atan2(-gamma, beta);
+  final w = 2 * math.pi / periodHours;
+  var phaseHours = -acro / w;
+  phaseHours = phaseHours % periodHours;
+  if (phaseHours < 0) phaseHours += periodHours;
+
+  final ssTot = state.mYY;
+  final ssRes = state.mYY -
+      2 * beta * state.mCY -
+      2 * gamma * state.mSY +
+      beta * beta * state.mCC +
+      gamma * gamma * state.mSS +
+      2 * beta * gamma * state.mCS;
+  final double r2 = ssTot == 0 ? 0.0 : (1 - ssRes / ssTot).clamp(0, 1);
+  final double r2Adj = (1 - (1 - r2) * (n - 1) / (n - 3)).clamp(0, 1);
+  return Metric<CosinorFit>(
+    value: CosinorFit(
+      mesor: mesor,
+      amplitude: amplitude,
+      acrophaseRad: acro,
+      acrophaseHours: phaseHours,
+      periodHours: periodHours,
+      r2: r2,
+      r2Adj: r2Adj,
+    ),
+    confidence: r2Adj.clamp(0.1, 0.95),
+    tier: Tier.high,
+    inputs_used: inputs,
+    note: 'single-component cosinor; anchor circadian phase on the nocturnal '
+        'trough, not the daytime peak',
+  );
+}

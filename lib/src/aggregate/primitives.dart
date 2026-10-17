@@ -86,11 +86,51 @@ class Sum<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
   double finish(_SumState state) => state.sum + state.correction;
 }
 
+/// Neumaier-compensated sum of a function of non-missing double column values.
+///
+/// A NaN source value is skipped without calling [transform]. A NaN result from
+/// [transform] is also skipped.
+class SumOf<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
+  const SumOf(this.column, this.transform);
+
+  final Float64List Function(B batch) column;
+  final double Function(double value) transform;
+
+  @override
+  _SumState empty() => _SumState();
+
+  @override
+  _SumState addSlice(_SumState state, B batch, int start, int end) {
+    final values = column(batch);
+    for (var i = start; i < end; i++) {
+      final value = values[i];
+      if (value.isNaN) continue;
+      final transformed = transform(value);
+      if (!transformed.isNaN) state.add(transformed);
+    }
+    return state;
+  }
+
+  @override
+  _SumState combine(_SumState left, _SumState right) {
+    left.add(right.sum);
+    left.add(right.correction);
+    return left;
+  }
+
+  @override
+  double finish(_SumState state) => state.sum + state.correction;
+}
+
 class _SumState {
   double sum = 0.0;
   double correction = 0.0;
   void add(double value) {
     final next = sum + value;
+    if (!next.isFinite) {
+      sum = next;
+      return;
+    }
     if (sum.abs() >= value.abs()) {
       correction += (sum - next) + value;
     } else {
