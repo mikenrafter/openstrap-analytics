@@ -123,7 +123,9 @@ void main() {
       expectConversion<dynamic, EpochSeries, Metric<CircadianNp>>(
           (_) => circadianNpAggregator(1440), [x],
           (b) => circadianNonparametric(b.x, 1440),
-          equals: _exact, chunkings: 4);
+          // Laws are covered by the small-p cases above; here each finish runs
+          // the O(p·w) window search, so the law sweep alone took ~9 s.
+          equals: _exact, chunkings: 4, laws: false);
     });
   });
 
