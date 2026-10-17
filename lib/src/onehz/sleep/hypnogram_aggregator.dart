@@ -5,7 +5,7 @@ import 'hypnogram.dart';
 
 /// Mergeable AASM-style hypnogram metrics over start-sorted segments.
 class HypnogramAggregator
-    extends Aggregator<_HypnogramState, StageSegment, HypnogramMetrics> {
+    extends Aggregator<_HypnogramState, ListBatch<StageSegment>, HypnogramMetrics> {
   HypnogramAggregator(this.sessionStart, this.sessionEnd);
 
   final int sessionStart;
@@ -15,32 +15,35 @@ class HypnogramAggregator
   _HypnogramState empty() => _HypnogramState();
 
   @override
-  _HypnogramState add(_HypnogramState state, StageSegment segment) {
-    switch (segment.stage) {
-      case 'light':
-      case 'deep':
-      case 'rem':
-        final duration = segment.end - segment.start;
-        state.tst += duration;
-        if (segment.stage == 'light') state.light += duration;
-        if (segment.stage == 'deep') state.deep += duration;
-        if (segment.stage == 'rem') {
-          state.rem += duration;
-          if (!state.hasRem) {
-            state
-              ..hasRem = true
-              ..firstRemStart = segment.start;
+  _HypnogramState addSlice(
+      _HypnogramState state, ListBatch<StageSegment> batch, int start, int end) {
+    for (var i = start; i < end; i++) {
+      final segment = batch.rows[i];
+      switch (segment.stage) {
+        case 'light':
+        case 'deep':
+        case 'rem':
+          final duration = segment.end - segment.start;
+          state.tst += duration;
+          if (segment.stage == 'light') state.light += duration;
+          if (segment.stage == 'deep') state.deep += duration;
+          if (segment.stage == 'rem') {
+            state.rem += duration;
+            if (!state.hasRem) {
+              state
+                ..hasRem = true
+                ..firstRemStart = segment.start;
+            }
           }
-        }
-        if (!state.hasSleep) {
-          state
-            ..hasSleep = true
-            ..onset = segment.start;
-        }
-        state.sptEnd = segment.end;
-        return state;
-      case 'wake':
-        state.wakes.add((segment.start, segment.end));
+          if (!state.hasSleep) {
+            state
+              ..hasSleep = true
+              ..onset = segment.start;
+          }
+          state.sptEnd = segment.end;
+        case 'wake':
+          state.wakes.add((segment.start, segment.end));
+      }
     }
     return state;
   }

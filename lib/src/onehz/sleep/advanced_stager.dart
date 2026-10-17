@@ -1863,7 +1863,7 @@ class AdvancedSleepStager {
 
   static HypnogramMetrics hypnogramMetrics(SleepSession session) {
     final segs = [...session.stages]..sort((a, b) => a.start.compareTo(b.start));
-    return HypnogramAggregator(session.start, session.end).run(segs);
+    return HypnogramAggregator(session.start, session.end).runList(segs);
   }
 
   // ── shared math (population std, percentile) ──────────────────────────────

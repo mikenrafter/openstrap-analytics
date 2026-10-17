@@ -1,244 +1,234 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/primitives.dart';
 import '../incremental_core.dart';
 import 'hrv_time.dart';
 
-/// Mergeable time-domain HRV summary over cleaned NN intervals.
-///
-/// When [gapAware] is true, adjacent beats whose elapsed time is more than the
-/// latter interval plus 0.5 ms end a difference run.  [originMs] fixes the
-/// five-minute bin grid (hrvTime uses the first beat time) and is required
-/// before the first beat when [gapAware] is true: a chunk can't place its
-/// bins without it.
-class HrvTimeAggregator
-    extends Aggregator<_HrvTimeState, ({double nnMs, double? timeMs}), HrvTime> {
-  HrvTimeAggregator({this.originMs, this.gapAware = true});
+const double _fiveMinutesMs = 300000.0;
 
-  final double? originMs;
+/// NN intervals and their beat times. A missing time is represented by NaN.
+class Beats extends Batch<Beats> {
+  Beats(this.nnMs, this.timeMs) : assert(nnMs.length == timeMs.length);
+
+  final Float64List nnMs;
+  final Float64List timeMs;
+
+  @override
+  int get length => nnMs.length;
+
+  @override
+  Beats copyRange(int start, int end) => Beats(
+      Float64List.fromList(nnMs.sublist(start, end)),
+      Float64List.fromList(timeMs.sublist(start, end)));
+
+  @override
+  Beats join(Beats other) {
+    final nn = Float64List(length + other.length);
+    final times = Float64List(length + other.length);
+    nn
+      ..setRange(0, length, nnMs)
+      ..setRange(length, nn.length, other.nnMs);
+    times
+      ..setRange(0, length, timeMs)
+      ..setRange(length, times.length, other.timeMs);
+    return Beats(nn, times);
+  }
+}
+
+/// Builds the composed time-domain HRV summary for a columnar beat batch.
+///
+/// With [gapAware] false, times and five-minute bins are deliberately ignored.
+Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
+  double? originMs,
+  bool gapAware = true,
+}) {
+  final diffs = both(
+    Lookback<Beats, _DiffState, _DiffSummary>(
+        2, _DiffStats(gapAware: gapAware)),
+    Lookback<Beats, _LagState, _LagSummary>(
+        3, _LagStats(gapAware: gapAware)),
+  );
+  final levels = Moments<Beats>((batch) => batch.nnMs);
+
+  if (!gapAware) {
+    final core = both(diffs, levels);
+    return core.map((result) => _finish(
+        result.$1.$1, result.$1.$2, result.$2, const <int, RunningMoments>{},
+        gapAware: false));
+  }
+
+  final bins = GroupBy<Beats, RunningMoments, RunningMoments>(
+    (batch, row) {
+      final origin = originMs;
+      if (origin == null) throw StateError('gap-aware HRV needs originMs');
+      return ((_timeAt(batch, row) - origin) / _fiveMinutesMs).floor();
+    },
+    Moments<Beats>((batch) => batch.nnMs),
+  );
+  final core = both(diffs, both(levels, bins));
+  return core.map((result) => _finish(
+      result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2,
+      gapAware: true));
+}
+
+double _timeAt(Beats batch, int row) {
+  final time = batch.timeMs[row];
+  return time.isNaN ? 0.0 : time;
+}
+
+bool _contiguous(Beats batch, int previous, int current, bool gapAware) =>
+    !gapAware ||
+    _timeAt(batch, current) - _timeAt(batch, previous) <=
+        batch.nnMs[current] + 0.5;
+
+class _DiffSummary {
+  const _DiffSummary(this.pairs, this.over50, this.sum, this.squares);
+  final int pairs;
+  final int over50;
+  final double sum;
+  final double squares;
+}
+
+class _DiffState {
+  int pairs = 0;
+  int over50 = 0;
+  double sum = 0.0;
+  double squares = 0.0;
+}
+
+/// Processes every two-row window supplied by [Lookback].
+class _DiffStats extends Aggregator<_DiffState, Beats, _DiffSummary> {
+  const _DiffStats({required this.gapAware});
   final bool gapAware;
 
   @override
-  _HrvTimeState empty() => _HrvTimeState();
+  _DiffState empty() => _DiffState();
 
   @override
-  _HrvTimeState add(_HrvTimeState state, ({double nnMs, double? timeMs}) beat) {
-    _addBeat(state, beat);
+  _DiffState addSlice(_DiffState state, Beats batch, int start, int end) {
+    for (var i = start + 1; i < end; i++) {
+      if (!_contiguous(batch, i - 1, i, gapAware)) continue;
+      final diff = batch.nnMs[i] - batch.nnMs[i - 1];
+      state.pairs++;
+      state.sum += diff;
+      state.squares += diff * diff;
+      if (diff.abs() > 50) state.over50++;
+    }
     return state;
   }
 
   @override
-  _HrvTimeState combine(_HrvTimeState left, _HrvTimeState right) {
-    if (right.nBeats == 0) return left;
-    if (left.nBeats == 0) {
-      left.copyFrom(right);
-      return left;
-    }
-
-    final leftLast = left.last!;
-    final rightFirst = right.first!;
-    final seamContiguous = _contiguous(leftLast, rightFirst);
-    final seamDiff = rightFirst.nnMs - leftLast.nnMs;
-
-    left.levels.merge(right.levels);
+  _DiffState combine(_DiffState left, _DiffState right) {
     left
-      ..nBeats += right.nBeats
       ..pairs += right.pairs
       ..over50 += right.over50
-      ..diffSum += right.diffSum
-      ..diffSquares += right.diffSquares
-      ..lagPairs += right.lagPairs
-      ..products += right.products
-      ..endpoints += right.endpoints;
-
-    if (seamContiguous) {
-      _addDiff(left, seamDiff);
-      if (left.endedWithDiff) _addLagPair(left, left.lastDiff!, seamDiff);
-      if (right.startsWithDiff) _addLagPair(left, seamDiff, right.firstDiff!);
-    }
-
-    final leftWasOne = left.nBeats - right.nBeats == 1;
-    final rightWasOne = right.nBeats == 1;
-    if (leftWasOne) {
-      left
-        ..startsWithDiff = seamContiguous
-        ..firstDiff = seamContiguous ? seamDiff : null;
-    }
-    if (rightWasOne) {
-      left
-        ..endedWithDiff = seamContiguous
-        ..lastDiff = seamContiguous ? seamDiff : null;
-    } else {
-      left
-        ..endedWithDiff = right.endedWithDiff
-        ..lastDiff = right.lastDiff;
-    }
-    left.last = right.last;
-
-    if (gapAware) _mergeBins(left, right);
+      ..sum += right.sum
+      ..squares += right.squares;
     return left;
   }
 
   @override
-  HrvTime finish(_HrvTimeState state) {
-    if (state.nBeats < 2) return HrvTime(nBeats: state.nBeats);
-
-    double? acf1;
-    if (state.pairs >= 30) {
-      final mean = state.diffSum / state.pairs;
-      final variance = state.diffSquares - state.diffSum * mean;
-      if (variance > 0) {
-        acf1 = (state.products - mean * state.endpoints +
-                state.lagPairs * mean * mean) /
-            variance;
-      }
-    }
-    final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
-
-    double? sdann;
-    double? sdnnIndex;
-    if (gapAware) {
-      final usableBins = state.bins.values.where((bin) => bin.count >= 2);
-      final binMeans = RunningMoments();
-      var binSdSum = 0.0;
-      var binCount = 0;
-      for (final bin in usableBins) {
-        binMeans.add(bin.mean!);
-        binSdSum += bin.sampleSd!;
-        binCount++;
-      }
-      if (binCount >= 2) {
-        sdann = binMeans.sampleSd;
-        sdnnIndex = binSdSum / binCount;
-      }
-    }
-
-    return HrvTime(
-      nBeats: state.nBeats,
-      rmssd: state.pairs > 0 && !jittery
-          ? math.sqrt(state.diffSquares / state.pairs)
-          : null,
-      pnn50: state.pairs > 0 && !jittery
-          ? 100.0 * state.over50 / state.pairs
-          : null,
-      sdnn: state.levels.sampleSd,
-      sdann: sdann,
-      sdnnIndex: sdnnIndex,
-      diffAcf1: acf1,
-    );
-  }
-
-  void _addBeat(_HrvTimeState state, ({double nnMs, double? timeMs}) beat) {
-    if (state.nBeats == 0) {
-      state
-        ..first = beat
-        ..last = beat
-        ..nBeats = 1;
-      state.levels.add(beat.nnMs);
-      if (gapAware) _addToBin(state, beat);
-      return;
-    }
-
-    final previous = state.last!;
-    final contiguous = _contiguous(previous, beat);
-    final diff = beat.nnMs - previous.nnMs;
-    if (contiguous) {
-      _addDiff(state, diff);
-      if (state.endedWithDiff) _addLagPair(state, state.lastDiff!, diff);
-    }
-    if (state.nBeats == 1) {
-      state
-        ..startsWithDiff = contiguous
-        ..firstDiff = contiguous ? diff : null;
-    }
-    state
-      ..endedWithDiff = contiguous
-      ..lastDiff = contiguous ? diff : null
-      ..last = beat;
-    state.nBeats++;
-    state.levels.add(beat.nnMs);
-    if (gapAware) _addToBin(state, beat);
-  }
-
-  bool _contiguous(
-      ({double nnMs, double? timeMs}) previous, ({double nnMs, double? timeMs}) current) {
-    if (!gapAware) return true;
-    final previousTime = previous.timeMs ?? 0.0;
-    final currentTime = current.timeMs ?? 0.0;
-    return currentTime - previousTime <= current.nnMs + 0.5;
-  }
-
-  void _addDiff(_HrvTimeState state, double diff) {
-    state.pairs++;
-    state
-      ..diffSum += diff
-      ..diffSquares += diff * diff;
-    if (diff.abs() > 50) state.over50++;
-  }
-
-  void _addLagPair(_HrvTimeState state, double previous, double current) {
-    state.lagPairs++;
-    state
-      ..products += previous * current
-      ..endpoints += previous + current;
-  }
-
-  void _addToBin(_HrvTimeState state, ({double nnMs, double? timeMs}) beat) {
-    final origin = originMs;
-    if (origin == null) throw StateError('gap-aware HRV needs originMs');
-    final time = beat.timeMs ?? 0.0;
-    final index = ((time - origin) / _fiveMinutesMs).floor();
-    (state.bins[index] ??= RunningMoments()).add(beat.nnMs);
-  }
-
-  void _mergeBins(_HrvTimeState left, _HrvTimeState right) {
-    for (final entry in right.bins.entries) {
-      (left.bins[entry.key] ??= RunningMoments()).merge(entry.value);
-    }
-  }
-
+  _DiffSummary finish(_DiffState state) =>
+      _DiffSummary(state.pairs, state.over50, state.sum, state.squares);
 }
 
-const _fiveMinutesMs = 300000.0;
+class _LagSummary {
+  const _LagSummary(this.pairs, this.products, this.endpoints);
+  final int pairs;
+  final double products;
+  final double endpoints;
+}
 
-class _HrvTimeState {
-  int nBeats = 0;
-  final RunningMoments levels = RunningMoments();
-  final Map<int, RunningMoments> bins = {};
-
-  ({double nnMs, double? timeMs})? first;
-  ({double nnMs, double? timeMs})? last;
-  bool startsWithDiff = false;
-  bool endedWithDiff = false;
-  double? firstDiff;
-  double? lastDiff;
-
+class _LagState {
   int pairs = 0;
-  int over50 = 0;
-  int lagPairs = 0;
-  double diffSum = 0;
-  double diffSquares = 0;
-  double products = 0;
-  double endpoints = 0;
+  double products = 0.0;
+  double endpoints = 0.0;
+}
 
-  void copyFrom(_HrvTimeState other) {
-    nBeats = other.nBeats;
-    levels.merge(other.levels);
-    for (final entry in other.bins.entries) {
-      (bins[entry.key] ??= RunningMoments()).merge(entry.value);
+/// Processes every three-row window supplied by [Lookback].
+class _LagStats extends Aggregator<_LagState, Beats, _LagSummary> {
+  const _LagStats({required this.gapAware});
+  final bool gapAware;
+
+  @override
+  _LagState empty() => _LagState();
+
+  @override
+  _LagState addSlice(_LagState state, Beats batch, int start, int end) {
+    for (var i = start + 2; i < end; i++) {
+      if (!_contiguous(batch, i - 2, i - 1, gapAware) ||
+          !_contiguous(batch, i - 1, i, gapAware)) {
+        continue;
+      }
+      final first = batch.nnMs[i - 1] - batch.nnMs[i - 2];
+      final second = batch.nnMs[i] - batch.nnMs[i - 1];
+      state.pairs++;
+      state.products += first * second;
+      state.endpoints += first + second;
     }
-    first = other.first;
-    last = other.last;
-    startsWithDiff = other.startsWithDiff;
-    endedWithDiff = other.endedWithDiff;
-    firstDiff = other.firstDiff;
-    lastDiff = other.lastDiff;
-    pairs = other.pairs;
-    over50 = other.over50;
-    lagPairs = other.lagPairs;
-    diffSum = other.diffSum;
-    diffSquares = other.diffSquares;
-    products = other.products;
-    endpoints = other.endpoints;
+    return state;
   }
+
+  @override
+  _LagState combine(_LagState left, _LagState right) {
+    left
+      ..pairs += right.pairs
+      ..products += right.products
+      ..endpoints += right.endpoints;
+    return left;
+  }
+
+  @override
+  _LagSummary finish(_LagState state) =>
+      _LagSummary(state.pairs, state.products, state.endpoints);
+}
+
+HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
+    Map<int, RunningMoments> bins, {required bool gapAware}) {
+  if (levels.count < 2) return HrvTime(nBeats: levels.count);
+
+  double? acf1;
+  if (diffs.pairs >= 30) {
+    final mean = diffs.sum / diffs.pairs;
+    final variance = diffs.squares - diffs.sum * mean;
+    if (variance > 0) {
+      acf1 = (lags.products - mean * lags.endpoints + lags.pairs * mean * mean) /
+          variance;
+    }
+  }
+  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
+
+  double? sdann;
+  double? sdnnIndex;
+  if (gapAware) {
+    final binMeans = RunningMoments();
+    var binSdSum = 0.0;
+    var binCount = 0;
+    for (final bin in bins.values) {
+      if (bin.count < 2) continue;
+      binMeans.add(bin.mean!);
+      binSdSum += bin.sampleSd!;
+      binCount++;
+    }
+    if (binCount >= 2) {
+      sdann = binMeans.sampleSd;
+      sdnnIndex = binSdSum / binCount;
+    }
+  }
+
+  return HrvTime(
+    nBeats: levels.count,
+    rmssd: diffs.pairs > 0 && !jittery
+        ? math.sqrt(diffs.squares / diffs.pairs)
+        : null,
+    pnn50: diffs.pairs > 0 && !jittery
+        ? 100.0 * diffs.over50 / diffs.pairs
+        : null,
+    sdnn: levels.sampleSd,
+    sdann: sdann,
+    sdnnIndex: sdnnIndex,
+    diffAcf1: acf1,
+  );
 }

@@ -41,8 +41,7 @@ export 'src/onehz/clinical/cardiac_coherence.dart';
 export 'src/onehz/clinical/vo2max.dart';
 
 // Metric families (each a self-contained barrel over the foundations + clinical).
-// Temporarily withheld while the slice-based HypnogramAggregator pilot is
-// migrated to the new aggregate core.
+export 'src/onehz/sleep/sleep.dart';
 export 'src/onehz/respiration/respiration.dart';
 export 'src/onehz/motion/motion.dart';
 export 'src/onehz/workout/workout.dart';
