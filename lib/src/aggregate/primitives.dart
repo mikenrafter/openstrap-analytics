@@ -62,6 +62,10 @@ class CountWhere<B extends Batch<B>> extends Aggregator<int, B, int> {
 }
 
 /// Neumaier-compensated sum of non-missing double column values.
+///
+/// Chunk-invariant results are supported while all partial sums are finite.
+/// Once a partial sum overflows, IEEE-754 arithmetic can make the result
+/// depend on chunking.
 class Sum<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
   const Sum(this.column);
   final Float64List Function(B batch) column;
@@ -90,6 +94,9 @@ class Sum<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
 ///
 /// A NaN source value is skipped without calling [transform]. A NaN result from
 /// [transform] is also skipped.
+/// Chunk-invariant results are supported while all partial sums are finite.
+/// Once a partial sum overflows, IEEE-754 arithmetic can make the result
+/// depend on chunking.
 class SumOf<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
   const SumOf(this.column, this.transform);
 

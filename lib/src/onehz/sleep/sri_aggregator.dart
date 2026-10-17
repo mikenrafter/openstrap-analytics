@@ -20,11 +20,18 @@ class Epochs extends Batch<Epochs> {
   int get length => asleep.length;
 
   @override
-  Epochs copyRange(int start, int end) => Epochs(
-        Uint8List.fromList(asleep.sublist(start, end)),
-        valid: valid == null ? null : Uint8List.fromList(valid!.sublist(start, end)),
-        firstIndex: firstIndex + start,
-      );
+  Epochs copyRange(int start, int end) {
+    final copiedLength = end - start;
+    final copiedAsleep = Uint8List(copiedLength)
+      ..setRange(0, copiedLength, asleep, start);
+    final sourceValid = valid;
+    final copiedValid = sourceValid == null
+        ? null
+        : (Uint8List(copiedLength)
+          ..setRange(0, copiedLength, sourceValid, start));
+    return Epochs(copiedAsleep,
+        valid: copiedValid, firstIndex: firstIndex + start);
+  }
 
   @override
   Epochs join(Epochs other) {
@@ -132,6 +139,13 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
   int epochsPerDay, {
   int? minPairCases,
 }) {
+  if (epochsPerDay <= 0) {
+    return Count<Epochs>().map((_) => const Metric<SriResult>.absent(
+          tier: Tier.high,
+          inputs_used: ['sleep_wake_epochs'],
+          note: 'need ≥2 full days of clock-aligned sleep/wake epochs for SRI',
+        ));
+  }
   final pairs = Lookback<Epochs, Map<int, _PairCounts>, Map<int, _PairCounts>>(
     epochsPerDay + 1,
     _GroupedPairWindows(epochsPerDay),

@@ -83,6 +83,42 @@ List<LawViolation> checkLaws<S, B extends Batch<B>, R>(
     if (!equal(aggregator.finish(sliced), expected)) {
       violations.add(LawViolation('slicing', detail));
     }
+
+    // finish must not consume or otherwise close a state. Keep separate
+    // states for the add and combine continuations: combine is allowed to
+    // consume either input.
+    final continuationStart = batch.length ~/ 2;
+    var afterFinish = aggregator.fold(batch, 0, continuationStart);
+    final firstFinish = aggregator.finish(afterFinish);
+    final secondFinish = aggregator.finish(afterFinish);
+    var finishIsPure = equal(firstFinish, secondFinish);
+
+    afterFinish = aggregator.addSlice(
+        afterFinish, batch, continuationStart, batch.length);
+    var addReference = aggregator.fold(batch, 0, continuationStart);
+    addReference = aggregator.addSlice(
+        addReference, batch, continuationStart, batch.length);
+    if (!equal(aggregator.finish(afterFinish), aggregator.finish(addReference))) {
+      finishIsPure = false;
+    }
+
+    var combinedAfterFinish = aggregator.fold(batch, 0, continuationStart);
+    aggregator.finish(combinedAfterFinish);
+    aggregator.finish(combinedAfterFinish);
+    combinedAfterFinish = aggregator.combine(
+        combinedAfterFinish,
+        aggregator.fold(batch, continuationStart, batch.length));
+    var combineReference = aggregator.fold(batch, 0, continuationStart);
+    combineReference = aggregator.combine(
+        combineReference,
+        aggregator.fold(batch, continuationStart, batch.length));
+    if (!equal(aggregator.finish(combinedAfterFinish),
+        aggregator.finish(combineReference))) {
+      finishIsPure = false;
+    }
+    if (!finishIsPure) {
+      violations.add(LawViolation('finishPure', detail));
+    }
   }
   return violations;
 }
@@ -116,6 +152,8 @@ ResultEquals<R> fieldsEqual<R>(
     };
 
 bool _fieldEqual(Object? left, Object? right, double relTol, double absTol) {
+  // Converting two ints to double loses distinctions above 2^53.
+  if (left is int && right is int) return left == right;
   if (left == right) return true;
   if (left == null || right == null) return false;
   if (left is! num || right is! num) return false;
@@ -123,6 +161,6 @@ bool _fieldEqual(Object? left, Object? right, double relTol, double absTol) {
   if (!left.isFinite || !right.isFinite) return false;
   final a = left.toDouble();
   final b = right.toDouble();
-  final tolerance = math.max(absTol, relTol * math.max(a.abs(), b.abs()));
+  final tolerance = absTol + relTol * math.max(a.abs(), b.abs());
   return (a - b).abs() <= tolerance;
 }

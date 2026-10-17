@@ -4,7 +4,6 @@ import 'dart:typed_data';
 import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import 'cosinor.dart';
-import 'cosinor_solver.dart';
 
 /// Sample times and values for a cosinor fit.
 class TimedValues extends Batch<TimedValues> {
@@ -18,8 +17,9 @@ class TimedValues extends Batch<TimedValues> {
 
   @override
   TimedValues copyRange(int start, int end) => TimedValues(
-      Float64List.fromList(tHours.sublist(start, end)),
-      Float64List.fromList(y.sublist(start, end)));
+        Float64List(end - start)..setRange(0, end - start, tHours, start),
+        Float64List(end - start)..setRange(0, end - start, y, start),
+      );
 
   @override
   TimedValues join(TimedValues other) {
@@ -37,15 +37,6 @@ class TimedValues extends Batch<TimedValues> {
 
 class _CosinorState {
   var n = 0;
-  var c = 0.0;
-  var s = 0.0;
-  var cc = 0.0;
-  var ss = 0.0;
-  var cs = 0.0;
-  var y = 0.0;
-  var yc = 0.0;
-  var ys = 0.0;
-  var yy = 0.0;
   var meanC = 0.0;
   var meanS = 0.0;
   var meanY = 0.0;
@@ -73,6 +64,7 @@ class _CosinorState {
     meanC = nextMeanC;
     meanS = nextMeanS;
     meanY = nextMeanY;
+    n = nextN;
   }
 
   void mergeCentered(_CosinorState other) {
@@ -87,6 +79,7 @@ class _CosinorState {
       mCS = other.mCS;
       mCY = other.mCY;
       mSY = other.mSY;
+      n = other.n;
       return;
     }
     final total = n + other.n;
@@ -103,6 +96,7 @@ class _CosinorState {
     meanC += dc * other.n / total;
     meanS += ds * other.n / total;
     meanY += dy * other.n / total;
+    n = total;
   }
 }
 
@@ -123,37 +117,14 @@ class _CosinorStats
       final c = math.cos(w * batch.tHours[i]);
       final s = math.sin(w * batch.tHours[i]);
       final y = batch.y[i];
-      state
-        ..addCentered(c, s, y)
-        ..n += 1
-        ..c += c
-        ..s += s
-        ..cc += c * c
-        ..ss += s * s
-        ..cs += c * s
-        ..y += y
-        ..yc += y * c
-        ..ys += y * s
-        ..yy += y * y;
+      state.addCentered(c, s, y);
     }
     return state;
   }
 
   @override
   _CosinorState combine(_CosinorState left, _CosinorState right) {
-    final leftN = left.n;
     left.mergeCentered(right);
-    left
-      ..n = leftN + right.n
-      ..c += right.c
-      ..s += right.s
-      ..cc += right.cc
-      ..ss += right.ss
-      ..cs += right.cs
-      ..y += right.y
-      ..yc += right.yc
-      ..ys += right.ys
-      ..yy += right.yy;
     return left;
   }
 
@@ -183,21 +154,22 @@ Metric<CosinorFit> _finishCosinor(
       note: 'too few points for cosinor',
     );
   }
-  final sol = solveCosinor3([
-    [n.toDouble(), state.c, state.s],
-    [state.c, state.cc, state.cs],
-    [state.s, state.cs, state.ss],
-  ], [state.y, state.yc, state.ys]);
-  if (sol == null) {
+  final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
+  // The determinant is relative to the diagonal co-moments.  A design needs
+  // at least 1e-12 of that scale after removing its means to identify both
+  // cosine coefficients; below that, numerical noise decides the fit.
+  if (determinant <= 1e-12 * state.mCC * state.mSS) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
-  final mesor = sol[0];
-  final beta = sol[1];
-  final gamma = sol[2];
+  final beta =
+      (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
+  final gamma =
+      (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
+  final mesor = state.meanY - beta * state.meanC - gamma * state.meanS;
   final amplitude = math.sqrt(beta * beta + gamma * gamma);
   final acro = math.atan2(-gamma, beta);
   final w = 2 * math.pi / periodHours;

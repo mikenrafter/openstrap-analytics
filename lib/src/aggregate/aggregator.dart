@@ -35,8 +35,11 @@ class DoubleColumn extends Batch<DoubleColumn> {
   int get length => values.length;
 
   @override
-  DoubleColumn copyRange(int start, int end) =>
-      DoubleColumn(Float64List.fromList(values.sublist(start, end)));
+  DoubleColumn copyRange(int start, int end) {
+    final copied = Float64List(end - start)
+      ..setRange(0, end - start, values, start);
+    return DoubleColumn(copied);
+  }
 
   @override
   DoubleColumn join(DoubleColumn other) {
