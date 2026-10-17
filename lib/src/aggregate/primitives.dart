@@ -428,3 +428,143 @@ class _LookbackState<B extends Batch<B>, S> {
   B? first;
   B? last;
 }
+
+/// An affine map x -> scale * x + offset. Composition is associative, so a
+/// run of affine steps can be summarised by one map and merged in any grouping.
+class Affine {
+  const Affine(this.scale, this.offset);
+
+  final double scale;
+  final double offset;
+
+  double apply(double x) => scale * x + offset;
+
+  /// The map that applies this one first, then [next].
+  Affine then(Affine next) => Affine(
+      next.scale * scale, next.scale * offset + next.offset);
+}
+
+class _AffineState {
+  double scale = 1;
+  double offset = 0;
+}
+
+/// An exponentially weighted moving average, as the composed affine map of the
+/// running value: each row x applies c -> (1 - lambda) * c + lambda * x.
+///
+/// NaN rows are skipped (they act as the identity map), and no rows finish as
+/// the identity. Apply the result to the seed value to get the final average.
+class Ewma<B extends Batch<B>> extends Aggregator<_AffineState, B, Affine> {
+  const Ewma(this.column, this.lambda);
+
+  final Float64List Function(B batch) column;
+  final double lambda;
+
+  @override
+  _AffineState empty() => _AffineState();
+
+  @override
+  _AffineState addSlice(_AffineState state, B batch, int start, int end) {
+    final values = column(batch);
+    final keep = 1 - lambda;
+    var scale = state.scale;
+    var offset = state.offset;
+    for (var i = start; i < end; i++) {
+      final x = values[i];
+      if (x.isNaN) continue;
+      scale *= keep;
+      offset = keep * offset + lambda * x;
+    }
+    state.scale = scale;
+    state.offset = offset;
+    return state;
+  }
+
+  @override
+  _AffineState combine(_AffineState left, _AffineState right) {
+    // Right's map runs after left's.
+    left.offset = right.scale * left.offset + right.offset;
+    left.scale = right.scale * left.scale;
+    return left;
+  }
+
+  @override
+  Affine finish(_AffineState state) => Affine(state.scale, state.offset);
+}
+
+class _PrefixState<B extends Batch<B>, S2> {
+  _PrefixState(this.tail);
+
+  /// The first rows of the input seen so far (at most k), null before any.
+  B? rows;
+  int held = 0;
+  S2 tail;
+}
+
+/// Sends the first [k] rows of the whole input to [head] and every later row
+/// to [tail], in order, however the input is chunked.
+///
+/// The state keeps the prefix rows (a copy, at most k) and the tail state.
+/// The head result is computed at finish by running [head] over the stored
+/// rows, so [head] never needs a working combine. With fewer than k rows in
+/// total, head sees all of them and the tail sees none.
+class Prefix<B extends Batch<B>, S1, R1, S2, R2>
+    extends Aggregator<_PrefixState<B, S2>, B, (R1, R2)> {
+  const Prefix(this.k, this.head, this.tail);
+
+  final int k;
+  final Aggregator<S1, B, R1> head;
+  final Aggregator<S2, B, R2> tail;
+
+  @override
+  _PrefixState<B, S2> empty() => _PrefixState<B, S2>(tail.empty());
+
+  /// Appends [piece] to the stored prefix rows.
+  void _hold(_PrefixState<B, S2> state, B piece) {
+    final rows = state.rows;
+    state.rows = rows == null ? piece : rows.join(piece);
+    state.held += piece.length;
+  }
+
+  @override
+  _PrefixState<B, S2> addSlice(
+      _PrefixState<B, S2> state, B batch, int start, int end) {
+    final room = k - state.held;
+    final take = room < end - start ? room : end - start;
+    if (take > 0) _hold(state, batch.copyRange(start, start + take));
+    if (start + take < end) {
+      state.tail = tail.addSlice(state.tail, batch, start + take, end);
+    }
+    return state;
+  }
+
+  @override
+  _PrefixState<B, S2> combine(
+      _PrefixState<B, S2> left, _PrefixState<B, S2> right) {
+    final rightRows = right.rows;
+    var rest = right.tail;
+    if (rightRows != null) {
+      // Right's leading rows fill whatever room left's prefix still has; the
+      // remainder are tail rows that come before right's own tail.
+      final room = k - left.held;
+      final take = room < right.held ? room : right.held;
+      if (take > 0) _hold(left, rightRows.copyRange(0, take));
+      if (take < right.held) {
+        final extra =
+            tail.addSlice(tail.empty(), rightRows, take, right.held);
+        rest = tail.combine(extra, rest);
+      }
+    }
+    left.tail = tail.combine(left.tail, rest);
+    return left;
+  }
+
+  @override
+  (R1, R2) finish(_PrefixState<B, S2> state) {
+    final rows = state.rows;
+    final headState = rows == null
+        ? head.empty()
+        : head.addSlice(head.empty(), rows, 0, rows.length);
+    return (head.finish(headState), tail.finish(state.tail));
+  }
+}

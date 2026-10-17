@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../../aggregate/aggregator.dart';
 import '../../aggregate/primitives.dart';
 import '../types.dart';
@@ -46,6 +48,60 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
       tier: Tier.estimate,
       inputs_used: _trimpInputs,
       note: 'Banister exponential TRIMP (wrist HR estimate)',
+    );
+  });
+}
+
+/// Builds a mergeable CTL/ATL/TSB summary over a daily-TRIMP column (oldest
+/// first), matching [ctlAtlTsb].
+///
+/// Both accumulators are primed with the mean of the first [primeDays] rows
+/// (a bounded prefix), then each later row is one EWMA step, kept as an affine
+/// map so chunks merge. With fewer rows than [primeDays] the prime is the row
+/// count, as in the reference.
+Aggregator<dynamic, DoubleColumn, Metric<LoadState>> ctlAtlTsbAggregator({
+  double ctlDays = 42,
+  double atlDays = 7,
+  int minDays = ctlAtlMinDays,
+  int primeDays = 7,
+}) {
+  const inputs = ['daily_trimp'];
+  final lc = 1 - math.exp(-1 / ctlDays);
+  final la = 1 - math.exp(-1 / atlDays);
+  final core = both(
+    const Count<DoubleColumn>(),
+    Prefix(
+      math.max(primeDays, 1),
+      both(
+        const Count<DoubleColumn>(),
+        Sum<DoubleColumn>((batch) => batch.values),
+      ),
+      both(
+        Ewma<DoubleColumn>((batch) => batch.values, lc),
+        Ewma<DoubleColumn>((batch) => batch.values, la),
+      ),
+    ),
+  );
+  return core.map((result) {
+    final days = result.$1;
+    if (days < minDays) {
+      return Metric<LoadState>.absent(
+        tier: Tier.estimate,
+        inputs_used: inputs,
+        note: needBaselineNote(have: days, need: minDays),
+      );
+    }
+    final ((primed, primeSum), (ctlMap, atlMap)) = result.$2;
+    final seed = primeSum / primed;
+    final ctl = ctlMap.apply(seed);
+    final atl = atlMap.apply(seed);
+    return Metric<LoadState>(
+      value: LoadState(ctl, atl, ctl - atl),
+      confidence: (days / 42.0).clamp(0.3, 0.85),
+      tier: Tier.estimate,
+      inputs_used: inputs,
+      note: 'Banister CTL(42d)/ATL(7d)/TSB, primed from the first $primed '
+          'observed days; descriptive load, not injury risk',
     );
   });
 }
