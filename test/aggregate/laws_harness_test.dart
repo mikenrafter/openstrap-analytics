@@ -2,6 +2,8 @@
 // caught under the right law name (including 'slicing'), and fieldsEqual
 // compares as documented.
 
+import 'dart:typed_data';
+
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:test/test.dart';
 
@@ -451,6 +453,183 @@ void main() {
           fieldsEqual<({int a, double b})>((r) => [r.a, r.b], absTol: 1e-6);
       expect(eq((a: 1, b: 2.0), (a: 1, b: 2.0000001)), isTrue);
       expect(eq((a: 1, b: 2.0), (a: 2, b: 2.0)), isFalse);
+    });
+
+    group('list fields', () {
+      test('equal-valued distinct List<double> fields are equal', () {
+        final eq = fieldsEqual<List<Object?>>(same);
+        expect(
+            eq([
+              <double>[1.0, 2.5]
+            ], [
+              <double>[1.0, 2.5]
+            ]),
+            isTrue);
+      });
+
+      test('Float64List equals a List<double> with the same values', () {
+        final eq = fieldsEqual<List<Object?>>(same);
+        final typed = Float64List.fromList([1.0, 2.5]);
+        expect(
+            eq([typed], [
+              <double>[1.0, 2.5]
+            ]),
+            isTrue);
+        expect(
+            eq([
+              <double>[1.0, 2.5]
+            ], [typed]),
+            isTrue);
+      });
+
+      test('elements use the numeric tolerance', () {
+        final eq = fieldsEqual<List<Object?>>(same, relTol: 1e-3);
+        expect(
+            eq([
+              <double>[1000.0, 1.0]
+            ], [
+              <double>[1000.5, 1.0]
+            ]),
+            isTrue);
+        expect(
+            eq([
+              <double>[1000.0, 1.0]
+            ], [
+              <double>[1002.0, 1.0]
+            ]),
+            isFalse);
+      });
+
+      test('different lengths are unequal (guard)', () {
+        final eq = fieldsEqual<List<Object?>>(same, absTol: 1);
+        expect(
+            eq([
+              <double>[1.0, 2.0]
+            ], [
+              <double>[1.0]
+            ]),
+            isFalse);
+      });
+
+      test('NaN elements equal each other', () {
+        final eq = fieldsEqual<List<Object?>>(same);
+        expect(
+            eq([
+              <double>[double.nan, 1.0]
+            ], [
+              <double>[double.nan, 1.0]
+            ]),
+            isTrue);
+        expect(
+            eq([
+              <double>[double.nan]
+            ], [
+              <double>[1.0]
+            ]),
+            isFalse);
+      });
+
+      test('finite never equals non-finite inside a list (guard)', () {
+        final eq = fieldsEqual<List<Object?>>(same, absTol: 1e300, relTol: 1);
+        expect(
+            eq([
+              <double>[1.0]
+            ], [
+              <double>[double.infinity]
+            ]),
+            isFalse);
+      });
+
+      test('int elements compare exactly', () {
+        final eq = fieldsEqual<List<Object?>>(same, relTol: 1e-9, absTol: 1e-9);
+        expect(
+            eq([
+              <int>[9007199254740992]
+            ], [
+              <int>[9007199254740993]
+            ]),
+            isFalse);
+        expect(
+            eq([
+              <int>[9007199254740993]
+            ], [
+              <int>[9007199254740993]
+            ]),
+            isTrue);
+      });
+
+      test('null elements equal only null', () {
+        final eq = fieldsEqual<List<Object?>>(same, absTol: 1);
+        expect(
+            eq([
+              [null, 1.0]
+            ], [
+              [null, 1.0]
+            ]),
+            isTrue);
+        expect(
+            eq([
+              [null]
+            ], [
+              [0.0]
+            ]),
+            isFalse);
+      });
+
+      test('nested lists recurse', () {
+        final eq = fieldsEqual<List<Object?>>(same, absTol: 0.01);
+        expect(
+            eq([
+              [
+                [1.0, 2.0],
+                [3.0]
+              ]
+            ], [
+              [
+                [1.001, 2.0],
+                [3.0]
+              ]
+            ]),
+            isTrue);
+        expect(
+            eq([
+              [
+                [1.0, 2.0],
+                [3.0]
+              ]
+            ], [
+              [
+                [1.0, 2.0],
+                [3.5]
+              ]
+            ]),
+            isFalse);
+      });
+
+      test('a list never equals a non-list (guard)', () {
+        final eq = fieldsEqual<List<Object?>>(same, absTol: 10, relTol: 1);
+        expect(
+            eq([
+              <double>[1.0]
+            ], [1.0]),
+            isFalse);
+        expect(
+            eq([1.0], [
+              <double>[1.0]
+            ]),
+            isFalse);
+        expect(
+            eq([
+              <double>[]
+            ], [null]),
+            isFalse);
+      });
+
+      test('empty lists are equal', () {
+        final eq = fieldsEqual<List<Object?>>(same);
+        expect(eq([<double>[]], [<double>[]]), isTrue);
+        expect(eq([Float64List(0)], [<double>[]]), isTrue);
+      });
     });
   });
 }
