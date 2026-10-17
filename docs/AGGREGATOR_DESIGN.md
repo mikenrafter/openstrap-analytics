@@ -66,6 +66,9 @@ through `finish` and `equals`:
 5. singletons: left-combining one-row folds ≈ `fold xs`
 6. slicing: one state fed random consecutive sub-slices ≈ `fold xs` (the
    `addSlice`-after-data path, separate from `combine`)
+7. finishPure: finishing a state twice gives the same result, and the state
+   keeps working afterwards
+8. roundTrip (persistable aggregators only): see Checkpoints
 
 Law 3 is what the app needs: any chunking gives the same metric. The harness
 tests itself against deliberately broken aggregators
@@ -86,8 +89,7 @@ version differs or the payload is damaged; the caller then recomputes from
 raw data. Bump the version whenever a module's state layout or arithmetic
 changes.
 
-When an aggregator is persistable, `checkLaws` adds a seventh law,
-`roundTrip`: a state that went through JSON combines and continues exactly
+When an aggregator is persistable, `checkLaws` adds the law `roundTrip`: a state that went through JSON combines and continues exactly
 like the original. So every `expectConversion` call also checks persistence.
 
 ## Building blocks
