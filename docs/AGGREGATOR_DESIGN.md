@@ -190,6 +190,31 @@ current batch function. Chunking costs nothing extra. (It was 1.7× before the
 review fixes switched the lag-1 ACF to centred co-moments, which cost one
 division per row and removed a cancellation bug.)
 
+## Proposed next step: corrected HRV end to end
+
+Every HRV aggregator here starts from already-corrected NN intervals. RR
+artifact correction is the upstream blocker the earlier experiments named.
+The package already has a streaming `RrCorrector`
+(lib/src/onehz/foundations/rr_correction_stream.dart): a left-to-right fold
+whose output for a beat is final about 2H beats (H = windowBeats ~/ 2) plus
+the current artifact run plus two normal beats behind the newest beat, and
+whose checkpoint holds that window, not the series.
+
+That suggests a mergeable "sandwich" summary for raw RR:
+
+- raw head: the first beats of a chunk whose correction still depends on the
+  chunk before it (window, carried class, left normal pair);
+- settled middle: corrected beats, folded straight into a downstream
+  aggregator (HRV time, PRSA, …);
+- raw tail: the last beats whose correction still depends on the chunk after.
+
+`combine` re-runs correction on `left.tail ++ right.head` only, feeds the
+newly settled beats to the downstream aggregator, and keeps the remainder as
+the new head/tail. That is `Lookback` with a transducer in front of the
+inner aggregator, and it is bounded only if artifact runs are bounded. So it
+needs a cap on run length (a longer run becomes a gap: honest absence), which
+changes output and needs a kAlgoVersion bump. Owner decision.
+
 ## Known limits
 
 - `Lookback` copies k−1 rows per seam. With large k and tiny slices this
