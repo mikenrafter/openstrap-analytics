@@ -72,6 +72,24 @@ tests itself against deliberately broken aggregators
 (test/aggregate/laws_harness_test.dart), so a lawful verdict means something.
 In tests, `expectLawful(agg, cases, equals: …)` is the one-liner.
 
+## Checkpoints
+
+A state can be stored and resumed. `encodeState` / `decodeState` turn a
+state into JSON and back; `persistable` says whether an aggregator supports
+it (a composite is persistable when all its children are). Doubles round-trip
+exactly; NaN and ±Infinity are written as the strings `"NaN"`, `"Infinity"`,
+`"-Infinity"`. Decoders throw `FormatException` on anything malformed.
+
+`encodeCheckpoint(agg, state, kind:, version:)` wraps a state with a kind and
+version. `decodeCheckpoint` returns null, and never guesses, when the kind or
+version differs or the payload is damaged; the caller then recomputes from
+raw data. Bump the version whenever a module's state layout or arithmetic
+changes.
+
+When an aggregator is persistable, `checkLaws` adds a seventh law,
+`roundTrip`: a state that went through JSON combines and continues exactly
+like the original. So every `expectConversion` call also checks persistence.
+
 ## Building blocks
 
 All lawful, so anything assembled from them is lawful too:
@@ -123,9 +141,11 @@ techniques moved them across:
    `Lookback(k)`; if they're per bin or per day, wrap them in `GroupBy`.
 3. Write `finish` (`.map`) from the old function's formulas, including its
    absent cases and notes.
-4. Tests: parity with the old function under random slicings and chunkings
-   (`runChunked`, `runSliced` in test/support/aggregator_laws.dart), plus one
-   `expectLawful`.
+4. Tests: one `expectConversion(build, cases, reference)` call checks parity
+   with the old function on every evaluation path (whole, chunked,
+   right-nested, copies, sliced, singletons) and every law, including
+   `roundTrip` once the aggregator is persistable. Add hand-worked value and
+   absent-case tests as usual.
 5. Integer outputs: rewire the old function in place to run the aggregator,
    and keep a frozen copy of the old body in the test. Float outputs: keep
    the aggregator additive beside the old function, so no published value
@@ -142,6 +162,11 @@ techniques moved them across:
 | cosinor | additive | 1e-9 (R² 1e-7) | one inner computing cos/sin once per row; centred co-moments |
 | time in zone | additive | 1e-12 | `Lookback(2)` + exact gap histograms; median at finish |
 | CTL/ATL/TSB | additive | 1e-9 | `Count`, `Prefix`, `Sum`, two `Ewma` maps |
+| circadian IS/IV/M10/L5/RA | additive | 1e-12 int data, 1e-9 real | `Moments`, `GroupBy`, `Lookback(2)` + one 15-line inner |
+
+Every module above is persistable and resumes from a mid-stream checkpoint.
+The circadian conversion, done by following the recipe, took a subagent
+about nine tool calls: a 134-line aggregator and a 166-line test.
 
 Speed, AOT, Dart 3.11.4 on this box (`tool/bench_aggregate.dart`):
 
