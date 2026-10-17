@@ -296,3 +296,41 @@ class _AdjacentPairsState<A, S> {
   A? first;
   A? last;
 }
+
+/// Routes inputs by key to independent instances of [inner].
+///
+/// Its state is mutable: each map entry holds the corresponding inner state.
+class GroupBy<A, K, S, R> extends Aggregator<Map<K, S>, A, Map<K, R>> {
+  const GroupBy(this.key, this.inner);
+
+  final K Function(A input) key;
+  final Aggregator<S, A, R> inner;
+
+  @override
+  Map<K, S> empty() => <K, S>{};
+
+  @override
+  Map<K, S> add(Map<K, S> state, A input) {
+    final group = key(input);
+    final innerState = state.containsKey(group) ? state[group] as S : inner.empty();
+    state[group] = inner.add(innerState, input);
+    return state;
+  }
+
+  @override
+  Map<K, S> combine(Map<K, S> left, Map<K, S> right) {
+    for (final entry in right.entries) {
+      if (left.containsKey(entry.key)) {
+        left[entry.key] = inner.combine(left[entry.key] as S, entry.value);
+      } else {
+        left[entry.key] = entry.value;
+      }
+    }
+    return left;
+  }
+
+  @override
+  Map<K, R> finish(Map<K, S> state) => {
+        for (final entry in state.entries) entry.key: inner.finish(entry.value),
+      };
+}

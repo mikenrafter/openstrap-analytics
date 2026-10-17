@@ -5,4 +5,5 @@ export 'src/aggregate/aggregator.dart';
 export 'src/aggregate/laws.dart';
 export 'src/aggregate/primitives.dart';
 export 'src/onehz/clinical/hrv_time_aggregator.dart';
+export 'src/onehz/clinical/hrv_time_composed.dart';
 export 'src/onehz/sleep/hypnogram_aggregator.dart';
