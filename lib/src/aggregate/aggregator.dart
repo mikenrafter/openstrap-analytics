@@ -1,28 +1,64 @@
 import 'dart:typed_data';
 
+import 'json_support.dart';
+
 /// A run of rows stored column-wise.
 abstract class Batch<B extends Batch<B>> {
   int get length;
   B copyRange(int start, int end);
   B join(B other);
+
+  /// A JSON-encodable copy of the rows. Throws [UnsupportedError] unless the
+  /// batch type implements it.
+  Object? toJson() =>
+      throw UnsupportedError('$runtimeType does not support toJson');
+}
+
+/// How a [ListBatch] writes and reads one row. [decode] must throw
+/// [FormatException] on a malformed row.
+class RowCodec<A> {
+  const RowCodec(this.encode, this.decode);
+
+  final Object? Function(A row) encode;
+  final A Function(Object? json) decode;
+
+  /// Reads a coded batch from the JSON list written by [ListBatch.toJson].
+  ListBatch<A> batchFromJson(Object? json) =>
+      ListBatch<A>.coded([for (final row in decodeList(json)) decode(row)], this);
 }
 
 /// A batch backed by a normal Dart list.
 class ListBatch<A> extends Batch<ListBatch<A>> {
-  ListBatch(this.rows);
+  ListBatch(this.rows) : _codec = null;
+
+  /// A batch whose rows can be written with [codec] (see [toJson]).
+  ListBatch.coded(this.rows, RowCodec<A> codec) : _codec = codec;
 
   final List<A> rows;
+  final RowCodec<A>? _codec;
 
   @override
   int get length => rows.length;
 
   @override
   ListBatch<A> copyRange(int start, int end) =>
-      ListBatch<A>(rows.sublist(start, end));
+      ListBatch<A>._(rows.sublist(start, end), _codec);
 
   @override
   ListBatch<A> join(ListBatch<A> other) =>
-      ListBatch<A>([...rows, ...other.rows]);
+      ListBatch<A>._([...rows, ...other.rows], _codec ?? other._codec);
+
+  ListBatch._(this.rows, this._codec);
+
+  /// The encoded rows. Throws [UnsupportedError] for a batch without a codec.
+  @override
+  Object? toJson() {
+    final codec = _codec;
+    if (codec == null) {
+      throw UnsupportedError('ListBatch has no row codec; use ListBatch.coded');
+    }
+    return [for (final row in rows) codec.encode(row)];
+  }
 }
 
 /// A batch containing one double column. NaN represents a missing row.
@@ -48,6 +84,12 @@ class DoubleColumn extends Batch<DoubleColumn> {
     joined.setRange(length, joined.length, other.values);
     return DoubleColumn(joined);
   }
+
+  /// The values as a JSON list; NaN and infinities become strings.
+  @override
+  Object? toJson() => encodeDoubles(values);
+
+  factory DoubleColumn.fromJson(Object? json) => DoubleColumn(decodeDoubles(json));
 }
 
 /// A mergeable summary over slices of a [Batch].
@@ -58,6 +100,20 @@ abstract class Aggregator<S, B extends Batch<B>, R> {
   S addSlice(S state, B batch, int start, int end);
   S combine(S left, S right);
   R finish(S state);
+
+  /// Whether [encodeState] and [decodeState] are implemented. A composite is
+  /// persistable only when every child is.
+  bool get persistable => false;
+
+  /// A JSON-encodable form of [state] (null, bool, num, String, List, or a
+  /// Map with String keys). Throws [UnsupportedError] unless [persistable].
+  Object? encodeState(S state) =>
+      throw UnsupportedError('$runtimeType is not persistable');
+
+  /// Inverse of [encodeState]. Throws [FormatException] on malformed input,
+  /// and [UnsupportedError] unless [persistable].
+  S decodeState(Object? json) =>
+      throw UnsupportedError('$runtimeType is not persistable');
 }
 
 /// Convenience operations and result adapters for [Aggregator].
@@ -97,6 +153,15 @@ class _MappedAggregator<S, B extends Batch<B>, R, R2>
 
   @override
   R2 finish(S state) => transform(inner.finish(state));
+
+  @override
+  bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+
+  @override
+  S decodeState(Object? json) => inner.decodeState(json);
 }
 
 /// Mutable state for [both].
@@ -142,4 +207,19 @@ class _BothAggregator<S1, S2, B extends Batch<B>, R1, R2>
   @override
   (R1, R2) finish(Pair<S1, S2> state) =>
       (first.finish(state.first), second.finish(state.second));
+
+  @override
+  bool get persistable => first.persistable && second.persistable;
+
+  @override
+  Object? encodeState(Pair<S1, S2> state) =>
+      [first.encodeState(state.first), second.encodeState(state.second)];
+
+  @override
+  Pair<S1, S2> decodeState(Object? json) {
+    final list = decodeList(json);
+    if (list.length != 2) throw const FormatException('Expected two states');
+    return Pair<S1, S2>(
+        first.decodeState(list[0]), second.decodeState(list[1]));
+  }
 }

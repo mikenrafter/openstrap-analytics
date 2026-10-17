@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'aggregator.dart';
@@ -118,6 +119,38 @@ List<LawViolation> checkLaws<S, B extends Batch<B>, R>(
     }
     if (!finishIsPure) {
       violations.add(LawViolation('finishPure', detail));
+    }
+
+    if (aggregator.persistable) {
+      // A state written to JSON text and read back must behave like the
+      // original: alone, merged with the rest, and extended with the rest.
+      S roundTrip(S state) => aggregator.decodeState(
+          jsonDecode(jsonEncode(aggregator.encodeState(state))));
+      void check(String what, R Function() actual) {
+        try {
+          if (!equal(actual(), expected)) {
+            violations.add(LawViolation('roundTrip', '$detail; $what'));
+          }
+        } catch (error) {
+          violations.add(LawViolation('roundTrip', '$detail; $what: $error'));
+        }
+      }
+
+      check('whole state', () => aggregator.finish(roundTrip(aggregator.fold(batch))));
+      for (final split in splits) {
+        check(
+            'combine after split $split',
+            () => aggregator.finish(aggregator.combine(
+                roundTrip(aggregator.fold(batch, 0, split)),
+                aggregator.fold(batch, split, batch.length))));
+        check(
+            'addSlice after split $split',
+            () => aggregator.finish(aggregator.addSlice(
+                roundTrip(aggregator.fold(batch, 0, split)),
+                batch,
+                split,
+                batch.length)));
+      }
     }
   }
   return violations;

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import '../onehz/incremental_core.dart' show RunningMoments;
 
 import 'aggregator.dart';
+import 'json_support.dart';
 
 /// Counts every row, including rows whose column value is NaN.
 class Count<B extends Batch<B>> extends Aggregator<int, B, int> {
@@ -15,6 +16,12 @@ class Count<B extends Batch<B>> extends Aggregator<int, B, int> {
   int combine(int left, int right) => left + right;
   @override
   int finish(int state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(int state) => state;
+  @override
+  int decodeState(Object? json) => decodeCount(json);
 }
 
 /// Counts non-missing values in a double column.
@@ -36,6 +43,12 @@ class CountFinite<B extends Batch<B>> extends Aggregator<int, B, int> {
   int combine(int left, int right) => left + right;
   @override
   int finish(int state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(int state) => state;
+  @override
+  int decodeState(Object? json) => decodeCount(json);
 }
 
 /// Counts non-missing values in a double column which pass [test].
@@ -59,6 +72,12 @@ class CountWhere<B extends Batch<B>> extends Aggregator<int, B, int> {
   int combine(int left, int right) => left + right;
   @override
   int finish(int state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(int state) => state;
+  @override
+  int decodeState(Object? json) => decodeCount(json);
 }
 
 /// Neumaier-compensated sum of non-missing double column values.
@@ -88,6 +107,14 @@ class Sum<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
   }
   @override
   double finish(_SumState state) => state.sum + state.correction;
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_SumState state) => state.toJson();
+
+  @override
+  _SumState decodeState(Object? json) => _SumState.fromJson(json);
 }
 
 /// Neumaier-compensated sum of a function of non-missing double column values.
@@ -127,11 +154,32 @@ class SumOf<B extends Batch<B>> extends Aggregator<_SumState, B, double> {
 
   @override
   double finish(_SumState state) => state.sum + state.correction;
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_SumState state) => state.toJson();
+
+  @override
+  _SumState decodeState(Object? json) => _SumState.fromJson(json);
 }
 
 class _SumState {
+  _SumState();
+
+  factory _SumState.fromJson(Object? json) {
+    final map = decodeMap(json);
+    return _SumState()
+      ..sum = decodeDouble(field(map, 'sum'))
+      ..correction = decodeDouble(field(map, 'correction'));
+  }
+
   double sum = 0.0;
   double correction = 0.0;
+
+  Map<String, Object?> toJson() =>
+      {'sum': encodeDouble(sum), 'correction': encodeDouble(correction)};
+
   void add(double value) {
     final next = sum + value;
     if (!next.isFinite) {
@@ -167,6 +215,12 @@ class SumSq<B extends Batch<B>> extends Aggregator<double, B, double> {
   double combine(double left, double right) => left + right;
   @override
   double finish(double state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(double state) => encodeDouble(state);
+  @override
+  double decodeState(Object? json) => decodeDouble(json);
 }
 
 /// Smallest non-missing value in a double column.
@@ -192,6 +246,13 @@ class Min<B extends Batch<B>> extends Aggregator<double?, B, double?> {
   }
   @override
   double? finish(double? state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(double? state) =>
+      state == null ? null : encodeDouble(state);
+  @override
+  double? decodeState(Object? json) => decodeDoubleOrNull(json);
 }
 
 /// Largest non-missing value in a double column.
@@ -217,6 +278,13 @@ class Max<B extends Batch<B>> extends Aggregator<double?, B, double?> {
   }
   @override
   double? finish(double? state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(double? state) =>
+      state == null ? null : encodeDouble(state);
+  @override
+  double? decodeState(Object? json) => decodeDoubleOrNull(json);
 }
 
 /// Centered moments of non-missing double column values.
@@ -242,15 +310,48 @@ class Moments<B extends Batch<B>>
   }
   @override
   RunningMoments finish(RunningMoments state) => state;
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(RunningMoments state) => state.toJson();
+  @override
+  RunningMoments decodeState(Object? json) =>
+      RunningMoments.fromJson(decodeMap(json));
 }
 
 class _EdgeState<B extends Batch<B>> {
   B? value;
 }
 
+Object? _encodeEdge<B extends Batch<B>>(
+    _EdgeState<B> state, B Function(Object?)? batchFromJson) {
+  if (batchFromJson == null) {
+    throw UnsupportedError('Pass batchFromJson to persist this block');
+  }
+  return {'value': state.value?.toJson()};
+}
+
+_EdgeState<B> _decodeEdge<B extends Batch<B>>(
+    Object? json, B Function(Object?)? batchFromJson) {
+  if (batchFromJson == null) {
+    throw UnsupportedError('Pass batchFromJson to persist this block');
+  }
+  final raw = field(decodeMap(json), 'value');
+  final state = _EdgeState<B>();
+  if (raw != null) {
+    final row = batchFromJson(raw);
+    if (row.length != 1) throw const FormatException('Expected one row');
+    state.value = row;
+  }
+  return state;
+}
+
 /// The first row as a one-row copy, or null for no rows.
 class First<B extends Batch<B>> extends Aggregator<_EdgeState<B>, B, B?> {
-  const First();
+  /// Persistable only when [batchFromJson] is given (the inverse of
+  /// [Batch.toJson] for [B]).
+  const First({this.batchFromJson});
+  final B Function(Object? json)? batchFromJson;
   @override
   _EdgeState<B> empty() => _EdgeState<B>();
   @override
@@ -267,11 +368,20 @@ class First<B extends Batch<B>> extends Aggregator<_EdgeState<B>, B, B?> {
   }
   @override
   B? finish(_EdgeState<B> state) => state.value;
+  @override
+  bool get persistable => batchFromJson != null;
+  @override
+  Object? encodeState(_EdgeState<B> state) => _encodeEdge(state, batchFromJson);
+  @override
+  _EdgeState<B> decodeState(Object? json) => _decodeEdge(json, batchFromJson);
 }
 
 /// The last row as a one-row copy, or null for no rows.
 class Last<B extends Batch<B>> extends Aggregator<_EdgeState<B>, B, B?> {
-  const Last();
+  /// Persistable only when [batchFromJson] is given (the inverse of
+  /// [Batch.toJson] for [B]).
+  const Last({this.batchFromJson});
+  final B Function(Object? json)? batchFromJson;
   @override
   _EdgeState<B> empty() => _EdgeState<B>();
   @override
@@ -286,6 +396,12 @@ class Last<B extends Batch<B>> extends Aggregator<_EdgeState<B>, B, B?> {
   }
   @override
   B? finish(_EdgeState<B> state) => state.value;
+  @override
+  bool get persistable => batchFromJson != null;
+  @override
+  Object? encodeState(_EdgeState<B> state) => _encodeEdge(state, batchFromJson);
+  @override
+  _EdgeState<B> decodeState(Object? json) => _decodeEdge(json, batchFromJson);
 }
 
 /// Routes consecutive equal keys to [inner] as one slice per run.
@@ -331,14 +447,39 @@ class GroupBy<B extends Batch<B>, S, R>
   Map<int, R> finish(Map<int, S> state) => <int, R>{
         for (final entry in state.entries) entry.key: inner.finish(entry.value),
       };
+  @override
+  bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(Map<int, S> state) => <String, Object?>{
+        for (final entry in state.entries)
+          entry.key.toString(): inner.encodeState(entry.value),
+      };
+
+  @override
+  Map<int, S> decodeState(Object? json) {
+    final map = decodeMap(json);
+    final result = <int, S>{};
+    for (final entry in map.entries) {
+      final key = int.tryParse(entry.key);
+      if (key == null || key.toString() != entry.key) {
+        throw FormatException('Invalid group key ${entry.key}');
+      }
+      result[key] = inner.decodeState(entry.value);
+    }
+    return result;
+  }
 }
 
 /// Makes an inner length-[k] window aggregator invariant to chunk boundaries.
 class Lookback<B extends Batch<B>, S, R>
     extends Aggregator<_LookbackState<B, S>, B, R> {
-  Lookback(this.k, this.inner) : assert(k >= 1);
+  /// Persistable only when [batchFromJson] is given (the inverse of
+  /// [Batch.toJson] for [B]) and [inner] is persistable.
+  Lookback(this.k, this.inner, {this.batchFromJson}) : assert(k >= 1);
   final int k;
   final Aggregator<S, B, R> inner;
+  final B Function(Object? json)? batchFromJson;
   int get _edge => k - 1;
   @override
   _LookbackState<B, S> empty() => _LookbackState<B, S>(inner.empty());
@@ -419,6 +560,51 @@ class Lookback<B extends Batch<B>, S, R>
   }
   @override
   R finish(_LookbackState<B, S> state) => inner.finish(state.innerState);
+
+  @override
+  bool get persistable => batchFromJson != null && inner.persistable;
+
+  @override
+  Object? encodeState(_LookbackState<B, S> state) {
+    _requireBatchCodec();
+    return {
+      'length': state.length,
+      'first': state.first?.toJson(),
+      'last': state.last?.toJson(),
+      'inner': inner.encodeState(state.innerState),
+    };
+  }
+
+  @override
+  _LookbackState<B, S> decodeState(Object? json) {
+    final fromJson = _requireBatchCodec();
+    final map = decodeMap(json);
+    final length = decodeCount(field(map, 'length'));
+    // Edges hold the first/last min(length, k - 1) rows.
+    final held = length < _edge ? length : _edge;
+    B? edge(String name) {
+      final raw = field(map, name);
+      if (raw == null) {
+        if (held != 0) throw FormatException('Missing $name rows');
+        return null;
+      }
+      if (held == 0) throw FormatException('Unexpected $name rows');
+      final rows = fromJson(raw);
+      if (rows.length != held) {
+        throw FormatException('Expected $held $name rows');
+      }
+      return rows;
+    }
+
+    return _LookbackState<B, S>(inner.decodeState(field(map, 'inner')))
+      ..length = length
+      ..first = edge('first')
+      ..last = edge('last');
+  }
+
+  B Function(Object?) _requireBatchCodec() =>
+      batchFromJson ??
+      (throw UnsupportedError('Pass batchFromJson to persist Lookback'));
 }
 
 class _LookbackState<B extends Batch<B>, S> {
@@ -490,6 +676,22 @@ class Ewma<B extends Batch<B>> extends Aggregator<_AffineState, B, Affine> {
 
   @override
   Affine finish(_AffineState state) => Affine(state.scale, state.offset);
+  @override
+  bool get persistable => true;
+
+  @override
+  Object? encodeState(_AffineState state) => {
+        'scale': encodeDouble(state.scale),
+        'offset': encodeDouble(state.offset),
+      };
+
+  @override
+  _AffineState decodeState(Object? json) {
+    final map = decodeMap(json);
+    return _AffineState()
+      ..scale = decodeDouble(field(map, 'scale'))
+      ..offset = decodeDouble(field(map, 'offset'));
+  }
 }
 
 class _PrefixState<B extends Batch<B>, S2> {
@@ -510,11 +712,15 @@ class _PrefixState<B extends Batch<B>, S2> {
 /// total, head sees all of them and the tail sees none.
 class Prefix<B extends Batch<B>, S1, R1, S2, R2>
     extends Aggregator<_PrefixState<B, S2>, B, (R1, R2)> {
-  const Prefix(this.k, this.head, this.tail);
+  /// Persistable only when [batchFromJson] is given (the inverse of
+  /// [Batch.toJson] for [B]) and [tail] is persistable. [head] keeps no state,
+  /// so it does not matter.
+  const Prefix(this.k, this.head, this.tail, {this.batchFromJson});
 
   final int k;
   final Aggregator<S1, B, R1> head;
   final Aggregator<S2, B, R2> tail;
+  final B Function(Object? json)? batchFromJson;
 
   @override
   _PrefixState<B, S2> empty() => _PrefixState<B, S2>(tail.empty());
@@ -567,4 +773,37 @@ class Prefix<B extends Batch<B>, S1, R1, S2, R2>
         : head.addSlice(head.empty(), rows, 0, rows.length);
     return (head.finish(headState), tail.finish(state.tail));
   }
+
+  @override
+  bool get persistable => batchFromJson != null && tail.persistable;
+
+  @override
+  Object? encodeState(_PrefixState<B, S2> state) {
+    _requireBatchCodec();
+    return {
+      'rows': state.rows?.toJson(),
+      'tail': tail.encodeState(state.tail),
+    };
+  }
+
+  @override
+  _PrefixState<B, S2> decodeState(Object? json) {
+    final fromJson = _requireBatchCodec();
+    final map = decodeMap(json);
+    final raw = field(map, 'rows');
+    final result = _PrefixState<B, S2>(tail.decodeState(field(map, 'tail')));
+    if (raw != null) {
+      final rows = fromJson(raw);
+      if (rows.length < 1 || rows.length > k) {
+        throw const FormatException('Invalid prefix row count');
+      }
+      result.rows = rows;
+      result.held = rows.length;
+    }
+    return result;
+  }
+
+  B Function(Object?) _requireBatchCodec() =>
+      batchFromJson ??
+      (throw UnsupportedError('Pass batchFromJson to persist Prefix'));
 }
