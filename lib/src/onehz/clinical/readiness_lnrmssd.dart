@@ -9,12 +9,8 @@
 //
 // HONESTY: needs ≥ minNights of valid history; absent otherwise. PRV.
 
-import 'dart:typed_data';
-
-import '../../aggregate/aggregator.dart' show AggregatorOps, DoubleColumn;
 import '../types.dart';
 import '../util.dart';
-import 'readiness_lnrmssd_aggregator.dart';
 
 class ReadinessLnRmssd {
   final double lnRmssdToday;
@@ -58,21 +54,23 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   int windowDays = 7,
   int minNights = readinessLnRmssdMinNights,
 }) {
-  if (windowDays >= 0) {
-    return readinessLnRmssdAggregator(
-      meanNnTodayMs: meanNnTodayMs,
-      windowDays: windowDays,
-      minNights: minNights,
-    ).run(DoubleColumn(Float64List.fromList(historyLnRmssd)));
-  }
-  // A negative window cannot be built as a suffix block, so it keeps the old
-  // path: absent when short, otherwise sublist(start, n - 1) with start > n - 1
-  // throws RangeError, as it always did.
   if (historyLnRmssd.length < minNights) {
     return _tooShort(historyLnRmssd.length, minNights);
   }
   final n = historyLnRmssd.length;
   final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
+  if (windowDays >= 0) {
+    return readinessLnRmssdFromSuffix(
+      n,
+      historyLnRmssd.sublist(start, n),
+      meanNnTodayMs: meanNnTodayMs,
+      windowDays: windowDays,
+      minNights: minNights,
+    );
+  }
+  // A negative window cannot be built as a suffix block, so it keeps the old
+  // path: otherwise sublist(start, n - 1) with start > n - 1 throws RangeError,
+  // as it always did.
   final priorWindow = historyLnRmssd.sublist(start, n - 1);
   return readinessLnRmssdFromSuffix(
     n,

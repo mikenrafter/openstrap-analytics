@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import '../aggregate/json_support.dart' show decodeDouble, encodeDouble;
 import 'util.dart';
 
 /// Removable, mergeable centered moments, with an origin to retain precision
@@ -16,7 +17,7 @@ class RunningMoments {
     result._count = _readCount(json['count']);
     result._origin = _readFinite(json['origin']);
     result._meanOffset = _readFinite(json['meanOffset']);
-    result._m2 = _readFinite(json['m2']);
+    result._m2 = _readM2(json['m2']);
     if (result._m2 < 0 ||
         (result._count == 0 &&
             (result._origin != 0 ||
@@ -85,9 +86,9 @@ class RunningMoments {
         'version': 1,
         'type': 'RunningMoments',
         'count': _count,
-        'origin': _origin,
-        'meanOffset': _meanOffset,
-        'm2': _m2,
+        'origin': encodeDouble(_origin),
+        'meanOffset': encodeDouble(_meanOffset),
+        'm2': encodeDouble(_m2),
       };
 }
 
@@ -445,6 +446,16 @@ double _readFinite(Object? value) {
   if (value is! num || !value.isFinite)
     throw const FormatException('Invalid number');
   return value.toDouble();
+}
+
+double _readM2(Object? value) {
+  final result = decodeDouble(value);
+  if ((!result.isFinite && value is! String) ||
+      result.isNaN ||
+      result.isNegative) {
+    throw const FormatException('Invalid number');
+  }
+  return result;
 }
 
 List<double> _readDoubles(Object? value, {bool finite = false}) {

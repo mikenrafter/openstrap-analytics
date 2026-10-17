@@ -123,7 +123,7 @@ List<LawViolation> checkLaws<S, B extends Batch<B>, R>(
 
     if (aggregator.persistable) {
       // A state written to JSON text and read back must behave like the
-      // original: alone, merged with the rest, and extended with the rest.
+      // original: alone, on either side of a merge, and when extended.
       S roundTrip(S state) => aggregator.decodeState(
           jsonDecode(jsonEncode(aggregator.encodeState(state))));
       void check(String what, R Function() actual) {
@@ -139,10 +139,20 @@ List<LawViolation> checkLaws<S, B extends Batch<B>, R>(
       check('whole state', () => aggregator.finish(roundTrip(aggregator.fold(batch))));
       for (final split in splits) {
         check(
-            'combine after split $split',
+            'combine after split $split (restored left)',
             () => aggregator.finish(aggregator.combine(
                 roundTrip(aggregator.fold(batch, 0, split)),
                 aggregator.fold(batch, split, batch.length))));
+        check(
+            'combine after split $split (restored right)',
+            () => aggregator.finish(aggregator.combine(
+                aggregator.fold(batch, 0, split),
+                roundTrip(aggregator.fold(batch, split, batch.length)))));
+        check(
+            'combine after split $split (restored both)',
+            () => aggregator.finish(aggregator.combine(
+                roundTrip(aggregator.fold(batch, 0, split)),
+                roundTrip(aggregator.fold(batch, split, batch.length)))));
         check(
             'addSlice after split $split',
             () => aggregator.finish(aggregator.addSlice(

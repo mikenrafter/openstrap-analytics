@@ -122,13 +122,20 @@ class _TimeInZoneAggregator
   @override
   _TimeInZoneState decodeState(Object? json) {
     final map = decodeMap(json);
+    final windows = decodeMap(field(map, 'windows'));
+    final length = decodeCount(field(windows, 'length'));
     final hasTail = field(map, 'hasTail');
     if (hasTail is! bool) throw const FormatException('Expected a bool');
-    return empty()
-      ..windows = _windows.decodeState(field(map, 'windows'))
+    final result = empty()
+      ..windows = _windows.decodeState(windows)
       ..hasTail = hasTail
       ..tailTimestampMs = decodeDouble(field(map, 'tailTimestampMs'))
       ..tailHr = decodeDouble(field(map, 'tailHr'));
+    if (hasTail != (length > 0)) {
+      throw const FormatException('Invalid tail');
+    }
+    _validateHistogramCounts(result.histograms(), length);
+    return result;
   }
 
   @override
@@ -229,7 +236,8 @@ class _PairHistograms
   _ZoneHistograms decodeState(Object? json) {
     final map = decodeMap(json);
     final state = _ZoneHistograms();
-    _decodeHistogram(field(map, 'cadence'), state.cadence);
+    _decodeHistogram(field(map, 'cadence'), state.cadence,
+        requirePositive: true);
     final credits = decodeList(field(map, 'credits'));
     if (credits.length != state.credits.length) {
       throw const FormatException('Expected six credit histograms');
@@ -267,16 +275,44 @@ List<Object> _encodeHistogram(Map<double, int> histogram) => [
         [encodeDouble(entry.key), entry.value]
     ];
 
-void _decodeHistogram(Object? json, Map<double, int> into) {
+void _decodeHistogram(Object? json, Map<double, int> into,
+    {bool requirePositive = false}) {
   for (final item in decodeList(json)) {
     final pair = decodeList(item);
     if (pair.length != 2) throw const FormatException('Expected [gap, count]');
     final gap = decodeDouble(pair[0]);
+    if (!gap.isFinite || (requirePositive && gap <= 0)) {
+      throw const FormatException('Invalid histogram gap');
+    }
     final count = decodeCount(pair[1]);
     if (count == 0 || into.containsKey(gap)) {
       throw const FormatException('Invalid histogram entry');
     }
     into[gap] = count;
+  }
+}
+
+void _validateHistogramCounts(_ZoneHistograms histograms, int length) {
+  final pairCount = length == 0 ? 0 : length - 1;
+  _validateHistogramCount(histograms.cadence.values, pairCount);
+  var credits = 0;
+  for (final histogram in histograms.credits) {
+    for (final count in histogram.values) {
+      if (count > pairCount - credits) {
+        throw const FormatException('Too many credit histogram entries');
+      }
+      credits += count;
+    }
+  }
+}
+
+void _validateHistogramCount(Iterable<int> counts, int maximum) {
+  var total = 0;
+  for (final count in counts) {
+    if (count > maximum - total) {
+      throw const FormatException('Too many cadence histogram entries');
+    }
+    total += count;
   }
 }
 

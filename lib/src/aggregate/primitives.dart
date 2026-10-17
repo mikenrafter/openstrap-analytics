@@ -704,7 +704,9 @@ class _AffineState {
 /// running value: each row x applies c -> (1 - lambda) * c + lambda * x.
 ///
 /// NaN rows are skipped (they act as the identity map), and no rows finish as
-/// the identity. Apply the result to the seed value to get the final average.
+/// the identity. ±Infinity input is unsupported because scale can underflow to
+/// zero across a seam and yield `0*Infinity`. Apply the result to the seed
+/// value to get the final average.
 class Ewma<B extends Batch<B>> extends Aggregator<_AffineState, B, Affine> {
   const Ewma(this.column, this.lambda);
 

@@ -215,7 +215,49 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
     _GroupedPairWindows(epochsPerDay),
     batchFromJson: Epochs.fromJson,
   );
-  return both(Count<Epochs>(), pairs).map((result) {
+  final core = both(Count<Epochs>(), pairs);
+  return validateCheckpoint(core, (json) {
+    final state = decodeList(json);
+    if (state.length != 2) throw const FormatException('Expected two states');
+    final count = decodeCount(state[0]);
+    final lookback = decodeMap(state[1]);
+    if (decodeCount(field(lookback, 'length')) != count) {
+      throw const FormatException('Lookback length disagrees with epoch count');
+    }
+    final groups = decodeMap(field(lookback, 'inner'));
+    if (count <= epochsPerDay) {
+      if (groups.isNotEmpty) {
+        throw const FormatException('Pair days without complete comparisons');
+      }
+      return;
+    }
+    final first = decodeMap(field(lookback, 'first'));
+    final firstIndex = decodeCount(field(first, 'firstIndex'));
+    final firstDay = (firstIndex + epochsPerDay) ~/ epochsPerDay;
+    final lastDay = (firstIndex + count - 1) ~/ epochsPerDay;
+    if (groups.length != lastDay - firstDay + 1) {
+      throw const FormatException('Unexpected number of pair days');
+    }
+    var totalCases = 0;
+    final pairLimit = count - epochsPerDay;
+    for (final entry in groups.entries) {
+      final day = int.tryParse(entry.key);
+      if (day == null || day < firstDay || day > lastDay) {
+        throw const FormatException('Pair day is outside the record');
+      }
+      final pair = decodeMap(entry.value);
+      final cases = decodeCount(field(pair, 'cases'));
+      final dayStart = day * epochsPerDay - firstIndex;
+      final dayEnd = dayStart + epochsPerDay;
+      final lower = dayStart > epochsPerDay ? dayStart : epochsPerDay;
+      final upper = dayEnd < count ? dayEnd : count;
+      final slots = upper > lower ? upper - lower : 0;
+      if (cases > slots || totalCases > pairLimit - cases) {
+        throw const FormatException('Pair cases exceed available epochs');
+      }
+      totalCases += cases;
+    }
+  }).map((result) {
     const inputs = ['sleep_wake_epochs'];
     final n = result.$1;
     if (n < 2 * epochsPerDay) {

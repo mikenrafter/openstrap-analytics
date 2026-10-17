@@ -92,14 +92,28 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
     );
     return Count<DoubleColumn>().map((_) => absent);
   }
-  return both(
+  final core = both(
     Count<DoubleColumn>(),
     Lookback<DoubleColumn, _PrsaState, _PrsaState>(
       2 * l + 1,
       _PrsaWindows(l, deceleration, anchorRatioCap),
       batchFromJson: DoubleColumn.fromJson,
     ),
-  ).map((result) {
+  );
+  return validateCheckpoint(core, (json) {
+    final state = decodeList(json);
+    if (state.length != 2) throw const FormatException('Expected two states');
+    final count = decodeCount(state[0]);
+    final lookback = decodeMap(state[1]);
+    if (decodeCount(field(lookback, 'length')) != count) {
+      throw const FormatException('Lookback length disagrees with beat count');
+    }
+    final anchors = decodeCount(field(decodeMap(field(lookback, 'inner')), 'anchors'));
+    final windows = count > 2 * l ? count - 2 * l : 0;
+    if (anchors > windows) {
+      throw const FormatException('PRSA anchors exceed windows');
+    }
+  }).map((result) {
     final (n, sums) = result;
     if (n < 2 * l + 4) {
       return Metric<PrsaResult>.absent(

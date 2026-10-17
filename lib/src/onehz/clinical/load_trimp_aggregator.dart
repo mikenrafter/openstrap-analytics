@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'load_trimp.dart';
@@ -83,7 +84,20 @@ Aggregator<dynamic, DoubleColumn, Metric<LoadState>> ctlAtlTsbAggregator({
       batchFromJson: DoubleColumn.fromJson,
     ),
   );
-  return core.map((result) {
+  final prime = math.max(primeDays, 1);
+  return validateCheckpoint(core, (json) {
+    final state = decodeList(json);
+    if (state.length != 2) throw const FormatException('Expected two states');
+    final days = decodeCount(state[0]);
+    final rows = field(decodeMap(state[1]), 'rows');
+    if (days == 0) {
+      if (rows != null) throw const FormatException('Prefix rows without days');
+      return;
+    }
+    if (rows == null || decodeList(rows).length != (days < prime ? days : prime)) {
+      throw const FormatException('Prefix rows disagree with days');
+    }
+  }).map((result) {
     final days = result.$1;
     if (days < minDays) {
       return Metric<LoadState>.absent(

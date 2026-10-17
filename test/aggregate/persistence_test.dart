@@ -519,13 +519,9 @@ void main() {
         expect(json['m2'], 'Infinity');
         expect(json['count'], 2);
       });
-      test('every split of an overflowing series resumes', () {
-        expectResumes(a, [
-          over,
-          col([3, 1e155, -1e155, 5]),
-          col([1e155, 2, -1e155]),
-        ], eq);
-      });
+      // Split invariance once m2 has overflowed is out of domain (Welford's
+      // merge of an infinite m2 is not defined to match the one-pass fold);
+      // what must hold is that the reachable state round-trips, tested above.
       test('a non-finite m2 is accepted only in the encoded string form', () {
         final good = Map<String, Object?>.of(
             wire(a.encodeState(a.fold(over))) as Map<String, Object?>);

@@ -71,7 +71,8 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
 
   if (!gapAware) {
     final core = both(diffs, levels);
-    return core.map((result) => _finish(
+    return validateCheckpoint(core, (json) => _validateCheckpoint(json, false))
+        .map((result) => _finish(
         result.$1.$1, result.$1.$2, result.$2, const <int, RunningMoments>{},
         gapAware: false));
   }
@@ -85,9 +86,59 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
     Moments<Beats>((batch) => batch.nnMs),
   );
   final core = both(diffs, both(levels, bins));
-  return core.map((result) => _finish(
+  return validateCheckpoint(core, (json) => _validateCheckpoint(json, true))
+      .map((result) => _finish(
       result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2,
       gapAware: true));
+}
+
+void _validateCheckpoint(Object? json, bool gapAware) {
+  final state = decodeList(json);
+  if (state.length != 2) throw const FormatException('Expected two states');
+  final lookbacks = decodeList(state[0]);
+  if (lookbacks.length != 2) throw const FormatException('Expected two lookbacks');
+  final diffs = decodeMap(lookbacks[0]);
+  final lags = decodeMap(lookbacks[1]);
+  final beats = decodeCount(field(diffs, 'length'));
+  if (decodeCount(field(lags, 'length')) != beats) {
+    throw const FormatException('Lookback lengths disagree');
+  }
+  final diffPairs = decodeCount(field(decodeMap(field(diffs, 'inner')), 'pairs'));
+  final lagPairs = decodeCount(field(decodeMap(field(lags, 'inner')), 'pairs'));
+  final diffLimit = beats > 0 ? beats - 1 : 0;
+  final lagLimit = beats > 1 ? beats - 2 : 0;
+  if (diffPairs > diffLimit || lagPairs > lagLimit) {
+    throw const FormatException('Pair count exceeds beat windows');
+  }
+
+  final Object? rawLevels;
+  Map<String, Object?>? bins;
+  if (gapAware) {
+    final levelAndBins = decodeList(state[1]);
+    if (levelAndBins.length != 2) {
+      throw const FormatException('Expected levels and bins');
+    }
+    rawLevels = levelAndBins[0];
+    bins = decodeMap(levelAndBins[1]);
+  } else {
+    rawLevels = state[1];
+  }
+  final levels = decodeCount(field(decodeMap(rawLevels), 'count'));
+  if (levels > beats) {
+    throw const FormatException('Level count exceeds beat count');
+  }
+  if (bins == null) return;
+  var binned = 0;
+  for (final bin in bins.values) {
+    final count = decodeCount(field(decodeMap(bin), 'count'));
+    if (binned > levels - count) {
+      throw const FormatException('Bin counts exceed level count');
+    }
+    binned += count;
+  }
+  if (binned != levels) {
+    throw const FormatException('Bin counts disagree with level count');
+  }
 }
 
 double _timeAt(Beats batch, int row) {

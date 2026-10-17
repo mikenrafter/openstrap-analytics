@@ -1,4 +1,5 @@
 import '../../aggregate/aggregator.dart';
+import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'readiness_lnrmssd.dart';
@@ -15,11 +16,26 @@ Aggregator<dynamic, DoubleColumn, Metric<ReadinessLnRmssd>>
   int minNights = readinessLnRmssdMinNights,
 }) {
   assert(windowDays >= 0);
-  return both(
+  const maxLastRows = 1 << 62;
+  final keptRows = windowDays >= maxLastRows ? maxLastRows : windowDays + 1;
+  final core = both(
     const Count<DoubleColumn>(),
-    LastRows<DoubleColumn>(windowDays + 1,
+    LastRows<DoubleColumn>(keptRows,
         batchFromJson: DoubleColumn.fromJson),
-  ).map((result) {
+  );
+  return validateCheckpoint(core, (json) {
+    final state = decodeList(json);
+    if (state.length != 2) throw const FormatException('Expected two states');
+    final count = decodeCount(state[0]);
+    final rows = field(decodeMap(state[1]), 'rows');
+    if (count == 0) {
+      if (rows != null) throw const FormatException('Rows without history');
+      return;
+    }
+    if (rows == null || decodeList(rows).length != (count < keptRows ? count : keptRows)) {
+      throw const FormatException('History rows disagree with count');
+    }
+  }).map((result) {
     final n = result.$1;
     if (n < minNights) {
       return Metric<ReadinessLnRmssd>.absent(

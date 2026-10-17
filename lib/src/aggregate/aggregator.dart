@@ -180,6 +180,52 @@ Aggregator<Pair<S1, S2>, B, (R1, R2)>
 ) =>
         _BothAggregator<S1, S2, B, R1, R2>(first, second);
 
+/// Adds module-specific consistency checks to a persistable checkpoint.
+///
+/// [validate] runs after [inner] has decoded each child state. It receives the
+/// encoded state so a composed module can compare child values whose concrete
+/// state types are private to their aggregators. Encoding and hot paths are
+/// otherwise unchanged.
+Aggregator<S, B, R> validateCheckpoint<S, B extends Batch<B>, R>(
+  Aggregator<S, B, R> inner,
+  void Function(Object? json) validate,
+) =>
+    _CheckpointValidatedAggregator<S, B, R>(inner, validate);
+
+class _CheckpointValidatedAggregator<S, B extends Batch<B>, R>
+    extends Aggregator<S, B, R> {
+  const _CheckpointValidatedAggregator(this.inner, this.validate);
+
+  final Aggregator<S, B, R> inner;
+  final void Function(Object? json) validate;
+
+  @override
+  S empty() => inner.empty();
+
+  @override
+  S addSlice(S state, B batch, int start, int end) =>
+      inner.addSlice(state, batch, start, end);
+
+  @override
+  S combine(S left, S right) => inner.combine(left, right);
+
+  @override
+  R finish(S state) => inner.finish(state);
+
+  @override
+  bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+
+  @override
+  S decodeState(Object? json) {
+    final state = inner.decodeState(json);
+    validate(json);
+    return state;
+  }
+}
+
 class _BothAggregator<S1, S2, B extends Batch<B>, R1, R2>
     extends Aggregator<Pair<S1, S2>, B, (R1, R2)> {
   const _BothAggregator(this.first, this.second);
