@@ -9,7 +9,7 @@ import '../support/checkpoint_support.dart';
 
 const nan = double.nan;
 
-List<Object?> _vals(DoubleColumn? c) => [c?.values.toList()];
+List<Object?> _vals(DoubleColumn? c) => [c == null, ...?c?.values];
 final _same = fieldsEqual<DoubleColumn?>(_vals); // NaN-aware, exact
 
 LastRows<DoubleColumn> _last(int k) =>

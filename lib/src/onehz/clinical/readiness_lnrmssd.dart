@@ -9,8 +9,12 @@
 //
 // HONESTY: needs ≥ minNights of valid history; absent otherwise. PRV.
 
+import 'dart:typed_data';
+
+import '../../aggregate/aggregator.dart' show AggregatorOps, DoubleColumn;
 import '../types.dart';
 import '../util.dart';
+import 'readiness_lnrmssd_aggregator.dart';
 
 class ReadinessLnRmssd {
   final double lnRmssdToday;
@@ -54,30 +58,66 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   int windowDays = 7,
   int minNights = readinessLnRmssdMinNights,
 }) {
-  const inputs = ['ln_rmssd_history'];
-  if (historyLnRmssd.length < minNights) {
-    return Metric<ReadinessLnRmssd>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: needBaselineNote(have: historyLnRmssd.length, need: minNights),
-    );
+  if (windowDays >= 0) {
+    return readinessLnRmssdAggregator(
+      meanNnTodayMs: meanNnTodayMs,
+      windowDays: windowDays,
+      minNights: minNights,
+    ).run(DoubleColumn(Float64List.fromList(historyLnRmssd)));
   }
-  final today = historyLnRmssd.last;
+  // A negative window cannot be built as a suffix block, so it keeps the old
+  // path: absent when short, otherwise sublist(start, n - 1) with start > n - 1
+  // throws RangeError, as it always did.
+  if (historyLnRmssd.length < minNights) {
+    return _tooShort(historyLnRmssd.length, minNights);
+  }
   final n = historyLnRmssd.length;
   final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
+  final priorWindow = historyLnRmssd.sublist(start, n - 1);
+  return readinessLnRmssdFromSuffix(
+    n,
+    [...priorWindow, historyLnRmssd.last],
+    meanNnTodayMs: meanNnTodayMs,
+    windowDays: windowDays,
+    minNights: minNights,
+  );
+}
+
+const _inputs = ['ln_rmssd_history'];
+
+/// The absent result for a history shorter than [minNights].
+Metric<ReadinessLnRmssd> _tooShort(int n, int minNights) =>
+    Metric<ReadinessLnRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: _inputs,
+      note: needBaselineNote(have: n, need: minNights),
+    );
+
+/// Shared by [readinessLnRmssd] and the aggregator (not public API): the
+/// arithmetic after the length check, given the history length [n] and its
+/// last min(windowDays + 1, n) values [suffix] (tonight last).
+Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
+  int n,
+  List<double> suffix, {
+  double? meanNnTodayMs,
+  required int windowDays,
+  required int minNights,
+}) {
+  const inputs = _inputs;
+  final today = suffix.last;
   // this used to be historyLnRmssd.sublist(start), which runs to the END of
   // the list - including tonight's own value in its own baseline. that
   // pulls the mean/sd toward tonight, understating how far off a genuinely
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
-  final priorWindow = historyLnRmssd.sublist(start, n - 1);
+  final priorWindow = suffix.sublist(0, suffix.length - 1);
   if (priorWindow.isEmpty) {
     // only happens if minNights got set to 1 somewhere - there's no prior
     // night to build a baseline from yet, so same as not enough history.
     return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: needBaselineNote(have: historyLnRmssd.length, need: minNights + 1),
+      note: needBaselineNote(have: n, need: minNights + 1),
     );
   }
   final m = mean(priorWindow)!;

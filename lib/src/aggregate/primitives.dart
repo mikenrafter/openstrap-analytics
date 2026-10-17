@@ -404,6 +404,71 @@ class Last<B extends Batch<B>> extends Aggregator<_EdgeState<B>, B, B?> {
   _EdgeState<B> decodeState(Object? json) => _decodeEdge(json, batchFromJson);
 }
 
+class _RowsState<B extends Batch<B>> {
+  B? rows;
+}
+
+/// The last [k] rows of the whole input as a copy (fewer when the input is
+/// shorter), or null for no rows.
+class LastRows<B extends Batch<B>> extends Aggregator<_RowsState<B>, B, B?> {
+  /// Persistable only when [batchFromJson] is given (the inverse of
+  /// [Batch.toJson] for [B]).
+  const LastRows(this.k, {this.batchFromJson}) : assert(k >= 1);
+  final int k;
+  final B Function(Object? json)? batchFromJson;
+
+  B _tail(B rows) =>
+      rows.length <= k ? rows : rows.copyRange(rows.length - k, rows.length);
+
+  @override
+  _RowsState<B> empty() => _RowsState<B>();
+  @override
+  _RowsState<B> addSlice(_RowsState<B> state, B batch, int start, int end) {
+    if (start >= end) return state;
+    final from = end - start > k ? end - k : start;
+    final piece = batch.copyRange(from, end);
+    final rows = state.rows;
+    state.rows = rows == null ? piece : _tail(rows.join(piece));
+    return state;
+  }
+  @override
+  _RowsState<B> combine(_RowsState<B> left, _RowsState<B> right) {
+    final l = left.rows;
+    final r = right.rows;
+    if (r == null) return left;
+    left.rows = l == null ? r : _tail(l.join(r));
+    return left;
+  }
+  @override
+  B? finish(_RowsState<B> state) => state.rows;
+  @override
+  bool get persistable => batchFromJson != null;
+  @override
+  Object? encodeState(_RowsState<B> state) {
+    if (batchFromJson == null) {
+      throw UnsupportedError('Pass batchFromJson to persist this block');
+    }
+    return {'rows': state.rows?.toJson()};
+  }
+  @override
+  _RowsState<B> decodeState(Object? json) {
+    final fromJson = batchFromJson;
+    if (fromJson == null) {
+      throw UnsupportedError('Pass batchFromJson to persist this block');
+    }
+    final raw = field(decodeMap(json), 'rows');
+    final state = _RowsState<B>();
+    if (raw != null) {
+      final rows = fromJson(raw);
+      if (rows.length < 1 || rows.length > k) {
+        throw const FormatException('Row count out of range');
+      }
+      state.rows = rows;
+    }
+    return state;
+  }
+}
+
 /// Routes consecutive equal keys to [inner] as one slice per run.
 class GroupBy<B extends Batch<B>, S, R>
     extends Aggregator<Map<int, S>, B, Map<int, R>> {
