@@ -292,6 +292,8 @@ List<int> _splitPoints(int length, int maxSplits, int seed) {
   return points.toList()..sort();
 }
 
+/// Compares the listed fields pairwise; numbers use the tolerances and lists
+/// compare element by element with the same rules.
 ResultEquals<R> fieldsEqual<R>(
   List<Object?> Function(R value) fields, {
   double relTol = 0,
@@ -310,6 +312,15 @@ ResultEquals<R> fieldsEqual<R>(
 bool _fieldEqual(Object? left, Object? right, double relTol, double absTol) {
   // Converting two ints to double loses distinctions above 2^53.
   if (left is int && right is int) return left == right;
+  if (left is List || right is List) {
+    if (left is! List || right is! List || left.length != right.length) {
+      return false;
+    }
+    for (var i = 0; i < left.length; i++) {
+      if (!_fieldEqual(left[i], right[i], relTol, absTol)) return false;
+    }
+    return true;
+  }
   if (left == right) return true;
   if (left == null || right == null) return false;
   if (left is! num || right is! num) return false;
