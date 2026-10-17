@@ -146,6 +146,7 @@ Map<String, _S Function(Rng, int)> _families() => {
       'cadence > 300 s': (r, n) => _gen(r, n, stepMs: 400000, jitterMs: 1000),
       'fails the mode rule': (r, n) {
         // Gaps cycle 1 s, 4 s, 10 s: median 4 s, only a third within 2x.
+        if (n == 0) return _S([], []);
         final ts = <double>[1.7e12];
         for (var i = 1; i < n; i++) {
           ts.add(ts.last + const [1000.0, 4000.0, 10000.0][i % 3]);
