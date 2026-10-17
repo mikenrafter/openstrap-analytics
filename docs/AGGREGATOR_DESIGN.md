@@ -104,6 +104,8 @@ All lawful, so anything assembled from them is lawful too:
   `.map(f)` on the result
 - grouping: `GroupBy(key, inner)` (consecutive equal keys reach `inner` as one
   slice; per-key order kept)
+- suffixes: `LastRows(k)` (the last k rows of the whole input, kept
+  verbatim)
 - prefixes: `Prefix(k, head, tail)` (the first k rows of the whole input go
   to `head`, kept verbatim, at most k rows; every later row goes to `tail`)
 - recurrences: `Ewma(col, λ)` finishes as an `Affine` map (see below)
@@ -164,6 +166,7 @@ techniques moved them across:
 | cosinor | additive | 1e-9 (R² 1e-7) | one inner computing cos/sin once per row; centred co-moments |
 | time in zone | additive | 1e-12 | `Lookback(2)` + exact gap histograms; median at finish |
 | CTL/ATL/TSB | additive | 1e-9 | `Count`, `Prefix`, `Sum`, two `Ewma` maps |
+| readiness lnRMSSD | rewired in place | exact | `Count` + `LastRows(windowDays + 1)` |
 | PRSA DC/AC | additive | 1e-9 | `Count` + `Lookback(2l + 1)` with a profile-sum inner |
 | circadian IS/IV/M10/L5/RA | additive | 1e-12 int data, 1e-9 real | `Moments`, `GroupBy`, `Lookback(2)` + one 15-line inner |
 
@@ -198,5 +201,9 @@ division per row and removed a cancellation bug.)
   statistics (sample entropy), Viterbi backtrack, and anything whose context
   is unbounded (current RR artifact correction). These need a bounded variant
   behind a kAlgoVersion bump, or stay batch.
+- Still hard: `nocturnalRhr` slides a TIME window whose qualifying rule
+  depends on the stream-wide median cadence. A mergeable version would keep,
+  per possible valid-sample count, the lowest window mean (bounded by the
+  window length) plus a time-based lookback block, which doesn't exist yet.
 - Float results are equal within a tolerance, not bit-identical, across
   chunkings. That is why float modules stay additive.
