@@ -12,6 +12,7 @@
 // is NOT required to exist for windowDays < 0: the public function keeps the
 // reference path there and must behave identically, throw included.
 
+
 import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
@@ -199,5 +200,97 @@ void main() {
     final agg = readinessLnRmssdAggregator(meanNnTodayMs: 1200);
     expect(agg.persistable, isTrue);
     expectCheckpointResumes(agg, _hist(Rng(0x12), 30, 0), equals: _same);
+  });
+
+  group('checkpoint relationships (count against the kept rows)', () {
+    final agg = readinessLnRmssdAggregator(windowDays: 7); // keeps 8 rows
+    Metric<ReadinessLnRmssd>? restore(Object? state) {
+      final got = decodeCheckpoint<dynamic>(
+          agg, {'kind': 'k', 'version': 1, 'state': state},
+          kind: 'k', version: 1);
+      return got == null ? null : agg.finish(got);
+    }
+
+    test('review case: count 4 with no rows is refused', () {
+      // Used to decode, then finish threw on the missing rows.
+      expect(
+          decodeCheckpoint<dynamic>(
+              agg,
+              {
+                'kind': 'k',
+                'version': 1,
+                'state': [4, {'rows': null}]
+              },
+              kind: 'k',
+              version: 1),
+          isNull);
+    });
+    test('count 0 with rows present is refused', () {
+      final rows = ((checkpointOf(agg, _hist(Rng(1), 3, 0))['state'] as List)[1]
+          as Map)['rows'];
+      expect(restore([0, {'rows': rows}]), isNull);
+    });
+    test('count that disagrees with the number of kept rows is refused', () {
+      final long = _hist(Rng(2), 30, 0);
+      // 30 nights keep 8 rows; claiming 5 (or 3 nights holding 8) is damage.
+      expectDamagedCheckpointRefused(agg, long, (s) {
+        (s as List)[0] = 5;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, long, (s) {
+        (s as List)[0] = 0;
+        return s;
+      });
+      final short = _hist(Rng(3), 5, 0); // keeps all 5
+      expectDamagedCheckpointRefused(agg, short, (s) {
+        (s as List)[0] = 9;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, short, (s) {
+        (s as List)[0] = 4;
+        return s;
+      });
+    });
+    test('a consistent checkpoint still restores', () {
+      for (final n in [0, 1, 5, 8, 9, 30]) {
+        final b = _hist(Rng(n), n, 0);
+        final got = decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+            kind: 'test', version: 1);
+        expect(got, isNotNull, reason: 'n=$n');
+        expect(_same(agg.finish(got), agg.run(b)), isTrue);
+      }
+    });
+  });
+
+  group('reads only the suffix of the history', () {
+    test('an unused prefix element is never read', () {
+      // Element 0 is not a double; only the last windowDays + 1 are read.
+      final h = <dynamic>['unused', 3.0, 4.0, 5.0, 6.0].cast<double>();
+      final got = readinessLnRmssd(h, windowDays: 3);
+      final want = _reference(h, windowDays: 3);
+      expect(want.present, isTrue);
+      expect(_same(got, want), isTrue, reason: '$got vs $want');
+    });
+    test('a too-short history is refused without reading any element', () {
+      final h = <dynamic>['a', 'b'].cast<double>();
+      final got = readinessLnRmssd(h);
+      expect(got.present, isFalse);
+      expect(got.note, needBaselineNote(have: 2, need: readinessLnRmssdMinNights));
+    });
+  });
+
+  group('windowDays at the int limit', () {
+    const huge = 0x7fffffffffffffff;
+    final h = [3.0, 4.0, 5.0, 6.0];
+    test('the public function matches the reference', () {
+      final got = readinessLnRmssd(h, windowDays: huge);
+      expect(_same(got, _reference(h, windowDays: huge)), isTrue);
+      expect(got.present, isTrue);
+    });
+    test('the aggregator matches the reference and resumes', () {
+      final agg = readinessLnRmssdAggregator(windowDays: huge);
+      expect(_same(agg.run(col(h)), _reference(h, windowDays: huge)), isTrue);
+      expectCheckpointResumes(agg, col(h), equals: _same);
+    });
   });
 }

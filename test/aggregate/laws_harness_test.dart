@@ -205,6 +205,36 @@ class _FinishFreezes extends Aggregator<List<int>, _B, int> {
   }
 }
 
+/// A correct sum whose codec only breaks when the restored state is the RIGHT
+/// operand of combine: a state read back from JSON carries a flag, and combine
+/// drops the right side's total when that flag is set. Restoring only the left
+/// operand (the old roundTrip law) never sees it.
+class _RightRestoreDrops extends Aggregator<List<int>, _B, int> {
+  const _RightRestoreDrops({this.faithful = false});
+
+  /// When true the same codec is lawful: combine keeps a restored right side.
+  final bool faithful;
+  @override
+  List<int> empty() => [0, 0]; // total, restored flag
+  @override
+  List<int> addSlice(List<int> s, _B b, int start, int end) {
+    s[0] += _sliceSum(b, start, end);
+    return s;
+  }
+
+  @override
+  List<int> combine(List<int> left, List<int> right) =>
+      [left[0] + (right[1] == 1 && !faithful ? 0 : right[0]), left[1]];
+  @override
+  int finish(List<int> s) => s[0];
+  @override
+  bool get persistable => true;
+  @override
+  Object? encodeState(List<int> s) => s[0];
+  @override
+  List<int> decodeState(Object? json) => [json as int, 1];
+}
+
 Set<String> _laws(List<LawViolation> v) => {for (final x in v) x.law};
 
 void main() {
@@ -312,6 +342,48 @@ void main() {
       expect(checkLaws(const _DropRight(), cases, equals: (a, b) => true),
           isEmpty);
       expect(checkLaws(const _IgnoresState(), cases, equals: (a, b) => true),
+          isEmpty);
+    });
+  });
+
+  group('roundTrip restores the right operand too', () {
+    final small = [
+      _B([]),
+      _B([1, 2, 3]),
+      _B([4, 5]),
+    ];
+
+    test('a codec that breaks only as the right operand is caught as exactly '
+        '{roundTrip}', () {
+      final v = checkLaws(const _RightRestoreDrops(), small);
+      expect(_laws(v), {'roundTrip'});
+      expect(v.every((x) => x.detail.isNotEmpty), isTrue);
+    });
+
+    test('the review case [1,2,3] is caught', () {
+      expect(
+          _laws(checkLaws(const _RightRestoreDrops(), [
+            _B([1, 2, 3])
+          ])),
+          {'roundTrip'});
+    });
+
+    test('checkConversion reports it as law:roundTrip', () {
+      final f = checkConversion<List<int>, _B, int>(
+          (_) => const _RightRestoreDrops(),
+          small,
+          (b) => b.rows.fold(0, (s, x) => s + x));
+      expect({for (final x in f) x.path}, {'law:roundTrip'});
+    });
+
+    test('expectLawful fails for it', () {
+      expect(() => expectLawful(const _RightRestoreDrops(), small),
+          throwsA(isA<TestFailure>()));
+    });
+
+    test('the same codec with a combine that keeps a restored right side is '
+        'clean', () {
+      expect(checkLaws(const _RightRestoreDrops(faithful: true), small),
           isEmpty);
     });
   });

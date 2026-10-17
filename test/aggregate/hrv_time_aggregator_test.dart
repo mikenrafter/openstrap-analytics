@@ -394,4 +394,56 @@ void main() {
       }
     });
   });
+
+  group('checkpoint relationships (beat counts across the children)', () {
+    final beats = hrvSeries(Rng(0x4A7), 60, 1, gapP: .08);
+    final agg = hrvTimeAggregator(originMs: hrvOrigin(beats));
+    // State: [[diffs, lags], [levels, bins]]; diffs and lags are Lookback
+    // states ({length, first, last, inner}); levels is a Moments map and bins
+    // is {fiveMinuteBin: Moments}.
+    Map diffs(Object? s) => ((s as List)[0] as List)[0] as Map;
+    Map lags(Object? s) => ((s as List)[0] as List)[1] as Map;
+    Map levels(Object? s) => ((s as List)[1] as List)[0] as Map;
+    Map bins(Object? s) => ((s as List)[1] as List)[1] as Map;
+
+    test('both lookbacks must have seen the same number of beats', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        lags(s)['length'] = 61;
+        return s;
+      });
+    });
+    test('more level samples than beats is refused', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        levels(s)['count'] = 70;
+        return s;
+      });
+    });
+    test('five-minute bin counts must add up to the level count', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        final first = bins(s).values.first as Map;
+        first['count'] = (first['count'] as int) + 1;
+        return s;
+      });
+    });
+    test('more successive differences than beat pairs is refused', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        final inner = diffs(s)['inner'] as Map;
+        inner['pairs'] = 60;
+        inner['over50'] = 0;
+        return s;
+      });
+    });
+    test('more lag pairs than beat triples is refused', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        (lags(s)['inner'] as Map)['pairs'] = 59;
+        return s;
+      });
+    });
+    test('a consistent checkpoint restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, beats),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
 }

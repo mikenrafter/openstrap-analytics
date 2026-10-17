@@ -499,6 +499,62 @@ void main() {
       expect(a.encodeState(s), s.toJson());
       expect(a.encodeState(a.empty()), RunningMoments().toJson());
     });
+    group('reachable non-finite moments (finite input overflowing m2)', () {
+      final over = col([1e155, -1e155]); // squared deviation overflows to inf
+      test('the state reaches Infinity from finite input', () {
+        expect(a.fold(over).populationSd, double.infinity);
+      });
+      test('review case: encodeState survives jsonEncode and decodes back', () {
+        final state = a.fold(over);
+        late final String text;
+        expect(() => text = jsonEncode(a.encodeState(state)), returnsNormally);
+        final back = a.decodeState(jsonDecode(text));
+        expect(back.count, 2);
+        expect(back.mean, state.mean);
+        expect(back.sampleSd, double.infinity);
+        expect(eq(a.finish(back), a.finish(state)), isTrue);
+      });
+      test('the non-finite m2 uses the shared string encoding', () {
+        final json = wire(a.encodeState(a.fold(over))) as Map;
+        expect(json['m2'], 'Infinity');
+        expect(json['count'], 2);
+      });
+      test('every split of an overflowing series resumes', () {
+        expectResumes(a, [
+          over,
+          col([3, 1e155, -1e155, 5]),
+          col([1e155, 2, -1e155]),
+        ], eq);
+      });
+      test('a non-finite m2 is accepted only in the encoded string form', () {
+        final good = Map<String, Object?>.of(
+            wire(a.encodeState(a.fold(over))) as Map<String, Object?>);
+        expect(() => a.decodeState({...good, 'm2': 'Infinity'}),
+            returnsNormally);
+        for (final bad in [
+          'NaN', '-Infinity', 'inf', 'infinity', null, true, [], {},
+        ]) {
+          expect(() => a.decodeState({...good, 'm2': bad}),
+              throwsFormatException,
+              reason: 'm2 ${jsonEncode(bad)}');
+        }
+      });
+      test('count and invariants are still validated with an infinite m2', () {
+        final good = Map<String, Object?>.of(
+            wire(a.encodeState(a.fold(over))) as Map<String, Object?>);
+        expectMalformed(a, [
+          {...good, 'count': 1}, // one row cannot have spread
+          {...good, 'count': 0}, // nor none
+          {...good, 'count': -2},
+          {...good, 'count': 1.5},
+          {...good, 'origin': 'NaN'},
+          {...good, 'origin': 'Infinity'},
+          {...good, 'meanOffset': 'NaN'},
+          {...good, 'version': 2},
+        ]);
+      });
+    });
+
     test('malformed and inconsistent', () {
       final good = Map<String, Object?>.of(
           wire(a.encodeState(a.fold(col([1, 2, 4])))) as Map<String, Object?>);

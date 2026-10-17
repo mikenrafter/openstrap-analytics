@@ -388,4 +388,117 @@ void main() {
     ];
     test('every law holds', () => expectLawful(_agg, cases, equals: _eq));
   });
+
+  group('checkpoint histograms are consistent with the stored rows', () {
+    // Three rows one second apart at 150 bpm: two pairs, one tail.
+    final three = _S([0, 1000, 2000], [150, 150, 150]).stream;
+    // One row: no pairs, only a tail.
+    final one = _S([5000], [150]).stream;
+    // Two rows: one pair.
+    final two = _S([0, 1000], [150, 150]).stream;
+
+    // State: {windows: {length, first, last, inner: {cadence, credits}},
+    //         hasTail, tailTimestampMs, tailHr}. Histograms are [[gap, n], ..].
+    Map inner(Object? s) => ((s as Map)['windows'] as Map)['inner'] as Map;
+    List cadence(Object? s) => inner(s)['cadence'] as List;
+    List credits(Object? s) => inner(s)['credits'] as List;
+    // The (single) non-empty credit histogram.
+    List credit(Object? s) =>
+        credits(s).cast<List>().firstWhere((h) => h.isNotEmpty);
+
+    void refuses(HrStream batch, void Function(Object? s) damage,
+        [String? why]) {
+      expectDamagedCheckpointRefused(_agg, batch, (s) {
+        damage(s);
+        return s;
+      }, reason: why);
+    }
+
+    test('a good checkpoint has the shape these tests damage', () {
+      final s = checkpointOf(_agg, three)['state'];
+      expect(cadence(s), [
+        [1.0, 2]
+      ]);
+      expect(credit(s), [
+        [1.0, 2]
+      ]);
+    });
+
+    test('review case: histogram multiplicities inflated past the pairs', () {
+      refuses(two, (s) => cadence(s)[0][1] = 300);
+      refuses(two, (s) => credit(s)[0][1] = 300);
+      refuses(three, (s) => cadence(s)[0][1] = 3);
+      refuses(three, (s) => credit(s)[0][1] = 3);
+    });
+    test('credits spread over several zones still sum to at most the pairs',
+        () {
+      refuses(three, (s) {
+        // Two pairs exist; 1 + 2 credits across two zones is three.
+        final h = credit(s);
+        final other = credits(s).cast<List>().firstWhere((x) => x.isEmpty);
+        h[0][1] = 2;
+        other.add([1.0, 1]);
+      });
+    });
+    test('totals at exactly the pairs are accepted', () {
+      for (final batch in [two, three]) {
+        final good = checkpointOf(_agg, batch);
+        expect(decodeCheckpoint<dynamic>(_agg, good, kind: 'test', version: 1),
+            isNotNull);
+      }
+    });
+    test('counts whose sum overflows an int are refused', () {
+      refuses(three, (s) {
+        cadence(s)
+          ..[0][1] = 0x7fffffffffffffff
+          ..add([2.0, 5]);
+      });
+      refuses(three, (s) {
+        credit(s)
+          ..[0][1] = 0x7fffffffffffffff
+          ..add([2.0, 5]);
+      });
+    });
+    test('a histogram with one row behind it must be empty (no pairs)', () {
+      refuses(one, (s) => cadence(s).add([1.0, 1]));
+      refuses(one, (s) => credits(s)[0].add([1.0, 1]));
+      final empty = HrStream(Float64List(0), Float64List(0));
+      expect(decodeCheckpoint<dynamic>(
+          _agg, checkpointOf(_agg, empty), kind: 'test', version: 1),
+          isNotNull);
+    });
+
+    test('review case: cadence [["NaN", 2]] is refused', () {
+      refuses(three, (s) => cadence(s)
+        ..clear()
+        ..add(['NaN', 2]));
+    });
+    test('cadence keys must be finite and positive', () {
+      for (final key in ['NaN', 'Infinity', '-Infinity', 0.0, -1.0, -0.5]) {
+        refuses(three, (s) => cadence(s)[0][0] = key, 'cadence key $key');
+      }
+    });
+    test('credit keys must be finite; zero and negative are fine', () {
+      for (final key in ['NaN', 'Infinity', '-Infinity']) {
+        refuses(three, (s) => credit(s)[0][0] = key, 'credit key $key');
+      }
+      // A zero or negative gap credits one cadence (the fallback), so these
+      // are reachable from non-monotonic timestamps and must still restore.
+      final back = _S([2000, 1000], [150, 150]).stream; // gap -1 s
+      final dup = _S([1000, 1000], [150, 150]).stream; // gap 0
+      for (final batch in [back, dup]) {
+        final good = checkpointOf(_agg, batch);
+        expect(decodeCheckpoint<dynamic>(_agg, good, kind: 'test', version: 1),
+            isNotNull);
+      }
+    });
+
+    test('the tail exists exactly when there are rows', () {
+      refuses(three, (s) => (s as Map)['hasTail'] = false);
+      refuses(two, (s) => (s as Map)['hasTail'] = false);
+      refuses(one, (s) => (s as Map)['hasTail'] = false);
+      final empty = HrStream(Float64List(0), Float64List(0));
+      refuses(empty, (s) => (s as Map)['hasTail'] = true);
+    });
+  });
 }

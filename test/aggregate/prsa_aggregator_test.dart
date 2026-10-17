@@ -104,4 +104,41 @@ void main() {
     expect(agg.persistable, isTrue);
     expectCheckpointResumes(agg, _c(_walk(Rng(0xBA0E), 300)), equals: _same);
   });
+
+  group('checkpoint relationships (beat count, window length, anchors)', () {
+    final agg = prsaAggregator(deceleration: true, l: 2);
+    final b = _c(_walk(Rng(0xBA0F), 40));
+    // State: [n, lookback]; lookback inner is {profile, anchors}.
+    Map lookback(Object? s) => (s as List)[1] as Map;
+    Map inner(Object? s) => lookback(s)['inner'] as Map;
+
+    test('the beat count must equal the lookback row count', () {
+      for (final n in [10, 39, 41]) {
+        expectDamagedCheckpointRefused(agg, b, (s) {
+          (s as List)[0] = n;
+          return s;
+        }, reason: 'n=$n');
+      }
+    });
+    test('more anchors than windows is refused', () {
+      // 40 beats hold 40 - 2l = 36 windows with l = 2.
+      expectDamagedCheckpointRefused(agg, b, (s) {
+        inner(s)['anchors'] = 37;
+        return s;
+      });
+    });
+    test('anchors with fewer beats than one window are refused', () {
+      final short = _c(_walk(Rng(1), 3));
+      expectDamagedCheckpointRefused(agg, short, (s) {
+        inner(s)['anchors'] = 1;
+        return s;
+      });
+    });
+    test('a consistent checkpoint restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
 }

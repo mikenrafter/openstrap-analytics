@@ -584,4 +584,60 @@ void main() {
       });
     }
   });
+
+  group('checkpoint relationships (epoch count, window length, day pairs)', () {
+    // 14 epochs of 4 per day: days 1..3 hold pairs (day 3 is a partial day).
+    final agg = sriAggregator(4);
+    final b = _record(Rng(0x5A1), 14, 4, masked: false, flipP: .3).epochs;
+    // State: [n, lookback]; lookback inner is {dayKey: {agreement, cases}}.
+    Map lookback(Object? s) => (s as List)[1] as Map;
+    Map days(Object? s) => lookback(s)['inner'] as Map;
+
+    test('the epoch count must equal the lookback row count', () {
+      expectDamagedCheckpointRefused(agg, b, (s) {
+        (s as List)[0] = 9;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, b, (s) {
+        (s as List)[0] = 20;
+        return s;
+      });
+    });
+    test('a day with more pair cases than epochs per day is refused', () {
+      expectDamagedCheckpointRefused(agg, b, (s) {
+        final d = days(s).values.first as Map;
+        d['cases'] = 5;
+        return s;
+      });
+    });
+    test('a day outside the later days of the record is refused', () {
+      // 14 epochs reach day 3; day 0 has no earlier day to compare with and
+      // day 9 is past the end.
+      for (final key in ['0', '9', '-1']) {
+        expectDamagedCheckpointRefused(agg, b, (s) {
+          final d = days(s);
+          d[key] = d.values.first;
+          return s;
+        }, reason: 'day $key');
+      }
+    });
+    test('pair cases beyond the epochs that can be compared are refused', () {
+      // 14 epochs allow at most 14 - 4 = 10 comparisons in total.
+      expectDamagedCheckpointRefused(agg, b, (s) {
+        final d = days(s);
+        for (final k in ['1', '2', '3']) {
+          (d[k] as Map)
+            ..['cases'] = 4
+            ..['agreement'] = 4;
+        }
+        return s;
+      });
+    });
+    test('a consistent checkpoint restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
 }

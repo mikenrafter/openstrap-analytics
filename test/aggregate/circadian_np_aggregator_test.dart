@@ -171,4 +171,147 @@ void main() {
       expect(runSliced(a, s, [0, 0, 5, 9]).present, isFalse);
     });
   });
+
+  group('missing and non-finite values follow the reference policy', () {
+    const nan = double.nan;
+    const inf = double.infinity;
+
+    void same(String name, List<double> x, int p, {int? m10, int? l5}) =>
+        test(name, () {
+          final s = _es(x);
+          final want = circadianNonparametric(s.x, p, m10Epochs: m10, l5Epochs: l5);
+          final agg = circadianNpAggregator(p, m10Epochs: m10, l5Epochs: l5);
+          final got = agg.run(s);
+          expect(_exact(got, want), isTrue, reason: 'whole: $got vs $want');
+          // Every path, not only the whole fold.
+          final n = x.length;
+          for (final bounds in [
+            [0, n ~/ 2, n],
+            [0, 1, n],
+            [0, n - 1, n],
+            [for (var i = 0; i <= n; i++) i],
+          ]) {
+            expect(_exact(runChunked(agg, s, bounds), want), isTrue,
+                reason: 'chunked $bounds');
+            expect(_exact(runSliced(agg, s, bounds), want), isTrue,
+                reason: 'sliced $bounds');
+          }
+        });
+
+    same('review: six NaNs, epochsPerDay 6 (used to throw)',
+        [nan, nan, nan, nan, nan, nan], 6);
+    same('review: [1,2,3,4,5,NaN], epochsPerDay 6 (L5 and RA were wrong)',
+        [1, 2, 3, 4, 5, nan], 6);
+    same('NaN in the second day', [1, 2, 3, 4, 5, 6, 7, nan, 9, 1, 2, 3], 6);
+    same('a NaN in every epoch-of-day bin', [nan, 1, 2, 3, 4, 5, 6, nan, 8], 4);
+    same('a whole bin missing', [1, nan, 3, 4, 5, nan, 7, 8, 9, nan, 2, 3], 4);
+    same('NaN with custom windows', [3, 1, nan, 9, 2, 8, 7, nan, 5, 4], 5,
+        m10: 2, l5: 3);
+    same('one +Infinity', [1, 2, inf, 4, 5, 6, 7, 8], 4);
+    same('one -Infinity', [1, 2, -inf, 4, 5, 6, 7, 8], 4);
+    same('+Infinity and -Infinity', [1, inf, 3, -inf, 5, 6, 7, 8], 4);
+    same('NaN and Infinity together', [nan, inf, 3, 4, 5, 6, 7, 8], 4);
+
+    test('series with sprinkled NaN agree with the reference', () {
+      for (final p in [4, 6, 12]) {
+        final r = Rng(0xA11 + p);
+        expectConversion<dynamic, EpochSeries, Metric<CircadianNp>>(
+          (_) => circadianNpAggregator(p),
+          [
+            for (var c = 0; c < 14; c++)
+              _es([
+                for (var k = r.intIn(p, 6 * p); k > 0; k--)
+                  r.nextBool(c.isEven ? .08 : .3)
+                      ? nan
+                      : r.intIn(0, 500).toDouble()
+              ]),
+          ],
+          (b) => circadianNonparametric(b.x, p),
+          equals: _exact,
+          seed: p,
+        );
+      }
+    });
+  });
+
+  group('checkpoint relationships (counts and bins agree across children)', () {
+    // p = 6, 9 epochs: bins 0..5 all present, bins 0..2 hold two epochs.
+    final agg = circadianNpAggregator(6);
+    final x = _es([4, 8, 1, 9, 2, 7, 5, 3, 6]);
+
+    // State: [[n, moments], [groups, lookback]]; a group is [count, sum].
+    Map groups(Object? s) => ((s as List)[1] as List)[0] as Map;
+    Map lookback(Object? s) => ((s as List)[1] as List)[1] as Map;
+
+    test('review case: group "0" removed is refused', () {
+      // Used to decode, then finish threw on the missing bin.
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        groups(s).remove('0');
+        return s;
+      });
+    });
+    test('another bin removed, or an extra bin added, is refused', () {
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        groups(s).remove('5');
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        groups(s)['6'] = groups(s)['0'];
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        groups(s)['-1'] = groups(s)['0'];
+        return s;
+      });
+    });
+    test('group counts that do not sum to the total are refused', () {
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        final g = groups(s)['3'] as List;
+        g[0] = (g[0] as int) + 1;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        ((s as List)[0] as List)[0] = 10;
+        return s;
+      });
+    });
+    test('a count that puts the epochs in the wrong bins is refused', () {
+      // Same total, but bins 0 and 3 swap their counts: 0 should hold two.
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        final g0 = groups(s)['0'] as List, g5 = groups(s)['5'] as List;
+        g0[0] = 1;
+        g5[0] = 2;
+        return s;
+      });
+    });
+    test('a lookback row count that differs from the total is refused', () {
+      expectDamagedCheckpointRefused(agg, x, (s) {
+        lookback(s)['length'] = 12;
+        return s;
+      });
+    });
+    test('the bins required follow firstIndex, not just the count', () {
+      // Rows 4..8 only: epochs of day 4,5,0,1,2, so bin 3 must be absent.
+      final tail = EpochSeries(Float64List.fromList([1, 2, 3, 4, 5]),
+          firstIndex: 4);
+      final a = circadianNpAggregator(6);
+      final good = checkpointOf(a, tail);
+      expect(((good['state'] as List)[1] as List)[0] as Map,
+          hasLength(5)); // sanity: bins 0,1,2,4,5
+      expect(decodeCheckpoint<dynamic>(a, good, kind: 'test', version: 1),
+          isNotNull);
+      expectDamagedCheckpointRefused(a, tail, (s) {
+        groups(s)['3'] = groups(s)['0'];
+        return s;
+      });
+      expectDamagedCheckpointRefused(a, tail, (s) {
+        final g = groups(s);
+        g['3'] = g.remove('4'); // right number of bins, wrong ones
+        return s;
+      });
+    });
+    test('a consistent checkpoint resumes after the checks', () {
+      expectCheckpointResumes(agg, x, equals: _exact);
+    });
+  });
 }

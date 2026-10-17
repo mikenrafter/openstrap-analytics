@@ -247,6 +247,43 @@ void main() {
       expect(a.run(_iotaCol(5)), (false, 5));
     });
   });
+
+  group('checkpoint relationships (day count against the primed prefix)', () {
+    final agg = ctlAtlTsbAggregator(); // primeDays 7
+    // State: [days, {rows: <prefix rows>, tail: [..]}]; rows hold min(days, 7).
+    Object? set(Object? s, int days) {
+      (s as List)[0] = days;
+      return s;
+    }
+
+    test('a day count below the prefix rows held is refused', () {
+      expectDamagedCheckpointRefused(agg, _iotaCol(10), (s) => set(s, 5));
+      expectDamagedCheckpointRefused(agg, _iotaCol(10), (s) => set(s, 0));
+    });
+    test('a day count above what the prefix rows allow is refused', () {
+      expectDamagedCheckpointRefused(agg, _iotaCol(3), (s) => set(s, 9));
+      expectDamagedCheckpointRefused(agg, _iotaCol(3), (s) => set(s, 4));
+    });
+    test('days with no prefix rows are refused', () {
+      expectDamagedCheckpointRefused(agg, _iotaCol(10), (s) {
+        (((s as List)[1]) as Map)['rows'] = null;
+        return s;
+      });
+    });
+    test('prefix rows with no days are refused', () {
+      expectDamagedCheckpointRefused(agg, _iotaCol(3), (s) => set(s, 0));
+    });
+    test('consistent checkpoints still restore', () {
+      for (final n in [0, 1, 6, 7, 8, 20]) {
+        final b = _iotaCol(n);
+        expect(
+            decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+                kind: 'test', version: 1),
+            isNotNull,
+            reason: 'n=$n');
+      }
+    });
+  });
 }
 
 DoubleColumn _iotaCol(int n) => col([for (var i = 0; i < n; i++) 5.0 + i * 3]);
