@@ -41,6 +41,7 @@ import '../types.dart';
 import '../util.dart';
 import '../clinical/hrv_time.dart';
 import 'cardio_stager.dart' show cardioStager;
+import 'cardio_row_cache.dart';
 import 'accounting.dart' show SleepStage;
 import 'hypnogram.dart';
 export 'hypnogram.dart';
@@ -238,6 +239,7 @@ class AdvancedSleepStager {
     int tzOffsetSec = 0,
     int Function(int tsSec)? tzOffsetResolver,
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
     List<List<int>> wristOff = const [], // each [start,end]
     List<List<int>> bandSleepState = const [], // each [ts,state]
   }) {
@@ -310,7 +312,8 @@ class AdvancedSleepStager {
       }
 
       final stages = switch (method) {
-        StagingMethod.cardio => _stageSessionCardio(p.start, p.end, grav, hrS, rrS),
+        StagingMethod.cardio =>
+          _stageSessionCardio(p.start, p.end, grav, hrS, rrS, rowCache),
         StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
         StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
       };
@@ -359,9 +362,11 @@ class AdvancedSleepStager {
     List<RrTs> rr = const [],
     List<RespTs> resp = const [],
     StagingMethod method = StagingMethod.cardio,
+    CardioRowCache? rowCache,
   }) {
     final stages = switch (method) {
-      StagingMethod.cardio => _stageSessionCardio(startSec, endSec, gravity, hr, rr),
+      StagingMethod.cardio =>
+        _stageSessionCardio(startSec, endSec, gravity, hr, rr, rowCache),
       StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
       StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
     };
@@ -1352,7 +1357,8 @@ class AdvancedSleepStager {
   /// contract [stageWindow] documents. They must NEVER come back as 'light',
   /// which is what a zero-data window used to report for its entire length.
   static List<StageSegment> _stageSessionCardio(int start, int end,
-      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr) {
+      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
+      [CardioRowCache? rowCache]) {
     final span = end - start;
     if (span <= 0) return const <StageSegment>[];
     final epSec = epochS.round();
@@ -1416,6 +1422,7 @@ class AdvancedSleepStager {
           accel.sublist(i, j),
           rrMs: rrMs,
           rrTsMs: rrTsMs,
+          rowCache: rowCache,
         );
         final nEpoch = result.base.stages.length;
         for (var e = 0; e < nEpoch; e++) {

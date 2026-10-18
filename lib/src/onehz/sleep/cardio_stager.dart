@@ -77,7 +77,9 @@
 // tier ESTIMATE; confidence reflects RR coverage (RMSSD drives REM/deep).
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
+import 'cardio_row_cache.dart';
 import '../util.dart';
 import 'accounting.dart' show SleepStage;
 import 'stager.dart' show StagerResult, consolidateSleepStages;
@@ -389,6 +391,7 @@ CardioStagerResult cardioStager(
   SleepUserProfile? userProfile,
   double remScoreCut = _remScoreCut,
   double deepScoreCut = _deepScoreCut,
+  CardioRowCache? rowCache,
 }) {
   return classifyCardioEpochs(
     cardioEpochFeatures(
@@ -397,6 +400,7 @@ CardioStagerResult cardioStager(
       rrMs: rrMs,
       rrTsMs: rrTsMs,
       epochSec: epochSec,
+      rowCache: rowCache,
     ),
     epochSec: epochSec,
     userProfile: userProfile ?? cardioUserProfile,
@@ -428,6 +432,7 @@ CardioEpochFeatures cardioEpochFeatures(
   int epochSec = _epochSec,
   int startEpoch = 0,
   int? endEpoch,
+  CardioRowCache? rowCache,
 }) {
   // `_cleanBeatsInWindow` binary-searches this, so it has to be non-decreasing.
   // The producer guarantees it — beats inherit their record's second and the
@@ -477,6 +482,27 @@ CardioEpochFeatures cardioEpochFeatures(
   final firstEpoch = startEpoch.clamp(0, nEpoch);
   final lastEpoch = (endEpoch ?? nEpoch).clamp(firstEpoch, nEpoch);
   final rows = lastEpoch - firstEpoch;
+
+  // The cache is deliberately inserted before the acceleration magnitude and
+  // median work. A hit avoids the Lomb–Scargle calculation AND all of the
+  // otherwise per-pass feature extraction. A miss range delegates back to this
+  // exact routine with the same full arrays, so its local median's clipped
+  // bounds and every floating-point operation remain byte-for-byte unchanged.
+  if (rowCache != null) {
+    return _cachedCardioEpochFeatures(
+      hr1hz,
+      accel,
+      rrMs,
+      rrTsMs,
+      epochSec,
+      n,
+      cadenceSec,
+      perEpoch,
+      firstEpoch,
+      lastEpoch,
+      rowCache,
+    );
+  }
 
   // ── per-second ENMO (motion) against a LOCALLY-ADAPTIVE 1 g reference ──────
   // A single whole-night gravity-magnitude reference (the old approach) is
@@ -559,6 +585,171 @@ CardioEpochFeatures cardioEpochFeatures(
     rk: rk,
     sdnn: sdnn,
   );
+}
+
+/// Cache-aware extraction. The key's context is intentionally the contiguous
+/// usable run supplied to this stager, not the caller's larger record: samples
+/// outside that run cannot influence [cardioEpochFeatures].
+CardioEpochFeatures _cachedCardioEpochFeatures(
+  List<double> hr1hz,
+  List<AccelSample> accel,
+  List<double> rrMs,
+  List<double> rrTsMs,
+  int epochSec,
+  int n,
+  double cadenceSec,
+  int perEpoch,
+  int firstEpoch,
+  int lastEpoch,
+  CardioRowCache cache,
+) {
+  final count = lastEpoch - firstEpoch;
+  final keys = List<CardioRowKey>.filled(
+      count, const CardioRowKey(0, 0, 0));
+  final values = List<CardioEpochRow?>.filled(count, null);
+  final missing = List<bool>.filled(count, false);
+  final gRefHalf = math.max(1, (300 / cadenceSec).round()) ~/ 2;
+  for (var e = firstEpoch; e < lastEpoch; e++) {
+    final row = e - firstEpoch;
+    final key = _cardioRowKey(
+        hr1hz, accel, rrMs, rrTsMs, epochSec, n, cadenceSec, perEpoch, e, gRefHalf);
+    keys[row] = key;
+    final value = cache.lookup(key);
+    values[row] = value;
+    missing[row] = value == null;
+  }
+
+  // One recursive feature extraction per contiguous cold span. It keeps the
+  // old vectorized median path intact and avoids turning a changed handful of
+  // rows into a handful of Lomb–Scargle setup passes.
+  var row = 0;
+  while (row < count) {
+    if (!missing[row]) {
+      row++;
+      continue;
+    }
+    final first = row;
+    while (row < count && missing[row]) {
+      row++;
+    }
+    final features = cardioEpochFeatures(
+      hr1hz,
+      accel,
+      rrMs: rrMs,
+      rrTsMs: rrTsMs,
+      epochSec: epochSec,
+      startEpoch: firstEpoch + first,
+      endEpoch: firstEpoch + row,
+    );
+    for (var i = first; i < row; i++) {
+      final f = i - first;
+      final value = CardioEpochRow(
+        features.motion[f],
+        features.hr[f],
+        features.hrSd[f],
+        features.rmssd[f],
+        features.lfhf[f],
+        features.rk[f],
+        features.sdnn[f],
+      );
+      values[i] = value;
+      cache.insert(keys[i], value);
+    }
+  }
+  return CardioEpochFeatures(
+    motion: [for (final value in values) value!.motion],
+    hr: [for (final value in values) value!.hr],
+    hrSd: [for (final value in values) value!.hrSd],
+    rmssd: [for (final value in values) value!.rmssd],
+    lfhf: [for (final value in values) value!.lfhf],
+    rk: [for (final value in values) value!.rk],
+    sdnn: [for (final value in values) value!.sdnn],
+  );
+}
+
+const int _fnvOffset64 = 0xcbf29ce484222325;
+const int _fnvPrime64 = 0x100000001b3;
+const int _u64Mask = (1 << 64) - 1;
+
+/// Exact-bit fingerprint of the data one row can observe. The clipped run
+/// length never enters a row as a global scalar: it only changes an epoch whose
+/// 300-s gravity reference window touches a run edge. The explicit clip
+/// distances below capture precisely that dependency while rows away from both
+/// edges survive a moved session boundary.
+CardioRowKey _cardioRowKey(
+  List<double> hr,
+  List<AccelSample> accel,
+  List<double> rr,
+  List<double> rrTs,
+  int epochSec,
+  int n,
+  double cadenceSec,
+  int perEpoch,
+  int epoch,
+  int gRefHalf,
+) {
+  var hash = _fnvOffset64;
+  void word(int value) {
+    hash ^= value & _u64Mask;
+    hash = (hash * _fnvPrime64) & _u64Mask;
+  }
+  void number(double value) {
+    final bytes = ByteData(8)..setFloat64(0, value, Endian.little);
+    word(bytes.getUint64(0, Endian.little));
+  }
+
+  final s = epoch * perEpoch;
+  final t = math.min(s + perEpoch, n);
+  final lo = math.max(0, s - gRefHalf);
+  final hi = math.min(n, t + gRefHalf);
+  word(0x43415244494f31); // domain separator: CARDIO1
+  word(epochSec);
+  word(perEpoch);
+  number(cadenceSec);
+  // Only an actually clipped edge is length-sensitive. A stable marker for an
+  // unclipped side means shifting a far-away session edge preserves the row.
+  word(lo == 0 ? gRefHalf - s : -1);
+  word(hi == n ? t + gRefHalf - n : -1);
+  word(hi - lo);
+  for (var i = lo; i < hi; i++) {
+    final a = accel[i];
+    number(a.tsMs);
+    number(a.x);
+    number(a.y);
+    number(a.z);
+  }
+  word(t - s);
+  for (var i = s; i < t; i++) {
+    number(hr[i]);
+  }
+  // RR has no influence at all for an unpaired input, matching the feature
+  // extractor's early exit. Otherwise include every raw beat in the widest
+  // (±150 s), inclusive window; the ±90 s REM window is a subset.
+  if (rr.length != rrTs.length) {
+    word(0);
+  } else {
+    word(1);
+    final mid = (s + t) ~/ 2;
+    final centre = accel[mid].tsMs;
+    final low = centre - 150000.0, high = centre + 150000.0;
+    var a = 0, b = rrTs.length;
+    while (a < b) {
+      final m = (a + b) >> 1;
+      if (rrTs[m] < low) {
+        a = m + 1;
+      } else {
+        b = m;
+      }
+    }
+    var count = 0;
+    for (var i = a; i < rrTs.length && rrTs[i] <= high; i++) {
+      number(rrTs[i]);
+      number(rr[i]);
+      count++;
+    }
+    word(count);
+  }
+  return CardioRowKey((accel[s].tsMs / 1000.0).round(), epochSec, hash);
 }
 
 /// Per-epoch feature vectors — the ONLY thing the staging DECISION layer sees.

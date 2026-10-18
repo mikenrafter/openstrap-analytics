@@ -6,9 +6,38 @@ import 'package:openstrap_analytics/onehz.dart';
 import '../test/onehz/phase0_parity_test.dart' as frozen;
 
 int _medianUs(void Function() f, {int runs = 3}) {
+  if (runs == 1) {
+    final sw = Stopwatch()..start();
+    f();
+    sw.stop();
+    return sw.elapsedMicroseconds;
+  }
   final samples = <int>[];
   f(); // warm up JIT and lazy static initialization.
   for (var i = 0; i < runs; i++) {
+    final sw = Stopwatch()..start();
+    f();
+    sw.stop();
+    samples.add(sw.elapsedMicroseconds);
+  }
+  samples.sort();
+  return samples[samples.length ~/ 2];
+}
+
+int _medianPreparedUs(void Function() prepare, void Function() f,
+    {int runs = 3}) {
+  if (runs == 1) {
+    prepare();
+    final sw = Stopwatch()..start();
+    f();
+    sw.stop();
+    return sw.elapsedMicroseconds;
+  }
+  prepare();
+  f(); // JIT warmup; each measured pass gets the same prepared cache state.
+  final samples = <int>[];
+  for (var i = 0; i < runs; i++) {
+    prepare();
     final sw = Stopwatch()..start();
     f();
     sw.stop();
@@ -96,6 +125,39 @@ void main(List<String> args) {
       _sameHrv(hrvBefore(), hrvAfter()));
   row('cardio', 'cardioStager (one night)', stagerBefore, stagerAfter,
       _sameStager(stagerBefore(), stagerAfter()));
+  if (selected.contains('cardio') || selected.contains('cache')) {
+    final extra = frozen.genNight(9004, 15 * 60, rrOutliers: true);
+    const nightMs = 8 * 60 * 60 * 1000.0;
+    final appendedAccel = [
+      ...night.accel,
+      for (final a in extra.accel)
+        AccelSample(a.tsMs + nightMs, a.x, a.y, a.z, valid: a.valid),
+    ];
+    final appendedHr = [...night.hr, ...extra.hr];
+    final appendedRr = [...night.rr, ...extra.rr];
+    final appendedRrTs = [
+      ...night.rrTs,
+      for (final ts in extra.rrTs) ts + nightMs,
+    ];
+    CardioRowCache? cache;
+    void warmNight() {
+      cache = CardioRowCache();
+      cardioStager(night.hr, night.accel,
+          rrMs: night.rr, rrTsMs: night.rrTs, rowCache: cache);
+    }
+    final coldUs = _medianUs(() => cardioStager(night.hr, night.accel,
+        rrMs: night.rr, rrTsMs: night.rrTs, rowCache: CardioRowCache()),
+        runs: 1);
+    final warmUs = _medianPreparedUs(warmNight, () => cardioStager(
+        night.hr, night.accel,
+        rrMs: night.rr, rrTsMs: night.rrTs, rowCache: cache), runs: 1);
+    final appendedUs = _medianPreparedUs(warmNight, () => cardioStager(
+        appendedHr, appendedAccel,
+        rrMs: appendedRr, rrTsMs: appendedRrTs, rowCache: cache), runs: 1);
+    print('cardio cache (8 h) cold us       $coldUs');
+    print('cardio cache (8 h) warm us       $warmUs');
+    print('cardio cache warm +15 min us     $appendedUs');
+  }
   print('parity: frozen references == production: $parity');
   if (!parity) {
     throw StateError('frozen-reference parity failed');
