@@ -403,7 +403,8 @@ class CvhrStream {
             '— CVHR dip detection unreliable',
       );
     }
-    final first = _first;
+    // Nothing folded yet: the tail's first beat is the origin, as in the batch.
+    final first = _first ?? (tailTimes.isEmpty ? null : tailTimes.first);
     final last = tailTimes.isEmpty ? _last : tailTimes.last;
     if (first == null || last == null || last - first <= 0) {
       return const Metric<CvhrResult>.absent(
