@@ -50,6 +50,15 @@ int _medianPreparedUs(void Function() prepare, void Function() f,
 bool _same(double? a, double? b) =>
     a == null || b == null ? a == b : (a.isNaN && b.isNaN) || a == b;
 
+bool _sameList(List<double>? a, List<double>? b) {
+  if (a == null || b == null) return a == null && b == null;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (!_same(a[i], b[i])) return false;
+  }
+  return true;
+}
+
 bool _sameCvhr(Metric<CvhrResult> a, Metric<CvhrResult> b) {
   final x = a.value, y = b.value;
   return _same(a.confidence, b.confidence) &&
@@ -59,7 +68,50 @@ bool _sameCvhr(Metric<CvhrResult> a, Metric<CvhrResult> b) {
               _same(x.cvhrPerHour, y.cvhrPerHour) &&
               _same(x.analyzedHours, y.analyzedHours) &&
               _same(x.meanDepthMs, y.meanDepthMs) &&
-              _same(x.meanWidthSec, y.meanWidthSec));
+              _same(x.meanWidthSec, y.meanWidthSec) &&
+              _sameList(x.depthQuartilesMs, y.depthQuartilesMs) &&
+              _sameList(x.widthQuartilesSec, y.widthQuartilesSec));
+}
+
+void _cvhrStreamBench() {
+  // 32 × 15 min, about eight hours at 56 bpm. Each pass makes the newly
+  // settled prefix permanent and compares its snapshot with the batch scorer.
+  final night = frozen.genBeats(9019, 33000, period: 55, amp: 60);
+  final stream = CvhrStream();
+  var from = 0, streamTotal = 0, batchTotal = 0;
+  var parity = true;
+  final start = night.tMs.first;
+  print('CVHR stream: pass  stream us  batch us  parity');
+  for (var pass = 1; pass <= 32; pass++) {
+    final until = start + pass * 15 * 60 * 1000.0;
+    var end = from;
+    while (end < night.nn.length && night.tMs[end] <= until) {
+      end++;
+    }
+    if (end == from) continue;
+    stream.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
+    from = end;
+    final streamWatch = Stopwatch()..start();
+    final streamed = stream.snapshot(artifactFraction: 0.02);
+    streamWatch.stop();
+    final batchWatch = Stopwatch()..start();
+    final batch = cvhrApneaScreen(night.nn.sublist(0, end),
+        night.tMs.sublist(0, end), artifactFraction: 0.02);
+    batchWatch.stop();
+    final streamUs = streamWatch.elapsedMicroseconds;
+    final batchUs = batchWatch.elapsedMicroseconds;
+    streamTotal += streamUs;
+    batchTotal += batchUs;
+    final same = _sameCvhr(streamed, batch);
+    parity = parity && same;
+    print('cvhr pass ${pass.toString().padLeft(2)} '
+        '${streamUs.toString().padLeft(9)} ${batchUs.toString().padLeft(9)} '
+        'parity=$same');
+  }
+  print('cvhr total    ${streamTotal.toString().padLeft(9)} '
+      '${batchTotal.toString().padLeft(9)}');
+  print('cvhr stream parity: $parity');
+  if (!parity) throw StateError('CVHR stream parity failed');
 }
 
 bool _sameHrv(Metric<HrvFreq> a, Metric<HrvFreq> b) {
@@ -202,6 +254,7 @@ void main(List<String> args) {
       _sameHrv(hrvBefore(), hrvAfter()));
   row('cardio', 'cardioStager (one night)', stagerBefore, stagerAfter,
       _sameStager(stagerBefore(), stagerAfter()));
+  if (args.isEmpty || selected.contains('cvhr-stream')) _cvhrStreamBench();
   if (selected.contains('cardio') || selected.contains('cache')) {
     final extra = frozen.genNight(9004, 15 * 60, rrOutliers: true);
     const nightMs = 8 * 60 * 60 * 1000.0;
