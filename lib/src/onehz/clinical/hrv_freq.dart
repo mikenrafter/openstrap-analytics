@@ -19,6 +19,9 @@
 
 import '../types.dart';
 import '../util.dart';
+import '../../aggregate/json_support.dart';
+
+part 'hrv_freq_stream.dart';
 
 class HrvFreq {
   final double? ulf;
@@ -102,6 +105,19 @@ Metric<HrvFreq> hrvFreq(
   final vlf = _welchBandPower(tSec, nnMs, 0.003, 0.04, oversample: oversample);
   final lf = _welchBandPower(tSec, nnMs, 0.04, 0.15, oversample: oversample);
   final hfRaw = _welchBandPower(tSec, nnMs, 0.15, 0.40, oversample: oversample);
+  return _hrvFreqMetric(ulf, vlf, lf, hfRaw,
+      artifactFraction: artifactFraction, hfArtifactGate: hfArtifactGate);
+}
+
+Metric<HrvFreq> _hrvFreqMetric(
+  double? ulf,
+  double? vlf,
+  double? lf,
+  double? hfRaw, {
+  required double artifactFraction,
+  required double hfArtifactGate,
+}) {
+  const inputs = ['rr_cleaned', 'beat_times'];
   if (lf == null && hfRaw == null) {
     return const Metric<HrvFreq>.absent(
       tier: Tier.high,
@@ -221,39 +237,47 @@ double? _welchBandPower(
   var sum = 0.0;
   var k = 0;
   final step = segSec / 2; // 50 % overlap, the Welch default
-  var first = 0;
   for (var start = tSec.first; start + segSec <= tSec.last; start += step) {
-    final end = start + segSec;
-    final ts = <double>[];
-    final ys = <double>[];
-    while (first < tSec.length && tSec[first] < start) {
-      first++;
-    }
-    for (var i = first; i < tSec.length; i++) {
-      if (tSec[i] >= end) break;
-      ts.add(tSec[i]);
-      ys.add(y[i]);
-    }
-    // A segment has to be BOTH beat-dense and time-complete: a dropout in
-    // the middle leaves few beats spanning the full window, and its
-    // periodogram is a window function, not a spectrum. Endpoint span alone
-    // misses an internal dropout that still leaves beats near both edges, so
-    // also reject on the single largest gap between consecutive beats.
-    if (ts.length < minPointsPerSegment || ts.last - ts.first < segSec * 0.8) {
-      continue;
-    }
-    var maxGap = 0.0;
-    for (var i = 1; i < ts.length; i++) {
-      final g = ts[i] - ts[i - 1];
-      if (g > maxGap) maxGap = g;
-    }
-    if (maxGap > segSec * 0.2) continue;
-    final ls = lombScargle(ts, ys, grid);
-    if (ls == null) continue;
-    final p = ls.bandPower(loHz, hiHz);
+    final p = _welchSegmentPower(tSec, y, start, segSec, loHz, hiHz,
+        grid: grid, minPointsPerSegment: minPointsPerSegment);
+    if (p == null) continue;
     if (!p.isFinite) continue;
     sum += p;
     k++;
   }
   return k == 0 ? null : sum / k;
+}
+
+/// One Welch segment. Streams call this exact function when a segment closes.
+double? _welchSegmentPower(
+  List<double> tSec,
+  List<double> y,
+  double start,
+  double segSec,
+  double loHz,
+  double hiHz, {
+  required List<double> grid,
+  required int minPointsPerSegment,
+}) {
+  final end = start + segSec;
+  final ts = <double>[];
+  final ys = <double>[];
+  for (var i = 0; i < tSec.length; i++) {
+    if (tSec[i] < start) continue;
+    if (tSec[i] >= end) break;
+    ts.add(tSec[i]);
+    ys.add(y[i]);
+  }
+  if (ts.length < minPointsPerSegment || ts.last - ts.first < segSec * 0.8) {
+    return null;
+  }
+  var maxGap = 0.0;
+  for (var i = 1; i < ts.length; i++) {
+    final g = ts[i] - ts[i - 1];
+    if (g > maxGap) maxGap = g;
+  }
+  if (maxGap > segSec * 0.2) return null;
+  final ls = lombScargle(ts, ys, grid);
+  if (ls == null) return null;
+  return ls.bandPower(loHz, hiHz);
 }

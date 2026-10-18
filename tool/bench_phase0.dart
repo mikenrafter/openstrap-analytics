@@ -88,6 +88,83 @@ bool _sameStager(CardioStagerResult a, CardioStagerResult b) =>
     a.deepFlag.toString() == b.deepFlag.toString() &&
     _same(a.confidence, b.confidence);
 
+bool _sameRsa(Metric<RespEstimate> a, Metric<RespEstimate> b) {
+  final x = a.value, y = b.value;
+  return _same(a.confidence, b.confidence) &&
+      a.tier == b.tier &&
+      a.inputs_used.toString() == b.inputs_used.toString() &&
+      a.note == b.note &&
+      ((x == null || y == null)
+          ? x == null && y == null
+          : _same(x.brpm, y.brpm) &&
+              _same(x.peakHz, y.peakHz) &&
+              _same(x.power, y.power) &&
+              x.source == y.source);
+}
+
+void _welchStreamBench() {
+  // 32 × 15 min, about eight hours at 56 bpm. The tail is provisional: it is
+  // included in each snapshot and batch call, then folded in a later pass.
+  final night = frozen.genBeats(9018, 33000, period: 53, amp: 50);
+  final hrv = HrvFreqStream();
+  final rsa = RsaRespStream();
+  var from = 0;
+  var hrvStreamTotal = 0, hrvBatchTotal = 0;
+  var rsaStreamTotal = 0, rsaBatchTotal = 0;
+  var parity = true;
+  final start = night.tMs.first;
+  print('Welch streams: pass  stream hrv/rsa us  batch hrv/rsa us  parity');
+  for (var pass = 1; pass <= 32; pass++) {
+    final until = start + pass * 15 * 60 * 1000.0;
+    var end = from;
+    while (end < night.nn.length && night.tMs[end] <= until) {
+      end++;
+    }
+    if (end == from) continue;
+    hrv.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
+    rsa.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
+    from = end;
+    final tailEnd = (end + 100).clamp(0, night.nn.length);
+    final tailNn = night.nn.sublist(end, tailEnd);
+    final tailTimes = night.tMs.sublist(end, tailEnd);
+    final hrvStreamWatch = Stopwatch()..start();
+    final streamHrv = hrv.snapshot(
+        tailNnMs: tailNn, tailNnTimesMs: tailTimes, artifactFraction: 0.02);
+    hrvStreamWatch.stop();
+    final rsaStreamWatch = Stopwatch()..start();
+    final streamRsa = rsa.snapshot(
+        tailNnMs: tailNn, tailNnTimesMs: tailTimes, artifactFraction: 0.02);
+    rsaStreamWatch.stop();
+    final hrvBatchWatch = Stopwatch()..start();
+    final batchHrv = hrvFreq(night.nn.sublist(0, tailEnd),
+        night.tMs.sublist(0, tailEnd), artifactFraction: 0.02);
+    hrvBatchWatch.stop();
+    final rsaBatchWatch = Stopwatch()..start();
+    final batchRsa = rsaRespRate(night.nn.sublist(0, tailEnd),
+        night.tMs.sublist(0, tailEnd), artifactFraction: 0.02);
+    rsaBatchWatch.stop();
+    final hrvStreamUs = hrvStreamWatch.elapsedMicroseconds;
+    final rsaStreamUs = rsaStreamWatch.elapsedMicroseconds;
+    final hrvBatchUs = hrvBatchWatch.elapsedMicroseconds;
+    final rsaBatchUs = rsaBatchWatch.elapsedMicroseconds;
+    hrvStreamTotal += hrvStreamUs;
+    rsaStreamTotal += rsaStreamUs;
+    hrvBatchTotal += hrvBatchUs;
+    rsaBatchTotal += rsaBatchUs;
+    final same = _sameHrv(streamHrv, batchHrv) && _sameRsa(streamRsa, batchRsa);
+    parity = parity && same;
+    print('welch pass ${pass.toString().padLeft(2)} '
+        '${hrvStreamUs.toString().padLeft(8)}/${rsaStreamUs.toString().padLeft(8)} '
+        '${hrvBatchUs.toString().padLeft(8)}/${rsaBatchUs.toString().padLeft(8)} '
+        'parity=$same');
+  }
+  print('welch total    '
+      '${hrvStreamTotal.toString().padLeft(8)}/${rsaStreamTotal.toString().padLeft(8)} '
+      '${hrvBatchTotal.toString().padLeft(8)}/${rsaBatchTotal.toString().padLeft(8)}');
+  print('welch stream parity: $parity');
+  if (!parity) throw StateError('Welch stream parity failed');
+}
+
 void main(List<String> args) {
   // 8 h / 30k beats / one 8 h night, respectively. Fixed seeds make both the
   // timings and the parity gate reproducible.
@@ -158,6 +235,7 @@ void main(List<String> args) {
     print('cardio cache (8 h) warm us       $warmUs');
     print('cardio cache warm +15 min us     $appendedUs');
   }
+  if (args.isEmpty || selected.contains('welch')) _welchStreamBench();
   print('parity: frozen references == production: $parity');
   if (!parity) {
     throw StateError('frozen-reference parity failed');
