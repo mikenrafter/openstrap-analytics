@@ -159,6 +159,15 @@ Metric<RespEstimate> rsaRespRate(
     );
   }
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  // A non-finite beat time has no place on the clock, and an infinite last
+  // time made the sub-window walk below endless (it never reaches infinity).
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<RespEstimate>.absent(
@@ -427,6 +436,11 @@ class RsaRespStream {
     }
     if (nnMs.isEmpty) return;
     final times = [for (final t in nnTimesMs) t / 1000.0];
+    // Checked before any state changes: an infinite time would make [_settle]
+    // endless, and a fold cannot be undone.
+    if (times.any((t) => !t.isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
     if (!_nondecreasing(times) ||
         (_last != null && times.first < _last!)) {
       throw StateError('beat times must be non-decreasing');
@@ -461,7 +475,8 @@ class RsaRespStream {
       throw StateError('beat times must be non-decreasing');
     }
     final n = _n + tailNnMs.length;
-    if (n < 20 || _first == null) {
+    // A non-finite tail time: the batch's own answer (it abstains).
+    if (n < 20 || _first == null || tail.any((t) => !t.isFinite)) {
       return rsaRespRate([..._nn, ...tailNnMs],
           [..._times.map((x) => x * 1000.0), ...tailNnTimesMs],
           artifactFraction: artifactFraction,
