@@ -433,12 +433,7 @@ void _scoreSegment(
   // The CVHR bradycardia shows up as a local NN MAXIMUM (NN ↑ ⇔ HR ↓) standing
   // proud of this baseline; the following tachycardia is the recovery valley.
   final halfEnv = (envWindowSec / 2).round();
-  final base = List<double>.filled(nGrid, 0);
-  for (var j = 0; j < nGrid; j++) {
-    final lo = math.max(0, j - halfEnv);
-    final hi = math.min(nGrid - 1, j + halfEnv);
-    base[j] = median(smooth.sublist(lo, hi + 1)) ?? smooth[j];
-  }
+  final base = slidingMedians(smooth, halfEnv);
   // Baseline-subtracted bradycardic excursion (clip negatives — we only score
   // the NN-up bradycardia, not the tachycardia trough).
   final exc = [

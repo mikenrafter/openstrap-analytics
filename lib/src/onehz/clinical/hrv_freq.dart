@@ -221,12 +221,15 @@ double? _welchBandPower(
   var sum = 0.0;
   var k = 0;
   final step = segSec / 2; // 50 % overlap, the Welch default
+  var first = 0;
   for (var start = tSec.first; start + segSec <= tSec.last; start += step) {
     final end = start + segSec;
     final ts = <double>[];
     final ys = <double>[];
-    for (var i = 0; i < tSec.length; i++) {
-      if (tSec[i] < start) continue;
+    while (first < tSec.length && tSec[first] < start) {
+      first++;
+    }
+    for (var i = first; i < tSec.length; i++) {
       if (tSec[i] >= end) break;
       ts.add(tSec[i]);
       ys.add(y[i]);
