@@ -167,18 +167,30 @@ const int hrDipMinSamples = 300;
 /// handful of samples is fabrication, not measurement.
 Metric<HrDip> hrDip(List<double> dayHr, List<double> nightHr,
     {int minSamples = hrDipMinSamples}) {
-  const inputs = ['hr_1hz_day', 'hr_1hz_night'];
   final dv = dayHr.where((h) => h > 0).toList();
+  return _hrDip(dv.length, mean(dv), nightHr, minSamples);
+}
+
+/// [hrDip] from the day side's valid-sample count and sum, accumulated in
+/// sample order (so `daySum / dayCount` is the batch day mean exactly). For a
+/// caller that keeps the waking day as running totals instead of a list.
+Metric<HrDip> hrDipFromDayTotals(int dayCount, double daySum,
+        List<double> nightHr, {int minSamples = hrDipMinSamples}) =>
+    _hrDip(dayCount, dayCount == 0 ? null : daySum / dayCount, nightHr,
+        minSamples);
+
+Metric<HrDip> _hrDip(
+    int dayCount, double? dm, List<double> nightHr, int minSamples) {
+  const inputs = ['hr_1hz_day', 'hr_1hz_night'];
   final nv = nightHr.where((h) => h > 0).toList();
-  if (dv.length < minSamples || nv.length < minSamples) {
+  if (dayCount < minSamples || nv.length < minSamples) {
     return Metric<HrDip>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'HR dip needs ≥$minSamples valid samples on each of day and night '
-          '(have day=${dv.length}, night=${nv.length})',
+          '(have day=$dayCount, night=${nv.length})',
     );
   }
-  final dm = mean(dv);
   final nm = mean(nv);
   if (dm == null || nm == null || dm <= 0) {
     return const Metric<HrDip>.absent(
@@ -189,7 +201,7 @@ Metric<HrDip> hrDip(List<double> dayHr, List<double> nightHr,
   }
   final dip = (dm - nm) / dm * 100;
   final band = dip >= 10 ? 'dipper' : (dip >= 0 ? 'non_dipper' : 'riser');
-  final conf = ((dv.length + nv.length) / 14400.0).clamp(0.4, 0.9);
+  final conf = ((dayCount + nv.length) / 14400.0).clamp(0.4, 0.9);
   return Metric<HrDip>(
     value: HrDip(dip, dm, nm, band),
     confidence: conf,

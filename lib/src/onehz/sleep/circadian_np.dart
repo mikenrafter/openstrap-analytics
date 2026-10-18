@@ -20,6 +20,7 @@
 import 'dart:math' as math;
 import '../types.dart';
 import '../util.dart';
+import 'circadian_window.dart';
 
 class CircadianNp {
   final double interdailyStability; // IS
@@ -116,8 +117,8 @@ Metric<CircadianNp> circadianNonparametric(
 
   // M10 / L5: best contiguous window over the AVERAGE day profile (hourMeans),
   // circularly, so a window straddling midnight is allowed.
-  final m10 = _bestWindow(hourMeans, mEp, maximize: true);
-  final l5 = _bestWindow(hourMeans, lEp, maximize: false);
+  final m10 = bestCircularWindow(hourMeans, mEp, maximize: true);
+  final l5 = bestCircularWindow(hourMeans, lEp, maximize: false);
   final ra = (m10.value + l5.value) > 0
       ? (m10.value - l5.value) / (m10.value + l5.value)
       : 0.0;
@@ -140,32 +141,4 @@ Metric<CircadianNp> circadianNonparametric(
     note: 'IS/IV/RA/L5/M10 (van Someren 1999); circadian phase anchored on the '
         'L5 nocturnal trough, not the daytime peak',
   );
-}
-
-class _Window {
-  final double value;
-  final int start;
-  const _Window(this.value, this.start);
-}
-
-/// Best (max or min) mean over a contiguous circular window of length [w].
-_Window _bestWindow(List<double> profile, int w, {required bool maximize}) {
-  final p = profile.length;
-  if (w >= p) {
-    return _Window(mean(profile) ?? 0, 0);
-  }
-  double? best;
-  var bestStart = 0;
-  for (var s = 0; s < p; s++) {
-    var sum = 0.0;
-    for (var k = 0; k < w; k++) {
-      sum += profile[(s + k) % p];
-    }
-    final m = sum / w;
-    if (best == null || (maximize ? m > best : m < best)) {
-      best = m;
-      bestStart = s;
-    }
-  }
-  return _Window(best ?? 0, bestStart);
 }

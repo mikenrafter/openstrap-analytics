@@ -85,6 +85,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `detectNaps` | `sleep/nap.dart` | **the only nap source.** z-angle immobility bouts on the complement of the main sleep window, corroborated by an HR dip vs the user's *awake daytime* baseline. Reports TST and TIB separately; makes **no stage claim**. Deliberately NOT `AdvancedSleepStager`, whose `minSleepMin=60` + 90-min daytime guard exist to reject naps | van Hees et al. |
 | `segmentSleep` (`SleepSegmentation`) | `sleep/segment.dart` | **single source of truth** for sleep windowing; delegates staging to `cardioStager` |
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
+| `CausalStager.observe` | `sleep/causal_stager.dart` | **online** wake/NREM/REM for live decisions: `cardioStager`'s features, REM weights and cutoffs on past-only (trailing) windows and expanding baselines; returns stage + confidence + evidence age + a serialisable next state, and **abstains with a reason** (stale/off-wrist/missing HR or accel/thin coverage/warm-up) rather than guess. No look-ahead, deterministic, replacement-tolerant. Not PSG, not a replacement for `cardioStager` — see `docs/CAUSAL_STAGER.md` | `cardioStager`'s basis (linear-discriminant cardiorespiratory staging: Long 2016; Fonseca 2015/2018; weights measured on DREAMT); the causal adaptation itself has no publication — `ESTIMATE` |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
 | `sleepAccounting` | `sleep/accounting.dart` | TIB/TST/WASO/efficiency accounting | — |
 | `cardiopulmonaryCoupling` | `sleep/cpc.dart` | cardiopulmonary coupling | — |
@@ -116,6 +117,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `hrRecovery` | `workout/hr_recovery.dart` | HRR — HR drop N seconds post-peak | Cole/Lauer 1999-style HRR |
 | `Calories.dailyEnergy` / `estimateBoutCalories` | `workout/calories.dart` | Keytel HR→kcal regression + Harris-Benedict/Mifflin BMR | Keytel et al. 2005 |
 | `Calories.metFromCadenceSpm` | `workout/calories.dart` | walking METs from measured cadence, for sub-flex-gate minutes (100/110/120/130 spm ↔ 3/4/5/6 METs, linear between, clamped) | Tudor-Locke et al. 2019 (CADENCE-Adults) |
+| `Calories.minuteEnergy` / `hourlyRollup` | `workout/calories.dart` | the `dailyEnergy` computation exposed per minute (same gate, same billing; folds back to the daily `active`/`walking` bit-for-bit) plus an hourly rollup with per-hour coverage. A minute with no usable HR and no billable cadence abstains (null + reason); nothing is filled or interpolated | Keytel et al. 2005; Tudor-Locke et al. 2019 |
 
 ### `wellness/`
 | Function | File | Method | Citation |
