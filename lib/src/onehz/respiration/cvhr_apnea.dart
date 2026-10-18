@@ -458,13 +458,15 @@ void _scoreSegment(
   // the run width and the peak depth; apply the width + depth/width gates.
   var i = 0;
   while (i < nGrid) {
-    if (exc[i] <= prom) {
+    // `!(x > prom)` rather than `x <= prom`: a NaN excursion is neither, and
+    // would stall this loop. A non-finite excursion never starts a dip.
+    if (!_above(exc[i], prom)) {
       i++;
       continue;
     }
     final start = i;
     var peakDepth = 0.0;
-    while (i < nGrid && exc[i] > prom) {
+    while (i < nGrid && _above(exc[i], prom)) {
       if (exc[i] > peakDepth) peakDepth = exc[i];
       i++;
     }
@@ -476,6 +478,10 @@ void _scoreSegment(
     onCycle(peakDepth, widthSec);
   }
 }
+
+/// True when [e] is a finite excursion above [prom]. NaN and +-Infinity never
+/// are, so they can neither start nor extend a dip.
+bool _above(double e, double prom) => e.isFinite && e > prom;
 
 /// Piecewise-linear resample of (t,y) onto a sorted [grid] of times (same unit).
 /// Out-of-range grid points clamp to the nearest endpoint value.
