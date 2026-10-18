@@ -208,6 +208,48 @@ void expectMalformedRejected(
 }
 
 void main() {
+  group('fresh and short-prefix streams equal the batch on the tail', () {
+    final ks = [1, 2, 8, 15, 16, 17, 19, 20, 21, 29, 30, 31, 60, 200, 1000];
+
+    void check(Night n, List<int> tails, {int folded = 0}) {
+      for (final k in tails) {
+        final end = math.min(folded + k, n.nn.length);
+        if (end <= folded) continue;
+        final h = HrvFreqStream();
+        final r = RsaRespStream();
+        if (folded > 0) {
+          h.fold(n.nn.sublist(0, folded), n.times.sublist(0, folded));
+          r.fold(n.nn.sublist(0, folded), n.times.sublist(0, folded));
+        }
+        final tn = n.nn.sublist(folded, end), tt = n.times.sublist(folded, end);
+        expectSameHrv(
+            h.snapshot(tailNnMs: tn, tailNnTimesMs: tt, artifactFraction: 0.02),
+            batchHrv(n, end, 0.02),
+            'hrv folded $folded tail $k');
+        expectSameResp(
+            r.snapshot(tailNnMs: tn, tailNnTimesMs: tt, artifactFraction: 0.02),
+            batchRsa(n, end, 0.02),
+            'rsa folded $folded tail $k');
+      }
+    }
+
+    test('fresh stream, tails across the 16/20/30 gates', () {
+      check(synthNight(91, 1), ks);
+    });
+
+    test('fresh stream, tail is a full 2 h night (with a dropout)', () {
+      final n = synthNight(92, 2);
+      check(n, [n.nn.length]);
+    });
+
+    test('a few folded beats plus a long tail', () {
+      final n = synthNight(93, 2);
+      for (final f in [1, 5, 8, 15, 16, 19, 20]) {
+        check(n, [1, 5, 30, 200, n.nn.length], folded: f);
+      }
+    });
+  });
+
   group('HrvFreqStream', () {
     test('prefix parity at every fold, empty and non-empty tail (2 h night)',
         () {

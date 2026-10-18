@@ -294,6 +294,55 @@ void main() {
     });
   });
 
+  group('CvhrStream with nothing (or almost nothing) folded', () {
+    Metric<CvhrResult> viaTail(List<double> nn, List<double> t, int folded,
+        int end, double af) {
+      final s = CvhrStream();
+      if (folded > 0) s.fold(nn.sublist(0, folded), t.sublist(0, folded));
+      return s.snapshot(
+          tailNnMs: nn.sublist(folded, end),
+          tailNnTimesMs: t.sublist(folded, end),
+          artifactFraction: af);
+    }
+
+    void expectEmptyPrefix(Night n, List<int> ks, {int folded = 0}) {
+      for (final k in ks) {
+        final end = math.min(k, n.nn.length);
+        if (end <= folded) continue;
+        expectSame(viaTail(n.nn, n.times, folded, end, 0.02),
+            batch(n.nn, n.times, end, 0.02), 'folded $folded tail ${end - folded}');
+      }
+    }
+
+    test('fresh stream, tail across the 60-beat gate', () {
+      final n = synth(81, 1);
+      expectEmptyPrefix(n, [1, 2, 3, 30, 58, 59, 60, 61, 62, 100, 400]);
+    });
+
+    test('fresh stream, tail is a full 2 h night', () {
+      final n = synth(82, 2);
+      expectEmptyPrefix(n, [n.nn.length]);
+    });
+
+    test('fresh stream, tail with gaps > maxGapSec and short islands', () {
+      final n = synth(83, 3, jumps: _gappy, fast: (5000, 5040));
+      expectEmptyPrefix(n, [200, 1500, 3000, 6000, n.nn.length]);
+      // gaps right at the tail edge
+      final cuts = <int>[];
+      for (var i = 1; i < n.times.length; i++) {
+        if (n.times[i] - n.times[i - 1] > 30000) cuts.addAll([i - 1, i, i + 1]);
+      }
+      expectEmptyPrefix(n, cuts.where((c) => c > 0).toList());
+    });
+
+    test('a few folded beats (below any segment) plus a long tail', () {
+      final n = synth(84, 2, jumps: const [(2400, 90)]);
+      for (final f in [1, 5, 30, 59, 60]) {
+        expectEmptyPrefix(n, [f + 1, f + 30, f + 61, n.nn.length], folded: f);
+      }
+    });
+  });
+
   group('CvhrStream parity', () {
     test('no gaps, apnea cycles present (3 h), random chunks', () {
       final n = synth(3, 3);
