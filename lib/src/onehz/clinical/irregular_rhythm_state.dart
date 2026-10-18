@@ -106,6 +106,8 @@ class IrregularScreenState {
     );
     s._prevKept = j['prevKept'] as bool;
     s._prevV = d('prevV');
+    // Present in every version 3 checkpoint; null only when unknown (NaN).
+    if (!j.containsKey('prevT')) throw const FormatException('missing prevT');
     s._prevT = (j['prevT'] as num?)?.toDouble() ?? double.nan;
     s._nIn = j['nIn'] as int;
     s._nKept = j['nKept'] as int;
