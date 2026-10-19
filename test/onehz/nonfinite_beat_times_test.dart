@@ -4,6 +4,11 @@
 // streams refuse such a fold and answer a snapshot with the batch.
 // cvhrApneaScreen / CvhrStream follow the same rule: CvhrStream took a NaN
 // time and its snapshot then threw where the batch answered.
+// hrvTime (and nocturnalRmssd, sleepSessionRmssdDetail, hrvTimeAggregator,
+// IncrementalHrvTime) threw on one: "Infinity or NaN toInt".
+import 'dart:typed_data';
+
+import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
@@ -66,6 +71,65 @@ void main() {
       expect(got.note, 'non-finite beat time');
       expect(got.note,
           cvhrApneaScreen(nn, withLast(bad), artifactFraction: 0).note);
+    }
+  });
+
+  group('hrvTime family', () {
+    for (final bad in [double.infinity, double.nan, double.negativeInfinity]) {
+      test('hrvTime abstains on a beat time of $bad', () {
+        for (final at in [ts.length - 1, 0, 700]) {
+          final t = [...ts]..[at] = bad;
+          final m = hrvTime(nn, nnTimesMs: t);
+          expect(m.present, isFalse);
+          expect(m.note, 'non-finite beat time');
+        }
+        // Without times nothing about them is read.
+        expect(hrvTime(nn).present, isTrue);
+      });
+
+      test('nocturnalRmssd abstains on a beat time of $bad', () {
+        final m = nocturnalRmssd(nn, withLast(bad));
+        expect(m.present, isFalse);
+        expect(m.note, 'non-finite beat time');
+      });
+
+      test('sleepSessionRmssdDetail abstains on a beat time of $bad', () {
+        final start = 1700000000;
+        final abs = [for (final x in ts) start * 1000.0 + x];
+        abs[abs.length - 1] = bad;
+        final m = sleepSessionRmssdDetail(nn, abs,
+            startSec: start, endSec: start + 3 * 3600);
+        expect(m.present, isFalse);
+        expect(m.note, 'non-finite beat time');
+      });
+
+      test('hrvTimeAggregator refuses the slice, state unchanged, on $bad',
+          () {
+        final agg = hrvTimeAggregator(originMs: ts.first);
+        Beats beats(List<double> t) => Beats(
+            Float64List.fromList(nn.sublist(0, t.length)),
+            Float64List.fromList(t));
+        final state = agg.fold(beats(ts.sublist(0, 700)));
+        final before = agg.encodeState(state);
+        final badTs = [...ts.sublist(0, 100)]..[50] = bad;
+        expect(() => agg.addSlice(state, beats(badTs), 0, badTs.length),
+            throwsArgumentError);
+        expect(agg.encodeState(state), before);
+        expect(() => agg.fold(beats(badTs)), throwsArgumentError);
+        // Times are ignored when not gap-aware, so NaN stays fine there.
+        final plain = hrvTimeAggregator(gapAware: false);
+        expect(() => plain.fold(beats(badTs)), returnsNormally);
+      });
+
+      test('IncrementalHrvTime snapshot with a tail time of $bad is the batch',
+          () {
+        final inc = IncrementalHrvTime();
+        inc.sync(nn.sublist(0, 1400), nnTimesMs: ts.sublist(0, 1400));
+        final got = inc.sync(nn, nnTimesMs: withLast(bad));
+        expect(got.present, isFalse);
+        expect(got.note, 'non-finite beat time');
+        expect(got.note, hrvTime(nn, nnTimesMs: withLast(bad)).note);
+      });
     }
   });
 }
