@@ -959,6 +959,9 @@ class IrregularScreenState {
   // elementwise stream state over the corrected NN list
   bool _prevKept = false;
   double _prevV = 0;
+  // Time of the previous kept beat: a pair across a time hole is not
+  // successive (the batch's seam test). NaN = unknown, never within a seam.
+  double _prevT = double.nan;
   int _nKept = 0;
   // diff stats (adjacent kept pairs)
   int _dN = 0;
@@ -995,6 +998,7 @@ class IrregularScreenState {
         sustainedFraction: sustainedFraction)
       .._prevKept = _prevKept
       .._prevV = _prevV
+      .._prevT = _prevT
       .._nKept = _nKept
       .._dN = _dN
       .._dMean = _dMean
@@ -1012,12 +1016,13 @@ class IrregularScreenState {
   }
 
   void _flush() {
-    if (_bk.length >= minWindowBeats) {
+    final diffs = <double>[
+      for (var i = 1; i < _bk.length; i++)
+        if (_bkAdj[i]) _bk[i] - _bk[i - 1]
+    ];
+    // Valid on successive pairs, not beats (the batch's window rule).
+    if (diffs.length >= minWindowBeats - 1) {
       _valid++;
-      final diffs = <double>[
-        for (var i = 1; i < _bk.length; i++)
-          if (_bkAdj[i]) _bk[i] - _bk[i - 1]
-      ];
       final sdsd = stddev(diffs);
       final sdnn = stddev(_bk);
       if (sdsd != null && sdnn != null) {
@@ -1039,8 +1044,9 @@ class IrregularScreenState {
   void _add(double v, double tm) {
     final kept = v >= 300 && v <= 2000;
     if (kept) {
-      final adjacent = _prevKept; // previous INPUT element was kept
-      if (_prevKept) {
+      // previous INPUT element was kept and no time hole lies between them
+      final adjacent = _prevKept && tm - _prevT <= v + 0.5;
+      if (adjacent) {
         final d = v - _prevV;
         _dN++;
         final dl = d - _dMean;
@@ -1062,7 +1068,10 @@ class IrregularScreenState {
       _bkAdj.add(adjacent);
     }
     _prevKept = kept;
-    _prevV = v;
+    if (kept) {
+      _prevV = v;
+      _prevT = tm;
+    }
   }
 
   void fold(List<double> nn, List<double> t) {
@@ -1077,7 +1086,8 @@ class IrregularScreenState {
       double maxArtifact = 0.30}) {
     const inputs = ['rr_cleaned'];
     final c = _copy()..fold(tailNn, tailT);
-    if (c._nKept < minBeats) {
+    // The batch gates on the successive pairs it averages, not on beats.
+    if (c._dN < minBeats - 1) {
       return const Metric<IrregularRhythm>.absent(
         tier: Tier.estimate,
         inputs_used: inputs,
@@ -1142,6 +1152,7 @@ class IrregularScreenState {
   Map<String, dynamic> toJson() => {
         'prevKept': _prevKept,
         'prevV': _prevV,
+        'prevT': _prevT.isFinite ? _prevT : null,
         'nKept': _nKept,
         'dN': _dN,
         'dMean': _dMean,
@@ -1161,6 +1172,7 @@ class IrregularScreenState {
     final s = IrregularScreenState();
     s._prevKept = j['prevKept'] as bool;
     s._prevV = (j['prevV'] as num).toDouble();
+    s._prevT = (j['prevT'] as num?)?.toDouble() ?? double.nan;
     s._nKept = j['nKept'] as int;
     s._dN = j['dN'] as int;
     s._dMean = (j['dMean'] as num).toDouble();
