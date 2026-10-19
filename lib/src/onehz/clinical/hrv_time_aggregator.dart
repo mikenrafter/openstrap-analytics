@@ -5,6 +5,7 @@ import '../../aggregate/aggregator.dart';
 import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../incremental_core.dart';
+import 'hrv_jitter_evidence.dart';
 import 'hrv_time.dart';
 
 const double _fiveMinutesMs = 300000.0;
@@ -68,13 +69,18 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
         batchFromJson: Beats.fromJson),
   );
   final levels = Moments<Beats>((batch) => batch.nnMs);
+  // Under the ACF floor hrvTime reads the difference runs (hrv_jitter_evidence
+  // .dart); the checkpoint carries that evidence since version 2 of this
+  // aggregator's state, and a version 1 checkpoint (without it) is refused.
+  final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
 
   if (!gapAware) {
     final core = both(diffs, levels);
-    return validateCheckpoint(core, (json) => _validateCheckpoint(json, false))
-        .map((result) => _finish(
-        result.$1.$1, result.$1.$2, result.$2, const <int, RunningMoments>{},
-        gapAware: false));
+    return validateCheckpoint(both(core, evidence),
+            (json) => _validateVersioned(json, false))
+        .map((result) => _finish(result.$1.$1.$1, result.$1.$1.$2,
+            result.$1.$2, const <int, RunningMoments>{}, result.$2,
+            gapAware: false));
   }
 
   final bins = GroupBy<Beats, RunningMoments, RunningMoments>(
@@ -86,10 +92,27 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
     Moments<Beats>((batch) => batch.nnMs),
   );
   final core = both(diffs, both(levels, bins));
-  return validateCheckpoint(core, (json) => _validateCheckpoint(json, true))
-      .map((result) => _finish(
-      result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2,
-      gapAware: true));
+  return validateCheckpoint(
+          both(core, evidence), (json) => _validateVersioned(json, true))
+      .map((result) => _finish(result.$1.$1.$1, result.$1.$1.$2,
+          result.$1.$2.$1, result.$1.$2.$2, result.$2,
+          gapAware: true));
+}
+
+/// Version 2: `[core, evidence]`, the evidence counting what the core counts.
+void _validateVersioned(Object? json, bool gapAware) {
+  final state = decodeList(json);
+  if (state.length != 2) throw const FormatException('Expected core and evidence');
+  _validateCheckpoint(state[0], gapAware);
+  final core = decodeList(state[0]);
+  final evidence = decodeMap(state[1]);
+  final diffs = decodeMap(field(decodeMap(decodeList(core[0])[0]), 'inner'));
+  final rawLevels = gapAware ? decodeList(core[1])[0] : core[1];
+  if (decodeCount(field(evidence, 'n')) !=
+          decodeCount(field(decodeMap(rawLevels), 'count')) ||
+      decodeCount(field(evidence, 'nd')) != decodeCount(field(diffs, 'pairs'))) {
+    throw const FormatException('Evidence disagrees with the core');
+  }
 }
 
 void _validateCheckpoint(Object? json, bool gapAware) {
@@ -359,7 +382,8 @@ class _LagStats extends Aggregator<_LagState, Beats, _LagSummary> {
 }
 
 HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
-    Map<int, RunningMoments> bins, {required bool gapAware}) {
+    Map<int, RunningMoments> bins, JitterEvidence evidence,
+    {required bool gapAware}) {
   if (levels.count < 2) return HrvTime(nBeats: levels.count);
 
   double? acf1;
@@ -372,7 +396,12 @@ HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
           diffs.m2;
     }
   }
-  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
+  // Under the floor hrvTime refuses only when the runs show no respiratory
+  // line on a low floor, and then a timed night may still publish RMSSD from
+  // the windows on a breathing line steady in Hz: both read from [evidence].
+  final jittery =
+      acf1 != null && acf1 < kNnDiffAcf1Floor && evidence.refused();
+  final breathing = jittery && gapAware ? evidence.breathingRmssd() : null;
 
   double? sdann;
   double? sdnnIndex;
@@ -396,7 +425,7 @@ HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
     nBeats: levels.count,
     rmssd: diffs.pairs > 0 && !jittery
         ? math.sqrt(diffs.squares / diffs.pairs)
-        : null,
+        : breathing,
     pnn50: diffs.pairs > 0 && !jittery
         ? 100.0 * diffs.over50 / diffs.pairs
         : null,

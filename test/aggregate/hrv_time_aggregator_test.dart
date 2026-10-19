@@ -376,10 +376,18 @@ void main() {
         hrvSeries(r, 1200, 3, gapP: .004),
         hrvSeries(Rng(63), 4000, 4, gapP: 0),
       ];
+      // These series are thousands of beats long (the exemption needs 20 Welch
+      // segments in a run, the fallback 12 five-minute windows), so the split
+      // and associativity laws are checked at 10 split points, not 64.
       for (final c in group) {
-        expectLawful(hrvTimeAggregator(originMs: hrvOrigin(c)), [c],
-            equals: hrvEqAll);
-        expectLawful(hrvTimeAggregator(gapAware: false), [c], equals: hrvEqAll);
+        for (final agg in [
+          hrvTimeAggregator(originMs: hrvOrigin(c)),
+          hrvTimeAggregator(gapAware: false),
+        ]) {
+          final v = checkLaws(agg, [c], equals: hrvEqAll, maxSplits: 10);
+          expect(v, isEmpty,
+              reason: v.map((x) => '${x.law}: ${x.detail}').join('\n'));
+        }
       }
     });
 
@@ -452,13 +460,16 @@ void main() {
   group('checkpoint relationships (beat counts across the children)', () {
     final beats = hrvSeries(Rng(0x4A7), 60, 1, gapP: .08);
     final agg = hrvTimeAggregator(originMs: hrvOrigin(beats));
-    // State: [[diffs, lags], [levels, bins]]; diffs and lags are Lookback
-    // states ({length, first, last, inner}); levels is a Moments map and bins
-    // is {fiveMinuteBin: Moments}.
-    Map diffs(Object? s) => ((s as List)[0] as List)[0] as Map;
-    Map lags(Object? s) => ((s as List)[0] as List)[1] as Map;
-    Map levels(Object? s) => ((s as List)[1] as List)[0] as Map;
-    Map bins(Object? s) => ((s as List)[1] as List)[1] as Map;
+    // State (version 2): [core, evidence]; core is [[diffs, lags], [levels,
+    // bins]]; diffs and lags are Lookback states ({length, first, last,
+    // inner}); levels is a Moments map and bins is {fiveMinuteBin: Moments};
+    // evidence is the jitter-gate evidence map.
+    List core(Object? s) => (s as List)[0] as List;
+    Map diffs(Object? s) => (core(s)[0] as List)[0] as Map;
+    Map lags(Object? s) => (core(s)[0] as List)[1] as Map;
+    Map levels(Object? s) => (core(s)[1] as List)[0] as Map;
+    Map bins(Object? s) => (core(s)[1] as List)[1] as Map;
+    Map evidence(Object? s) => (s as List)[1] as Map;
 
     test('both lookbacks must have seen the same number of beats', () {
       expectDamagedCheckpointRefused(agg, beats, (s) {
@@ -492,6 +503,45 @@ void main() {
         (lags(s)['inner'] as Map)['pairs'] = 59;
         return s;
       });
+    });
+    test('a version 1 checkpoint (no jitter evidence) is refused whole', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) => core(s));
+    });
+    test('evidence of another type or version is refused', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['version'] = 2;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['type'] = 'Other';
+        return s;
+      });
+    });
+    test('evidence counting other beats or differences than the core', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['n'] = (evidence(s)['n'] as int) - 1;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['nd'] = (evidence(s)['nd'] as int) - 1;
+        return s;
+      });
+    });
+    test('evidence whose parts disagree is refused', () {
+      for (final damage in <void Function(Map)>[
+        (e) => (e['head'] as Map)['len'] = ((e['head'] as Map)['len'] as int) + 1,
+        (e) => (e['head'] as Map)['anchored'] = true,
+        (e) => (e['head'] as Map)['phases'] = <Object?>[],
+        (e) => ((e['head'] as Map)['cnt'] as List)[0] = 9999,
+        (e) => (e['wins'] as List).removeLast(),
+        (e) => e['headRun'] = null,
+        (e) => e['winNd'] = (e['nd'] as int) + 1,
+      ]) {
+        expectDamagedCheckpointRefused(agg, beats, (s) {
+          damage(evidence(s));
+          return s;
+        });
+      }
     });
     test('a consistent checkpoint restores', () {
       expect(
