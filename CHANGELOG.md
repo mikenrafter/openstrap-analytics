@@ -51,6 +51,17 @@
   coverage; an hour with no covered minute is null, not zero.
 
 ### Changed
+- `IrregularScreenState` checkpoints are version 3: they carry the previous kept
+  beat's time, because a pair across a time hole is no longer successive.
+  Versions 1 and 2, and a version 3 checkpoint without `prevT`, are refused.
+- `IncrementalHrvTime` follows `hrvTime`'s jitter gate under the ACF floor
+  (respiratory-line exemption, breathing-line fallback): when either could
+  apply it hands the night to the batch, so the incremental output equals
+  `hrvTime` where it used to refuse RMSSD. Checkpoint format unchanged.
+- `cvhrApneaScreen` abstains with 'non-finite beat time' on a NaN or infinite
+  beat time (as `rsaRespRate` / `hrvFreq` do); `CvhrStream` refuses such a
+  fold and answers a snapshot with such a tail the same way. Finite input:
+  output unchanged.
 - **Output change: hrvFreq / cardiacCoherence move at the ~1e-6 relative level;
   edge must bump kAlgoVersion when pinning this.** `lombScargle` now measures
   time from the first sample (`t - t.first`) instead of raw epoch seconds,
