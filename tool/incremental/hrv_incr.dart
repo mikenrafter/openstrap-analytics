@@ -6,8 +6,12 @@
 // returns; the provisional tail is RrSnapshot.tailNn/tailNnTimes.
 import 'dart:math' as math;
 
+import 'dart:typed_data';
+
+import 'package:openstrap_analytics/aggregate.dart' show Beats;
 import 'package:openstrap_analytics/onehz.dart'
     hide RrCorrector, RrSettled, RrSnapshot, IrregularScreenState;
+import 'package:openstrap_analytics/src/onehz/clinical/hrv_jitter_evidence.dart';
 
 // ===========================================================================
 // 1. hrvTime scalars: RMSSD, pNN50, SDNN, SDANN, SDNN-index, diffAcf1
@@ -34,6 +38,11 @@ class HrvTimeAcc {
   int segIdx = 0;
   List<double> cur = [];
   List<double> segMeans = [], segSds = [];
+  // Under the ACF floor hrvTime reads the difference runs (noise-share
+  // exemption, breathing-line fallback): the library's mergeable evidence for
+  // them, fed beat by beat (origin = the first beat).
+  JitterState ev = JitterState();
+  JitterEvidenceAggregator? _evAgg;
 
   HrvTimeAcc();
 
@@ -57,11 +66,16 @@ class HrvTimeAcc {
       ..segIdx = segIdx
       ..cur = List.of(cur)
       ..segMeans = List.of(segMeans)
-      ..segSds = List.of(segSds);
+      ..segSds = List.of(segSds)
+      ..ev = ev.copy()
+      .._evAgg = _evAgg;
     return c;
   }
 
   void add(double v, double t) {
+    _evAgg ??= JitterEvidenceAggregator(originMs: t, gapAware: true);
+    ev = _evAgg!.addSlice(
+        ev, Beats(Float64List.fromList([v]), Float64List.fromList([t])), 0, 1);
     if (n == 0) {
       t0 = t;
     } else if (t - prevT > v + .5) {
@@ -127,9 +141,14 @@ class HrvTimeAcc {
       final cov = prod - m * endp + lagPairs * m * m;
       acf1 = varSum > 0 ? cov / varSum : null;
     }
-    final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
-    final rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
+    final evidence = acf1 != null && acf1 < kNnDiffAcf1Floor
+        ? _evAgg!.finish(ev)
+        : null;
+    final jittery = evidence != null && evidence.refused();
+    var rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
     final pnn50 = (pairs > 0 && !jittery) ? 100.0 * over50 / pairs : null;
+    if (jittery) rmssd = evidence.breathingRmssd();
+    final byBreathing = jittery && rmssd != null;
     final sdnn = n >= 2 ? math.sqrt(wM2 / (n - 1)) : null;
     double? sdann, sdnnIndex;
     final means = [...segMeans], sds = [...segSds];
@@ -142,8 +161,10 @@ class HrvTimeAcc {
       sdnnIndex = sds.isEmpty ? null : mean(sds);
     }
     final q = acf1 == null ? 1.0 : (1 - acf1 / kNnDiffAcf1Floor).clamp(0.0, 1.0);
-    final conf =
-        ((n / 250.0).clamp(0.0, 1.0) * q * (1 - artifactFraction)).clamp(0.3, 0.95);
+    final conf = byBreathing
+        ? 0.3
+        : ((n / 250.0).clamp(0.0, 1.0) * q * (1 - artifactFraction))
+            .clamp(0.3, 0.95);
     return Metric<HrvTime>(
       value: HrvTime(
         rmssd: rmssd,
@@ -158,10 +179,12 @@ class HrvTimeAcc {
       tier: Tier.high,
       inputs_used: inputs,
       note: jittery
-          ? 'rmssd_refused:acf1=${acf1.toStringAsFixed(3)} — the NN successive '
+          ? 'rmssd_refused:acf1=${acf1!.toStringAsFixed(3)} — the NN successive '
               'differences are essentially differenced white noise (−0.5 = pure, floor '
               '$kNnDiffAcf1Floor), so RMSSD/pNN50 would measure beat-timing jitter, not '
-              'vagal tone. SDNN/SDANN survive it and are the lead here. PRV not ECG-HRV.'
+              'vagal tone. SDNN/SDANN survive it and are the lead here. '
+              '${byBreathing ? 'RMSSD only from 5-min windows on a breathing '
+                  'line steady in Hz, at floor confidence. ' : ''}PRV not ECG-HRV.'
           : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
               '— lead with SDNN/SDANN',
     );
@@ -187,6 +210,7 @@ class HrvTimeAcc {
         'cur': cur,
         'segMeans': segMeans,
         'segSds': segSds,
+        'ev': _evAgg == null ? null : _evAgg!.encodeState(ev),
       };
 
   factory HrvTimeAcc.fromJson(Map<String, dynamic> j) {
@@ -210,7 +234,14 @@ class HrvTimeAcc {
       ..segIdx = j['segIdx'] as int
       ..cur = dl(j['cur'])
       ..segMeans = dl(j['segMeans'])
-      ..segSds = dl(j['segSds']);
+      ..segSds = dl(j['segSds'])
+      .._restoreEvidence(j['ev']);
+  }
+
+  void _restoreEvidence(Object? e) {
+    if (e == null || n == 0) return;
+    _evAgg = JitterEvidenceAggregator(originMs: t0, gapAware: true);
+    ev = _evAgg!.decodeState(e);
   }
 }
 

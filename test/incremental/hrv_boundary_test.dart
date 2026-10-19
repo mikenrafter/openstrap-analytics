@@ -144,4 +144,47 @@ void main() {
       }
     }
   });
+
+  // Under the ACF floor hrvTime reads the difference runs: a respiratory line
+  // exempts the night, a refused one may publish from a breathing line
+  // steady in Hz. HrvTimeAcc carries the library's mergeable evidence for both.
+  for (final (name, mode, n) in [
+    ('exempt (RSA at a slow heart)', 3, 1200),
+    ('breathing line steady in Hz', 4, 4200),
+  ]) {
+    test('hrvTime below the floor: $name, chunks + restarts', () {
+      final r = math.Random(mode);
+      final nn = <double>[], t = <double>[];
+      var clock = 1e6;
+      for (var i = 0; i < n; i++) {
+        final s = (clock - 1e6) / 1000;
+        final v = mode == 3
+            ? 1350 + 80 * math.sin(2 * math.pi * s / 3600) +
+                40 * math.sin(2 * math.pi * .3 * s) + 3 * (r.nextDouble() - .5)
+            : 900 + 400 * s / 9000 + 10 * math.sin(2 * math.pi * .25 * s) +
+                40 * (r.nextDouble() - .5);
+        clock += v;
+        nn.add(v);
+        t.add(clock);
+      }
+      final whole = hrvTime(nn, nnTimesMs: t);
+      expect(whole.value!.diffAcf1, lessThan(kNnDiffAcf1Floor));
+      expect(whole.value!.rmssd, isNotNull, reason: 'the batch publishes');
+      var acc = HrvTimeAcc();
+      var at = 0;
+      for (final cut in randomCuts(math.Random(9), n, sizes: [37, 400, 1300])) {
+        acc.fold(nn.sublist(at, cut), t.sublist(at, cut));
+        acc = HrvTimeAcc.fromJson(jsonRoundTrip(acc.toJson()));
+        at = cut;
+        final want = hrvTime(nn.sublist(0, cut), nnTimesMs: t.sublist(0, cut));
+        final got = acc.evaluate(const [], const []);
+        expect(got.note, want.note, reason: 'cut=$cut');
+        expect(got.value!.rmssd == null, want.value!.rmssd == null, reason: 'cut=$cut');
+        if (want.value!.rmssd != null) {
+          expect((got.value!.rmssd! - want.value!.rmssd!).abs(),
+              lessThan(1e-9 * want.value!.rmssd!), reason: 'cut=$cut');
+        }
+      }
+    });
+  }
 }
