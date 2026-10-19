@@ -13,6 +13,11 @@ class IncrementalHrvTime {
   double _diffSum = 0, _diffSquares = 0, _products = 0, _endpoints = 0;
   double? _lastDiff;
   bool _finite = true;
+  // Evidence for the jitter gate below the ACF floor, derived from the series
+  // (not checkpointed; rebuilt from `nn` / `times` on restore): the Welch
+  // segments `nnDiffNoiseShare` would see (64 points, stride 32, per
+  // contiguous run). See [sync] for why under 20 the batch can only refuse.
+  int _closedSegments = 0, _runDiffs = 0;
 
   IncrementalHrvTime();
   factory IncrementalHrvTime.fromJson(Map<String, dynamic> json) {
@@ -66,7 +71,26 @@ class IncrementalHrvTime {
         ((!timed || !state._finite) && state._bins.isNotEmpty)) {
       throw const FormatException('Inconsistent HRV checkpoint');
     }
+    if (state._finite) {
+      for (var i = 0; i < state._nn.length; i++) {
+        state._evidence(i, state._nn, timed ? state._times : null);
+      }
+    }
     return state;
+  }
+
+  static int _segmentsOf(int diffs) => diffs + 1 < 64 ? 0 : (diffs + 1 - 64) ~/ 32 + 1;
+
+  /// Updates the jitter-gate evidence for point [i] of [nn] ([times] when the
+  /// series is timed), splitting runs exactly as `hrvTime` does.
+  void _evidence(int i, List<double> nn, List<double>? times) {
+    if (i == 0) return;
+    if (times != null && times[i] - times[i - 1] > nn[i] + .5) {
+      _closedSegments += _segmentsOf(_runDiffs);
+      _runDiffs = 0;
+    } else {
+      _runDiffs++;
+    }
   }
   int get processedPoints => _processedPoints;
   Metric<HrvTime> sync(List<double> nnMs,
@@ -95,6 +119,7 @@ class IncrementalHrvTime {
     if (!append) _reset();
     for (var i = _nn.length; i < nnMs.length; i++) {
       final value = nnMs[i];
+      _evidence(i, nnMs, timed ? nnTimesMs : null);
       _levels.add(value);
       if (i > 0) {
         if (timed && nnTimesMs[i] - nnTimesMs[i - 1] > value + .5) {
@@ -153,6 +178,21 @@ class IncrementalHrvTime {
       }
     }
     final jittery = acf != null && acf < kNnDiffAcf1Floor;
+    // Under the floor the batch refuses only when the spectrum shows no
+    // respiratory line on a low floor, and a refused timed night may still
+    // publish from windows on a breathing line steady in Hz (hrv_time.dart
+    // `_jitterRefused`, `_breathingRmssd`). Both read the difference runs, so
+    // when either could apply the batch decides, on the series handed in.
+    // With fewer than 20 segments neither can: the noise share is null (the
+    // night is refused), and the breathing test needs 12 windows each holding
+    // a contiguous run of 127 differences, which alone makes at least 3
+    // segments per window (36). So a short or fragmented refused night stays
+    // on the sums.
+    if (jittery && _closedSegments + _segmentsOf(_runDiffs) >= 20) {
+      _processedPoints += nnMs.length;
+      return hrvTime(nnMs,
+          nnTimesMs: nnTimesMs, artifactFraction: artifactFraction);
+    }
     final quality =
         acf == null ? 1.0 : (1 - acf / kNnDiffAcf1Floor).clamp(0.0, 1.0);
     return Metric<HrvTime>(
@@ -194,6 +234,7 @@ class IncrementalHrvTime {
     _diffSum = _diffSquares = _products = _endpoints = 0;
     _lastDiff = null;
     _finite = true;
+    _closedSegments = _runDiffs = 0;
   }
 
   Map<String, dynamic> toJson() => {

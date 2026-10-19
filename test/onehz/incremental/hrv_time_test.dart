@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 import '../support/incremental_compare.dart';
@@ -88,6 +90,62 @@ void main() {
       hrvClose(state.sync(nn, nnTimesMs: times), hrvTime(nn, nnTimesMs: times));
     }
   });
+  // Below the ACF floor upstream's hrvTime reads the difference runs: a
+  // respiratory line on a low floor exempts the night, and a refused night may
+  // publish from the windows on a breathing line steady in Hz. Both are batch
+  // decisions the stream must reproduce at every prefix.
+  ({List<double> nn, List<double> t}) breathing(
+      {required double hours,
+      required double baseMs,
+      required double driftMs,
+      required double breathMs,
+      required double breathHz,
+      required double jitterMs}) {
+    final r = math.Random(7);
+    final nn = <double>[], t = <double>[];
+    var clock = 0.0;
+    while (clock < hours * 3.6e6) {
+      final v = baseMs +
+          driftMs * clock / (hours * 3.6e6) +
+          breathMs * math.sin(2 * math.pi * breathHz * clock / 1000) +
+          jitterMs * (r.nextDouble() - .5);
+      clock += v;
+      nn.add(v);
+      t.add(clock);
+    }
+    return (nn: nn, t: t);
+  }
+
+  for (final (name, x, note) in [
+    (
+      'a respiratory line exempts the night',
+      breathing(
+          hours: 1, baseMs: 1350, driftMs: 80, breathMs: 40, breathHz: .3,
+          jitterMs: 3),
+      'PRV not ECG-HRV; RMSSD/pNN50',
+    ),
+    (
+      'a refused night publishes from a breathing line steady in Hz',
+      breathing(
+          hours: 2.5, baseMs: 900, driftMs: 400, breathMs: 10, breathHz: .25,
+          jitterMs: 40),
+      'breathing line steady in Hz',
+    ),
+  ]) {
+    test('HRV below the ACF floor: $name', () {
+      final whole = hrvTime(x.nn, nnTimesMs: x.t);
+      expect(whole.value!.diffAcf1, lessThan(kNnDiffAcf1Floor),
+          reason: 'the fixture is under the floor');
+      expect(whole.value!.rmssd, isNotNull, reason: 'and the batch publishes');
+      expect(whole.note, contains(note), reason: 'by the path named');
+      var state = IncrementalHrvTime();
+      for (final n in prefixSizes(x.nn.length, 701)) {
+        final nn = x.nn.sublist(0, n), t = x.t.sublist(0, n);
+        hrvClose(state.sync(nn, nnTimesMs: t), hrvTime(nn, nnTimesMs: t));
+        state = IncrementalHrvTime.fromJson(checkpoint(state.toJson()));
+      }
+    });
+  }
   test('HRV real capture chunk parity includes cleaned beat times', () {
     final f = realIncrementalFixture();
     expect(f.nn.length, greaterThan(300));
