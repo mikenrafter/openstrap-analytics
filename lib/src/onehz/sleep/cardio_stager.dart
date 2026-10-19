@@ -90,7 +90,26 @@ class CardioStagerResult {
   final StagerResult base;
   final List<bool> deepFlag;
   final double confidence;
-  const CardioStagerResult(this.base, this.deepFlag, this.confidence);
+
+  /// Per-epoch REM / deep scores as the classify loop computed them, BEFORE
+  /// the mode filter, Webster rescore and consolidation. Null where the epoch
+  /// was decided wake first (no score taken) or no axis was measurable. Same
+  /// length as `base.stages`, or empty when the stager abstained or the result
+  /// was built without them. Read through `epochEvidence` (stage_ranges.dart).
+  final List<double?> remScores;
+  final List<double?> deepScores;
+
+  /// Per-epoch: the epoch carried at least one valid HR sample.
+  final List<bool> hrCovered;
+
+  const CardioStagerResult(
+    this.base,
+    this.deepFlag,
+    this.confidence, {
+    this.remScores = const [],
+    this.deepScores = const [],
+    this.hrCovered = const [],
+  });
 }
 
 const int _epochSec = 30;
@@ -1102,6 +1121,10 @@ CardioStagerResult classifyCardioEpochs(
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
   final deepFlag = List<bool>.filled(nEpoch, false);
+  // Evidence only: recorded for stageMinuteRanges, never read back here, so
+  // the labels below are unchanged by keeping them.
+  final remScores = List<double?>.filled(nEpoch, null);
+  final deepScores = List<double?>.filled(nEpoch, null);
   for (var e = 0; e < nEpoch; e++) {
     final hrMed = hrMedLocal[e];
     final hrArousal = hrArousalLocal[e];
@@ -1189,6 +1212,8 @@ CardioStagerResult classifyCardioEpochs(
       (sdnnZ, -_wDeepSdnn),
       (lfhfZ, -_wDeepLfhf),
     ]);
+    remScores[e] = remScore;
+    deepScores[e] = deepScore;
 
     // Atonia and the HR floor are RETAINED as gates, not folded into the score:
     // they are not weak evidence for REM, they are preconditions. A large
@@ -1282,6 +1307,9 @@ CardioStagerResult classifyCardioEpochs(
     ),
     deepFlag,
     conf,
+    remScores: remScores,
+    deepScores: deepScores,
+    hrCovered: [for (var e = 0; e < nEpoch; e++) !hr[e].isNaN],
   );
 }
 

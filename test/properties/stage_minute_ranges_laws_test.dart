@@ -42,7 +42,29 @@ final Gen<_Ep> _ep = G.triple(
   G.intIn(0, 2, origin: 2),
 );
 
-final Gen<List<_Ep>> _night = G.listOf(_ep, minLen: 1, maxLen: 240);
+final Gen<List<_Ep>> _night =
+    _SometimesAllCovered(G.listOf(_ep, minLen: 1, maxLen: 240));
+
+/// Per-epoch coverage is drawn independently, so a night of any length is
+/// almost never covered end to end. A fifth of the nights are forced fully
+/// covered so L1 meets that case (it is the shape a good night has).
+class _SometimesAllCovered extends Gen<List<_Ep>> {
+  _SometimesAllCovered(this.inner);
+  final Gen<List<_Ep>> inner;
+
+  @override
+  List<_Ep> generate(Rng r, int size) {
+    final n = inner.generate(r, size);
+    if (!r.nextBool(.2)) return n;
+    return [for (final (l, s, _) in n) (l, s, 2)];
+  }
+
+  @override
+  Iterable<List<_Ep>> shrink(List<_Ep> v) => inner.shrink(v);
+
+  @override
+  String show(List<_Ep> v) => inner.show(v);
+}
 
 StageEpochEvidence _evidence(_Ep e, {required bool covered}) {
   final (label, (rem, deep), _) = e;

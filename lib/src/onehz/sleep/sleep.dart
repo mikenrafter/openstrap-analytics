@@ -39,6 +39,7 @@ export 'accounting.dart';
 // `autonomicStager` is DELETED — `cardioStager` is the stager.
 export 'stager.dart';
 export 'cardio_stager.dart';
+export 'stage_ranges.dart';
 export 'cardio_row_cache.dart';
 export 'causal_stager.dart';
 export 'cpc.dart';

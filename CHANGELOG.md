@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Added
+- `stageMinuteRanges`: a [lo, hi] range of minutes per sleep stage (wake,
+  light, deep, REM, and NREM = light + deep). `lo` counts epochs that can only
+  be that stage: HR-covered, labelled so, and every deciding score at least
+  `kStageScoreMargin` (0.1) from its cutoff. `hi` adds epochs that could still
+  be that stage: uncovered or unlabelled epochs (any stage), and epochs with a
+  score inside the margin (REM score: REM and its NREM substage; deep score:
+  light and deep). An honest bound, not a confidence interval: the stager has
+  no per-epoch probabilities. Null for no epochs.
+- `CardioStagerResult.epochEvidence` (with `StageEpochEvidence`): per final
+  epoch, the label, deep flag, HR coverage and the REM/deep scores the classify
+  loop computed. `CardioStagerResult` carries `remScores`, `deepScores` and
+  `hrCovered` for it. Stage labels are unchanged.
 - `irregularBeatScreenDetailed` and `IrregularScreenState.evaluateDetailed`: the
   irregular-rhythm screen's verdict plus its evidence (`IrregularDiagnostics`) —
   beats in / kept after the [300, 2000] ms filter, the corrector's raw /
