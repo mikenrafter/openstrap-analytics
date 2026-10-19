@@ -73,6 +73,11 @@ void main() {
       'slow beats spanning many bins': hrvSeries(Rng(7), 380, 2, gapP: .02),
       'many holes': hrvSeries(Rng(8), 200, 0, gapP: .3),
       'alternating runs': _alternatingRuns(4),
+      'RSA at a slow heart, exempt from the jitter floor':
+          hrvSeries(Rng(61), 900, 3, gapP: 0),
+      'RSA at a slow heart with holes': hrvSeries(Rng(62), 1500, 3, gapP: .004),
+      'refused, published from a breathing line steady in Hz':
+          hrvSeries(Rng(63), 4000, 4, gapP: 0),
       'a hole of several bins': hrvBeats([
         for (var i = 0; i < 40; i++)
           (nnMs: 800.0, timeMs: hrvT0 + (i + 1) * 800.0),
@@ -127,6 +132,41 @@ void main() {
       expect(v.diffAcf1, isNull); // fewer than 30 diffs
       expect(v.sdann, isNull); // a single 5-minute segment
       expect(v.sdnnIndex, isNull);
+    });
+  });
+
+  group('below the jitter floor (the batch reads the difference runs)', () {
+    test('the series reach the paths they name', () {
+      final exempt = hrvTime(
+          hrvSeries(Rng(61), 900, 3, gapP: 0).nnMs.toList(),
+          nnTimesMs: hrvSeries(Rng(61), 900, 3, gapP: 0).timeMs.toList());
+      expect(exempt.value!.diffAcf1, lessThan(kNnDiffAcf1Floor));
+      expect(exempt.value!.rmssd, isNotNull);
+      expect(exempt.note, startsWith('PRV not ECG-HRV'));
+      final b = hrvSeries(Rng(63), 4000, 4, gapP: 0);
+      final fallback = hrvTime(b.nnMs.toList(), nnTimesMs: b.timeMs.toList());
+      expect(fallback.value!.diffAcf1, lessThan(kNnDiffAcf1Floor));
+      expect(fallback.value!.rmssd, isNotNull);
+      expect(fallback.note, contains('breathing line steady in Hz'));
+      // Without times the same series is refused (no windows to fall back on).
+      expect(hrvTime(b.nnMs.toList()).value!.rmssd, isNull);
+    });
+
+    test('random slow-heart and breathing-line series: whole, chunked, sliced',
+        () {
+      final r = Rng(0x5C14);
+      for (var t = 0; t < 16; t++) {
+        final mode = 3 + t % 2;
+        final n = mode == 3 ? r.intIn(600, 1600) : r.intIn(3800, 4400);
+        final beats = hrvSeries(r, n, mode, gapP: r.nextBool() ? 0 : .003);
+        for (final ga in [true, false]) {
+          final want = hrvExpected(beats, gapAware: ga);
+          final a = _agg(beats, gapAware: ga);
+          expectHrvParity(a.run(beats), want, 'case $t n=$n ga=$ga whole');
+          _expectAllPaths(
+              a, beats, randomBounds(r, n), want, 'case $t n=$n ga=$ga');
+        }
+      }
     });
   });
 
@@ -328,6 +368,20 @@ void main() {
           hrvSeries(r, r.intIn(0, maxN), r.intIn(0, 2), gapP: .08),
       ];
     }
+
+    test('below the jitter floor, gap aware and not, is lawful', () {
+      final r = Rng(0x5D05);
+      final group = [
+        hrvSeries(Rng(61), 900, 3, gapP: 0),
+        hrvSeries(r, 1200, 3, gapP: .004),
+        hrvSeries(Rng(63), 4000, 4, gapP: 0),
+      ];
+      for (final c in group) {
+        expectLawful(hrvTimeAggregator(originMs: hrvOrigin(c)), [c],
+            equals: hrvEqAll);
+        expectLawful(hrvTimeAggregator(gapAware: false), [c], equals: hrvEqAll);
+      }
+    });
 
     test('gap aware is lawful (cases grouped by origin)', () {
       final byOrigin = <double?, List<Beats>>{};
