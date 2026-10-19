@@ -128,6 +128,16 @@ Metric<CvhrResult> cvhrApneaScreen(
   }
 
   final tSec = [for (final t in nnTimesMs) t / 1000.0];
+  // A non-finite beat time has no place on the 1 Hz grid: NaN slipped past
+  // every gap test and then failed the resample, and an infinite one would be
+  // a stretch of its own. Same answer as rsaRespRate / hrvFreq.
+  if (tSec.any((t) => !t.isFinite)) {
+    return const Metric<CvhrResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
   if (tSec.last - tSec.first <= 0) {
     return const Metric<CvhrResult>.absent(
       tier: Tier.high,
@@ -353,6 +363,11 @@ class CvhrStream {
     }
     if (nnMs.isEmpty) return;
     final times = [for (final t in nnTimesMs) t / 1000.0];
+    // Checked before any state changes (a fold cannot be undone): the batch
+    // abstains on such a time, so no snapshot after it could be the batch's.
+    if (times.any((t) => !t.isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
     if (!_cvhrNondecreasing(times) ||
         (_last != null && times.first < _last!)) {
       throw StateError('beat times must be non-decreasing');
@@ -401,6 +416,15 @@ class CvhrStream {
         inputs_used: inputs,
         note: 'artifact fraction ${round6(artifactFraction)} > gate '
             '— CVHR dip detection unreliable',
+      );
+    }
+    // The folded times are finite (fold refuses others); a non-finite tail
+    // time gets the batch's answer.
+    if (tailTimes.any((t) => !t.isFinite)) {
+      return const Metric<CvhrResult>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'non-finite beat time',
       );
     }
     // Nothing folded yet: the tail's first beat is the origin, as in the batch.

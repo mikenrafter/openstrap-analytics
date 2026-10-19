@@ -2,6 +2,8 @@
 // sub-windows forever (an infinite last time is never reached), which ran a
 // test isolate out of memory on the dev box. They abstain now, and the
 // streams refuse such a fold and answer a snapshot with the batch.
+// cvhrApneaScreen / CvhrStream follow the same rule: CvhrStream took a NaN
+// time and its snapshot then threw where the batch answered.
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
@@ -23,17 +25,23 @@ void main() {
       final h = hrvFreq(nn, withLast(bad), artifactFraction: 0);
       expect(h.present, isFalse);
       expect(h.note, 'non-finite beat time');
+      final c = cvhrApneaScreen(nn, withLast(bad), artifactFraction: 0);
+      expect(c.present, isFalse);
+      expect(c.note, 'non-finite beat time');
     });
 
     test('streams refuse the fold, unchanged, on $bad', () {
       final r = RsaRespStream()..fold(nn.sublist(0, 700), ts.sublist(0, 700));
       final h = HrvFreqStream()..fold(nn.sublist(0, 700), ts.sublist(0, 700));
-      final rBefore = r.toJson(), hBefore = h.toJson();
+      final c = CvhrStream()..fold(nn.sublist(0, 700), ts.sublist(0, 700));
+      final rBefore = r.toJson(), hBefore = h.toJson(), cBefore = c.toJson();
       final badTs = [...ts.sublist(700, 800)]..[50] = bad;
       expect(() => r.fold(nn.sublist(700, 800), badTs), throwsArgumentError);
       expect(() => h.fold(nn.sublist(700, 800), badTs), throwsArgumentError);
+      expect(() => c.fold(nn.sublist(700, 800), badTs), throwsArgumentError);
       expect(r.toJson(), rBefore);
       expect(h.toJson(), hBefore);
+      expect(c.toJson(), cBefore);
     });
   }
 
@@ -50,5 +58,14 @@ void main() {
         h.snapshot(tailNnMs: tailNn, tailNnTimesMs: tailTs, artifactFraction: 0)
             .note,
         'non-finite beat time');
+    final c = CvhrStream()..fold(nn.sublist(0, 1400), ts.sublist(0, 1400));
+    for (final bad in [double.infinity, double.nan]) {
+      final tail = withLast(bad).sublist(1400);
+      final got =
+          c.snapshot(tailNnMs: tailNn, tailNnTimesMs: tail, artifactFraction: 0);
+      expect(got.note, 'non-finite beat time');
+      expect(got.note,
+          cvhrApneaScreen(nn, withLast(bad), artifactFraction: 0).note);
+    }
   });
 }
