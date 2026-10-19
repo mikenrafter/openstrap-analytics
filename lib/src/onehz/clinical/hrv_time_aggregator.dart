@@ -92,11 +92,47 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
     Moments<Beats>((batch) => batch.nnMs),
   );
   final core = both(diffs, both(levels, bins));
-  return validateCheckpoint(
-          both(core, evidence), (json) => _validateVersioned(json, true))
+  return _FiniteTimes(validateCheckpoint(
+          both(core, evidence), (json) => _validateVersioned(json, true)))
       .map((result) => _finish(result.$1.$1.$1, result.$1.$1.$2,
           result.$1.$2.$1, result.$1.$2.$2, result.$2,
           gapAware: true));
+}
+
+/// Refuses a slice holding a non-finite beat time before any state changes
+/// (a fold cannot be undone), as the other night streams do. Gap-aware only:
+/// without gap awareness times are never read.
+class _FiniteTimes<S, R> extends Aggregator<S, Beats, R> {
+  const _FiniteTimes(this.inner);
+  final Aggregator<S, Beats, R> inner;
+
+  @override
+  S empty() => inner.empty();
+
+  @override
+  S addSlice(S state, Beats batch, int start, int end) {
+    for (var i = start; i < end; i++) {
+      if (!batch.timeMs[i].isFinite) {
+        throw ArgumentError('beat times must be finite');
+      }
+    }
+    return inner.addSlice(state, batch, start, end);
+  }
+
+  @override
+  S combine(S left, S right) => inner.combine(left, right);
+
+  @override
+  R finish(S state) => inner.finish(state);
+
+  @override
+  bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+
+  @override
+  S decodeState(Object? json) => inner.decodeState(json);
 }
 
 /// Version 2: `[core, evidence]`, the evidence counting what the core counts.

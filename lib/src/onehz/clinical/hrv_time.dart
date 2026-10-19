@@ -422,6 +422,18 @@ Metric<HrvTime> hrvTime(
     );
   }
 
+  // A non-finite beat time has no place on the clock: the 5-min segmenting
+  // threw on it. Same refusal as hrvFreq / rsaRespRate.
+  if (nnTimesMs != null &&
+      nnTimesMs.length == nnMs.length &&
+      nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
   // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
@@ -605,6 +617,13 @@ Metric<double> nocturnalRmssd(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few NN intervals for windowed nocturnal RMSSD',
+    );
+  }
+  if (nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
     );
   }
   final t0 = nnTimesMs.first;
@@ -824,6 +843,14 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'invalid or empty RR session window',
+    );
+  }
+
+  if (rrTsMs.any((t) => !t.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
     );
   }
 
