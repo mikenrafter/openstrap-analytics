@@ -46,7 +46,10 @@
 //        text, refusal of another version / unknown reason / malformed map, and
 //        the "absent, not zero" rules for the cleaning counts.
 //
-// The laws describe the code at analytics 0fc57682. A failing law is first
+// The laws describe the code at analytics 0fc57682, with upstream's screen
+// rules since (f026a4e merge): a pair across a time hole is not successive, the
+// beat gate and window validity count successive pairs (minBeats - 1), and the
+// screen checkpoint is version 3 (it carries the previous beat's time). A failing law is first
 // checked against the module's contract; only a violation of the intended
 // contract is a bug, and a wrong oracle is fixed here, never in lib/.
 //
@@ -1031,18 +1034,35 @@ void _close(double got, double want, String why, {double rel = 1e-9}) {
   }
 }
 
+/// Whether input beat [i] and the one before it form a successive pair, from
+/// the documented rule alone: both kept (300..2000 ms), neighbours in the input
+/// and, when beat times are given, no time hole between them (the elapsed time
+/// is at most the interval, +0.5 ms of rounding; a NaN time is never within).
+bool _successive(List<double> nn, List<double>? t, int i) {
+  bool kept(double v) => v >= 300 && v <= 2000;
+  return i > 0 &&
+      kept(nn[i]) &&
+      kept(nn[i - 1]) &&
+      (t == null || t[i] - t[i - 1] <= nn[i] + 0.5);
+}
+
 /// The kept beats of [nn] (300..2000 ms) and the successive differences taken
-/// only between two kept neighbours, from the documented rule alone.
-({List<double> kept, List<double> diffs}) _keptAndDiffs(List<double> nn) {
+/// only between two successive beats (see [_successive]), from the documented
+/// rule alone.
+({List<double> kept, List<double> diffs}) _keptAndDiffs(
+    List<double> nn, List<double>? t) {
   bool kept(double v) => v >= 300 && v <= 2000;
   return (
     kept: [for (final v in nn) if (kept(v)) v],
     diffs: [
       for (var i = 1; i < nn.length; i++)
-        if (kept(nn[i]) && kept(nn[i - 1])) nn[i] - nn[i - 1]
+        if (_successive(nn, t, i)) nn[i] - nn[i - 1]
     ],
   );
 }
+
+/// The successive pairs the screen gates on (its minimum is minBeats - 1).
+int _pairsOf(List<double> nn, List<double>? t) => _keptAndDiffs(nn, t).diffs.length;
 
 /// Whether SD2 is numerically zero for [nn]: 2*SDNN^2 - SD1^2 is within 1e-9 of
 /// its own scale of nothing (an exactly two-valued alternating series is the
@@ -1050,8 +1070,8 @@ void _close(double got, double want, String why, {double rel = 1e-9}) {
 /// variability" versus a tiny SD2 and a ratio of 1e8, and running sums and a
 /// two-pass batch legitimately disagree. Computed independently, from the
 /// documented rule.
-bool _sd2Degenerate(List<double> nn) {
-  final k = _keptAndDiffs(nn);
+bool _sd2Degenerate(List<double> nn, List<double>? t) {
+  final k = _keptAndDiffs(nn, t);
   final sdnn = _sd(k.kept), sdsd = _sd(k.diffs);
   if (sdnn == null || sdsd == null || sdnn == 0) return false;
   final v = 2 * sdnn * sdnn - sdsd * sdsd / 2;
@@ -1090,11 +1110,14 @@ void _expectNumericallyZeroSd2(IrregularRhythm r, String why) {
 /// exactly one side reports, the other must abstain with
 /// `noLongTermVariability` and the reported SD2 must be numerically zero.
 void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String why,
-    {List<double>? nn, double? pnnThresholdMs, double? artifactFraction}) {
+    {List<double>? nn,
+    List<double>? t,
+    double? pnnThresholdMs,
+    double? artifactFraction}) {
   assert(nn == null || (pnnThresholdMs != null && artifactFraction != null),
       'the independent values need the pNN threshold and the artifact fraction');
   final g = got.metric, w = want.metric;
-  final degenerate = nn != null && _sd2Degenerate(nn);
+  final degenerate = nn != null && _sd2Degenerate(nn, t);
   final ambiguous = degenerate && g.present != w.present;
   String diagText(IrregularScreenResult r, {bool noAbstain = false}) {
     final j = r.diagnostics.toJson();
@@ -1115,7 +1138,7 @@ void _sameScreen(IrregularScreenResult got, IrregularScreenResult want, String w
     expect(abs.metric.confidence, 0, reason: 'absent => confidence 0 $why');
     final v = rep.metric.value!;
     _expectNumericallyZeroSd2(v, why);
-    final k = _keptAndDiffs(nn);
+    final k = _keptAndDiffs(nn, t);
     expect(v.nBeats, k.kept.length, reason: 'nBeats $why');
     expect(v.nBeats, rep.diagnostics.nnKept, reason: 'nBeats is the kept count $why');
     _close(v.sd1, _sd(k.diffs)! / math.sqrt2, 'sd1 against the independent value $why');
@@ -1165,17 +1188,18 @@ double? _sd(List<double> x) {
   return math.sqrt(ss / (x.length - 1));
 }
 
-/// Verdict of one closed window of kept beats: null when thinner than
-/// [minBeats]; else whether SD1/SD2 and pNNx both clear their flag lines. A
-/// difference is taken only between two beats that were neighbours in the
-/// input (never across a skipped beat).
+/// Verdict of one closed window of kept beats: null when it holds fewer than
+/// [minBeats] - 1 successive differences (validity counts pairs, not beats);
+/// else whether SD1/SD2 and pNNx both clear their flag lines. A difference is
+/// taken only between two successive beats (never across a skipped beat or a
+/// time hole).
 bool? _refVerdict(List<double> v, List<bool> adj, double flag, double pnnMs,
     double pnnPct, int minBeats) {
-  if (v.length < minBeats) return null;
   final d = <double>[
     for (var i = 1; i < v.length; i++)
       if (adj[i]) v[i] - v[i - 1]
   ];
+  if (d.length < minBeats - 1) return null;
   final sdsd = _sd(d), sdnn = _sd(v);
   if (sdsd == null || sdnn == null) return false;
   final sd1 = sdsd / math.sqrt2;
@@ -1207,7 +1231,6 @@ _RefWindows _refWindows(List<double> nn, List<double> t, int cfg) {
   var vals = <double>[], adj = <bool>[];
   double? start;
   var kept = 0;
-  var prevKept = false;
   void close() {
     if (vals.isEmpty) return;
     sizes.add(vals.length);
@@ -1226,9 +1249,8 @@ _RefWindows _refWindows(List<double> nn, List<double> t, int cfg) {
         start = t[i];
       }
       vals.add(nn[i]);
-      adj.add(prevKept);
+      adj.add(_successive(nn, t, i));
     }
-    prevKept = isKept;
   }
   close();
   expect(sizes.fold<int>(0, (a, b) => a + b), kept,
@@ -1470,6 +1492,7 @@ void _scL1b(_NnCase c) {
     final why = '$tag seam $k at $at tail to $tailEnd';
     _sameScreen(got, want, why,
         nn: s.nn.sublist(0, tailEnd),
+        t: s.t.sublist(0, tailEnd),
         pnnThresholdMs: _scCfgs[cfg].$2,
         artifactFraction: _evals[ev].$3);
     _expectEvidence(got, s.nn.sublist(0, tailEnd), s.t.sublist(0, tailEnd), cfg, why);
@@ -1518,9 +1541,10 @@ void _scL2(_NnCase c) {
   List l(String k) => j[k] as List;
   switch (kind % 11) {
     case 0:
-      // Version 1 (before the diagnostics counters) is REFUSED, not restored
-      // with counts it never kept; so is everything else but 2.
-      const versions = <Object?>[0, 1, 3, -1, 99, '2', null, true, 1 << 40];
+      // Version 1 (before the diagnostics counters) and version 2 (before the
+      // previous beat's time) are REFUSED, not restored with state they never
+      // kept; so is everything else but 3.
+      const versions = <Object?>[0, 1, 2, -1, 99, '3', null, true, 1 << 40];
       j['version'] = versions[a % versions.length];
       return (j, Must.refuse);
     case 1:
@@ -1606,7 +1630,7 @@ void _scL2(_NnCase c) {
       return (j, Must.faithful);
     case 9:
       // One number changed: the reader cannot tell it from a legal checkpoint.
-      switch (a % 8) {
+      switch (a % 9) {
         case 0:
           j['dMean'] = (j['dMean'] as num) + 1.0;
         case 1:
@@ -1621,6 +1645,8 @@ void _scL2(_NnCase c) {
           j['sd1sd2Flag'] = (j['sd1sd2Flag'] as num) + 0.1;
         case 6:
           j['winStart'] = ((j['winStart'] as num?) ?? 0) + 1.0;
+        case 7:
+          j['prevT'] = ((j['prevT'] as num?) ?? 0) + 1.0;
         default:
           if (l('bk').isNotEmpty) l('bk')[b % l('bk').length] = (l('bk')[b % l('bk').length] as num) + 1.0;
       }
@@ -1697,14 +1723,18 @@ void _scL5(_NnCase c) {
     expect(dg.nnKept <= dg.nnIn, isTrue, reason: why);
     _expectEvidence(res, s.nn.sublist(0, at), s.t.sublist(0, at), cfg, why);
     final m = res.metric;
+    // The beat gate counts successive pairs (minBeats - 1 of them), not beats:
+    // too few pairs abstains, and nothing past that gate does.
+    final pairs = _pairsOf(s.nn.sublist(0, at), s.t.sublist(0, at));
+    final enoughPairs = pairs >= dg.thresholds.minBeats - 1;
+    expect(dg.abstain == IrregularAbstain.tooFewBeats, !enoughPairs,
+        reason: 'too few beats <=> fewer than minBeats - 1 pairs ($pairs) $why');
     if (m.present) {
       expect(m.value!.nBeats, dg.nnKept, reason: 'nBeats == nn_kept $why');
       expect(dg.nnKept >= dg.thresholds.minBeats, isTrue, reason: 'min beats $why');
     }
-    if (dg.abstain == IrregularAbstain.tooFewBeats) {
-      expect(dg.nnKept < dg.thresholds.minBeats, isTrue, reason: why);
-    }
     if (dg.abstain == IrregularAbstain.artifact) {
+      expect(enoughPairs, isTrue, reason: why);
       expect(dg.nnKept >= dg.thresholds.minBeats, isTrue, reason: why);
       expect(_evals[ev].$3 > dg.thresholds.maxArtifact, isTrue, reason: why);
     }
@@ -1799,6 +1829,7 @@ void _ipBody(_IpCase arg) {
             raw: at, corrected: want.correctedCount, dropped: want.droppedCount));
     _sameScreen(got, batch, why,
         nn: want.nn,
+        t: want.nnTimesMs,
         pnnThresholdMs: cs.$2,
         artifactFraction: (1.0 - want.cleanFraction).clamp(0.0, 1.0));
     // L5, integrated: the corrector's counts are the screen's evidence.
@@ -1817,7 +1848,14 @@ void _ipBody(_IpCase arg) {
           reason: 'artifact fraction $why');
     }
     if (dg.abstain == IrregularAbstain.artifact) {
-      expect(dg.artifactFraction! > dg.thresholds.maxArtifact, isTrue, reason: why);
+      // The gate reads the fraction handed in. With nothing seen (and a pair
+      // gate of zero) that is 1 - cleanFraction of no beats, while the
+      // diagnostics report the share as absent, not 1.0 (0fc5768).
+      final handed = (1.0 - want.cleanFraction).clamp(0.0, 1.0);
+      expect(handed > dg.thresholds.maxArtifact, isTrue, reason: why);
+      if (at != 0) {
+        expect(dg.artifactFraction! > dg.thresholds.maxArtifact, isTrue, reason: why);
+      }
     }
     _expectEvidence(got, want.nn, want.nnTimesMs, scr, why);
   }
@@ -2044,7 +2082,9 @@ void _wAbsent(_WireCase c) {
     final wire = d.toJson()['beats'] as Map;
     expect(wire['artifact_fraction'], d.artifactFraction, reason: tag);
     // The gate still reads the fraction handed in.
-    if (d.nnKept >= e.$1 && e.$3 > e.$2) {
+    // Past the pair gate (minBeats - 1 successive pairs), the artifact gate
+    // comes next.
+    if (_pairsOf(s.nn, s.t) >= e.$1 - 1 && e.$3 > e.$2) {
       expect(d.abstain, IrregularAbstain.artifact, reason: '$tag: gate');
     }
     if (d.abstain == IrregularAbstain.artifact) {
@@ -2060,7 +2100,7 @@ void _wAbsent(_WireCase c) {
     // (but at a numerically zero SD2, see _sd2Degenerate, the reason may differ).
     String noReason(String t) =>
         jsonEncode((jsonDecode(t) as Map)..['abstain'] = null);
-    if (_sd2Degenerate(s.nn)) {
+    if (_sd2Degenerate(s.nn, s.t)) {
       // Only the abstention reason may differ, and only between "reported" and
       // "no long-term variability".
       expect(noReason(bj), noReason(aj), reason: '$tag: batch and stream agree');
@@ -2203,6 +2243,10 @@ void main() {
         for (var k = 0; k < 11; k++)
           for (var a = 0; a < 3; a++) (_nnL3[a], (k, a + k, 3 * k + a)),
         for (var a = 0; a < 9; a++) (_nnL3[0], (0, a, 0)),
+        // Every key but winStart removed in turn (prevT included: a version 3
+        // checkpoint without it is refused, not read as an unknown time).
+        for (var a = 0; a < 25; a++) (_nnL3[0], (2, a, 0)),
+        (_nnL3[0], (9, 7, 0)), // prevT changed: held exactly
       ],
       cases: 200,
       reach: Reach<(_NnCase, Mut)>({
@@ -2402,28 +2446,43 @@ void main() {
       List<double> sinus(int n) => [for (var i = 0; i < n; i++) 800.0 + (i % 9) * 13];
       List<double> af(int n) =>
           [for (var i = 0; i < n; i++) (i % 2 == 0 ? 450.0 : 1100.0) + (i % 5) * 7];
-      List<double> times(List<double> nn) {
+      // A [holeEvery] > 0 puts a 10 s dropout before every holeEvery-th beat.
+      List<double> times(List<double> nn, int holeEvery) {
         var t = 0.0;
-        return [for (final v in nn) t += (v >= 300 && v <= 2000 ? v : 800)];
+        var i = 0;
+        return [
+          for (final v in nn)
+            t += (v >= 300 && v <= 2000 ? v : 800) +
+                (holeEvery > 0 && i++ % holeEvery == holeEvery - 1 ? 10000 : 0)
+        ];
       }
 
-      final cases = <(String, List<double>, int, double, IrregularAbstain?)>[
-        ('too few beats', sinus(30), 40, 0.0, IrregularAbstain.tooFewBeats),
-        ('nothing at all', const [], 1, 0.0, IrregularAbstain.tooFewBeats),
-        ('too noisy', sinus(60), 40, .31, IrregularAbstain.artifact),
-        ('exactly at the artifact maximum', sinus(60), 40, .30, null),
-        ('exactly the minimum beats', sinus(40), 40, 0.0, null),
+      final cases = <(String, List<double>, int, double, IrregularAbstain?, int)>[
+        ('too few beats', sinus(30), 40, 0.0, IrregularAbstain.tooFewBeats, 0),
+        // 60 beats, but a dropout before every second one leaves 29 pairs:
+        // the gate counts successive pairs (39 needed), not beats.
+        ('enough beats, too few successive pairs', sinus(60), 40, 0.0,
+            IrregularAbstain.tooFewBeats, 2),
+        // Zero pairs clear a gate of minBeats - 1 = 0, and then there is no
+        // difference to build the Poincare plot from.
+        ('nothing at all', const [], 1, 0.0, IrregularAbstain.noSuccessivePairs, 0),
+        ('too noisy', sinus(60), 40, .31, IrregularAbstain.artifact, 0),
+        ('exactly at the artifact maximum', sinus(60), 40, .30, null, 0),
+        ('exactly the minimum beats', sinus(40), 40, 0.0, null, 0),
         // Two kept beats that are not neighbours: no difference exists.
         ('no successive pair', const [800, 5000, 810], 1, 0.0,
-            IrregularAbstain.noSuccessivePairs),
+            IrregularAbstain.noSuccessivePairs, 0),
+        // Two kept neighbours with a dropout between them: not successive.
+        ('no successive pair across a time hole', const [800, 810], 1, 0.0,
+            IrregularAbstain.noSuccessivePairs, 1),
         ('no long-term variability', List<double>.filled(60, 800), 40, 0.0,
-            IrregularAbstain.noLongTermVariability),
-        ('irregularly irregular', af(200), 40, 0.0, null),
+            IrregularAbstain.noLongTermVariability, 0),
+        ('irregularly irregular', af(200), 40, 0.0, null, 0),
       ];
       final opens = <IrregularOpenWindow>{};
       var flagged = false;
-      for (final (name, nn, minBeats, fraction, reason) in cases) {
-        final t = times(nn);
+      for (final (name, nn, minBeats, fraction, reason, holeEvery) in cases) {
+        final t = times(nn, holeEvery);
         final batch = irregularBeatScreenDetailed(nn,
             nnTimesMs: t, minBeats: minBeats, artifactFraction: fraction);
         final st = IrregularScreenState()..fold(nn, t);
