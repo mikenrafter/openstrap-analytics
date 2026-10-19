@@ -534,6 +534,11 @@ const _hrvFlavours = [
   'seconds grid', // 1 s beats on a whole-second grid: the 5-minute bin edges are hit exactly
   'gap edge', // the time step exceeds the beat by exactly, under and over the half millisecond
   'fifty', // successive differences of exactly, under and over 50 ms
+  // ~44 bpm, breathing at 18 br/min (0.3 Hz), a drifting heart rate: the lag-1
+  // ACF of the differences is far under the jitter floor, yet the spectrum
+  // shows a respiratory line on a low floor, so the batch publishes RMSSD
+  // (upstream's noise-share exemption).
+  'rsa slow heart',
 ];
 const _hrvOrigins = [0.0, 299999.5, 1700000010123.125, 1700000000000.0];
 const _hrvAf = [0.0, .17, .8, 1.0];
@@ -564,6 +569,10 @@ class HrvOps extends Ops<HrvIn> {
         6 => i.isEven ? 800.0 : 1000.0,
         7 => 900.0 + (i % 11) * 7,
         9 => fiftyBase += const [50.0, -50.0, 49.0, -49.0, 51.0, -51.0][i % 6],
+        10 => 1350 +
+            80 * math.sin(2 * math.pi * (clock - _hrvOrigins[originIdx]) / 3.6e6) +
+            40 * math.sin(2 * math.pi * .3 * (clock - _hrvOrigins[originIdx]) / 1000) +
+            3 * (g.nextDouble() - .5),
         5 => 800 + 40 * math.sin(i * .13) + (i % 7 == 6 ? 90 : 0),
         _ => 800 + 75 * math.sin(i * .13 + seed * .003) + 21 * math.sin(i * .031 + seed * .007),
       };
@@ -783,6 +792,9 @@ class HrvOps extends Ops<HrvIn> {
         [5, 200, 1, 0, 3, 0], // big steps
         [2, 250, 5, 1, 0, 1], // AF, no times
         [0, 500, 7, 0, 3, 2],
+        [10, 900, 1, 0, 0, 0], // RSA at a slow heart: exempt from the jitter gate
+        [10, 900, 2, 1, 0, 1], // the same without times
+        [10, 900, 3, 0, 2, 0],
       ];
 
   @override
