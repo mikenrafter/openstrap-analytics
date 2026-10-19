@@ -58,6 +58,10 @@
   (respiratory-line exemption, breathing-line fallback): when either could
   apply it hands the night to the batch, so the incremental output equals
   `hrvTime` where it used to refuse RMSSD. Checkpoint format unchanged.
+- `hrvTimeAggregator` follows `hrvTime`'s jitter gate under the ACF floor
+  (respiratory-line exemption, breathing-line fallback) from mergeable
+  evidence (O(5-min windows), never the beats). Its checkpoint state is now
+  `[core, evidence]`; a checkpoint without the evidence is refused whole.
 - `cvhrApneaScreen` abstains with 'non-finite beat time' on a NaN or infinite
   beat time (as `rsaRespRate` / `hrvFreq` do); `CvhrStream` refuses such a
   fold and answers a snapshot with such a tail the same way. Finite input:
