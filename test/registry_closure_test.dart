@@ -98,7 +98,8 @@ final _fnDecl = RegExp(
 
 /// name -> declaring file, for everything lib/onehz.dart exports (public API).
 /// [fnsOnly] keeps top-level functions only (constructors/types excluded).
-Map<String, String> _publicApi({bool fnsOnly = false}) {
+Map<String, String> _publicApi(
+    {bool fnsOnly = false, List<String> libs = const ['lib/onehz.dart']}) {
   final api = <String, String>{};
   final seen = <String>{};
   // Returns the names [file] exposes to an importer.
@@ -124,10 +125,11 @@ Map<String, String> _publicApi({bool fnsOnly = false}) {
     return out;
   }
 
-  // lib/onehz.dart is not under lib/src, so read its exports directly.
-  for (final m in _directive.allMatches(_stripComments(_read('lib/onehz.dart')))) {
+  // The libraries are not under lib/src, so read their exports directly.
+  for (final lib in libs)
+  for (final m in _directive.allMatches(_stripComments(_read(lib)))) {
     if (m.group(1) != 'export') continue;
-    final path = _norm('lib/onehz.dart', m.group(2)!);
+    final path = _norm(lib, m.group(2)!);
     if (!path.startsWith('lib/src/') || !seen.add(path)) continue;
     final sub = expose(path);
     final rest = m.group(3)!;
@@ -158,6 +160,10 @@ Set<String> _closure(Iterable<String> start) {
   }
   return seen;
 }
+
+/// Edge also calls `prsaAggregator`, exported by the second public library
+/// (lib/aggregate.dart), so members and api entries may name either.
+const _publicLibs = ['lib/onehz.dart', 'lib/aggregate.dart'];
 
 /// Declaring file of member [name] (`fn`, `Type`, or `Type.method`), or null.
 String? _memberFile(Map<String, String> api, String name) {
@@ -271,11 +277,26 @@ void main() {
     });
   });
 
+  test('a function is a member or api entry of exactly one group', () {
+    final owners = <String, List<String>>{};
+    for (final g in reg.groups) {
+      for (final m in [...g.members, ...g.api]) {
+        (owners[m] ??= <String>[]).add(g.id);
+      }
+    }
+    final dup = [
+      for (final e in owners.entries)
+        if (e.value.length > 1) '${e.key}: ${e.value.join(', ')}',
+    ];
+    expect(reg.groups, isNotEmpty, reason: 'registry is empty');
+    expect(dup, isEmpty, reason: dup.join('\n'));
+  });
+
   test('(b) every member is a real public top-level name', () {
-    final api = _publicApi();
+    final api = _publicApi(libs: _publicLibs);
     final bad = [
       for (final g in reg.groups)
-        for (final m in g.members)
+        for (final m in [...g.members, ...g.api])
           if (_memberFile(api, m) == null) '${g.id}: $m',
     ];
     expect(reg.groups, isNotEmpty, reason: 'registry is empty');
@@ -283,7 +304,7 @@ void main() {
   });
 
   test('(c) a group\'s import closure stays inside its files + foundations', () {
-    final api = _publicApi();
+    final api = _publicApi(libs: _publicLibs);
     final byId = {for (final g in reg.groups) g.id: g};
     final leaks = <String>[];
     for (final g in reg.groups) {
@@ -295,7 +316,7 @@ void main() {
         }
       }
       final start = [
-        for (final m in g.members)
+        for (final m in [...g.members, ...g.api])
           if (_memberFile(api, m) != null) _memberFile(api, m)!,
       ];
       final missing = _closure(start).difference(allowed)
