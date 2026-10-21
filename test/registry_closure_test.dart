@@ -54,30 +54,51 @@ String _norm(String from, String target) {
   return parts.join('/');
 }
 
+/// One whole directive statement; its URIs are pulled out separately because a
+/// conditional import/export names several (`'a.dart' if (cond) 'b.dart'`).
 final _directive = RegExp(
-    r'''^(import|export|part of|part)\s+'([^']+)'([^;]*);''',
+    r'^(import|export|part of|part)\s+([^;]*);',
     multiLine: true);
+final _quoted = RegExp(r'''(['"])(.*?)\1''');
 
-/// lib/src files named by [file]'s directives, with their kind and filters.
-List<({String kind, String path, List<String> show, List<String> hide})>
-    _directives(String file) {
-  final out = <({String kind, String path, List<String> show, List<String> hide})>[];
-  for (final m in _directive.allMatches(_stripComments(_read(file)))) {
-    final target = m.group(2)!;
-    if (target.startsWith('dart:')) continue;
-    if (target.startsWith('package:') && !target.startsWith(_pkg)) continue;
-    final path = _norm(file, target);
-    if (!path.startsWith('lib/src/')) continue;
+typedef _Directive = ({
+  String kind,
+  String path,
+  List<String> show,
+  List<String> hide
+});
+
+/// lib/src files named by directive source [src] (the text of [file]), with
+/// their kind and filters. Every URI of a conditional directive is an edge
+/// (the closure must cover each platform's alternative), and both quote
+/// styles are read. `show`/`hide` follow the last URI.
+List<_Directive> _parseDirectives(String file, String src) {
+  final out = <_Directive>[];
+  for (final m in _directive.allMatches(_stripComments(src))) {
+    final body = m.group(2)!;
+    final uris = _quoted.allMatches(body).toList();
+    if (uris.isEmpty) continue; // `part of name;`
+    final rest = body.substring(uris.last.end);
     List<String> names(String kw) {
-      final mm = RegExp('$kw\\s+([\\w\\s,]+)').firstMatch(m.group(3)!);
+      final mm = RegExp('$kw\\s+([\\w\\s,]+)').firstMatch(rest);
       if (mm == null) return const [];
       return mm.group(1)!.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
     }
 
-    out.add((kind: m.group(1)!, path: path, show: names('show'), hide: names('hide')));
+    for (final u in uris) {
+      final target = u.group(2)!;
+      if (target.startsWith('dart:')) continue;
+      if (target.startsWith('package:') && !target.startsWith(_pkg)) continue;
+      final path = _norm(file, target);
+      if (!path.startsWith('lib/src/')) continue;
+      out.add((kind: m.group(1)!, path: path, show: names('show'), hide: names('hide')));
+    }
   }
   return out;
 }
+
+List<_Directive> _directives(String file) =>
+    _parseDirectives(file, _read(file));
 
 final _typeDecl = RegExp(
     r'^(?:(?:abstract|final|base|sealed|interface|mixin)\s+)*(?:class|mixin|enum|typedef|extension type)\s+(\w+)',
@@ -126,21 +147,14 @@ Map<String, String> _publicApi(
   }
 
   // The libraries are not under lib/src, so read their exports directly.
-  for (final lib in libs)
-  for (final m in _directive.allMatches(_stripComments(_read(lib)))) {
-    if (m.group(1) != 'export') continue;
-    final path = _norm(lib, m.group(2)!);
-    if (!path.startsWith('lib/src/') || !seen.add(path)) continue;
-    final sub = expose(path);
-    final rest = m.group(3)!;
-    final show = RegExp(r'show\s+([\w\s,]+)').firstMatch(rest)?.group(1);
-    final hide = RegExp(r'hide\s+([\w\s,]+)').firstMatch(rest)?.group(1);
-    List<String> split(String? s) =>
-        s == null ? const [] : s.split(',').map((e) => e.trim()).toList();
-    for (final en in sub.entries) {
-      if (show != null && !split(show).contains(en.key)) continue;
-      if (hide != null && split(hide).contains(en.key)) continue;
-      api[en.key] = en.value;
+  for (final lib in libs) {
+    for (final e in _directives(lib).where((e) => e.kind == 'export')) {
+      if (!seen.add(e.path)) continue;
+      for (final en in expose(e.path).entries) {
+        if (e.show.isNotEmpty && !e.show.contains(en.key)) continue;
+        if (e.hide.contains(en.key)) continue;
+        api[en.key] = en.value;
+      }
     }
   }
   return api;
@@ -175,6 +189,18 @@ String? _memberFile(Map<String, String> api, String name) {
   return _stripComments(_read(file)).contains(RegExp('\\b$method\\s*[(<]'))
       ? file
       : null;
+}
+
+/// `name -> group ids` for every name owned by more than one slot: a name in
+/// two groups, or in one group's members and api (or twice in either).
+Map<String, List<String>> _duplicateOwners(GroupRegistry r) {
+  final owners = <String, List<String>>{};
+  for (final g in r.groups) {
+    for (final m in [...g.members, ...g.api]) {
+      (owners[m] ??= <String>[]).add(g.id);
+    }
+  }
+  return owners..removeWhere((_, v) => v.length < 2);
 }
 
 Set<String> _transitiveDeps(GroupRegistry r, GroupDecl g) {
@@ -220,6 +246,42 @@ void main() {
     });
     test('hide filters are honoured', () {
       expect(_publicApi().containsKey('readinessLnRmssdFromSuffix'), isFalse);
+    });
+  });
+
+  group('directive parser (guards the guard)', () {
+    const f = 'lib/src/onehz/a.dart';
+    List<String> paths(String src) =>
+        _parseDirectives(f, src).map((d) => d.path).toList();
+    test('reads double-quoted directives', () {
+      expect(paths('import "b.dart";\nexport "c/d.dart" show X;'),
+          ['lib/src/onehz/b.dart', 'lib/src/onehz/c/d.dart']);
+    });
+    test('reads every URI of a conditional import', () {
+      expect(
+          paths("import 'stub.dart'\n    if (dart.library.io) 'io.dart'\n"
+              '    if (dart.library.js_interop) "web.dart" as impl;'),
+          ['lib/src/onehz/stub.dart', 'lib/src/onehz/io.dart', 'lib/src/onehz/web.dart']);
+    });
+    test('conditional export keeps show/hide for every alternative', () {
+      final d = _parseDirectives(
+          f, "export 'a1.dart' if (dart.library.io) 'a2.dart' show Foo, Bar;");
+      expect(d.map((e) => e.path),
+          ['lib/src/onehz/a1.dart', 'lib/src/onehz/a2.dart']);
+      for (final e in d) {
+        expect(e.kind, 'export');
+        expect(e.show, ['Foo', 'Bar']);
+      }
+    });
+    test('part, part of by URI, package URIs; skips dart: and foreign packages', () {
+      expect(
+          paths("part 'p.dart';\npart of \"q.dart\";\n"
+              "import 'package:openstrap_analytics/src/onehz/z.dart';\n"
+              "import 'dart:io';\nimport 'package:other/x.dart';\npart of lib;"),
+          ['lib/src/onehz/p.dart', 'lib/src/onehz/q.dart', 'lib/src/onehz/z.dart']);
+    });
+    test('commented-out directives are ignored', () {
+      expect(paths("// import 'gone.dart';\n/* export 'also.dart'; */"), isEmpty);
     });
   });
 
@@ -278,18 +340,29 @@ void main() {
   });
 
   test('a function is a member or api entry of exactly one group', () {
-    final owners = <String, List<String>>{};
-    for (final g in reg.groups) {
-      for (final m in [...g.members, ...g.api]) {
-        (owners[m] ??= <String>[]).add(g.id);
-      }
-    }
     final dup = [
-      for (final e in owners.entries)
-        if (e.value.length > 1) '${e.key}: ${e.value.join(', ')}',
+      for (final e in _duplicateOwners(reg).entries)
+        '${e.key}: ${e.value.join(', ')}',
     ];
     expect(reg.groups, isNotEmpty, reason: 'registry is empty');
     expect(dup, isEmpty, reason: dup.join('\n'));
+  });
+
+  group('duplicate-owner check (guards the guard)', () {
+    GroupDecl g(String id, List<String> m, [List<String> api = const []]) =>
+        GroupDecl(id: id, kind: GroupKind.algorithm, counter: 1, members: m, api: api);
+    test('flags one name in two groups', () {
+      final r = GroupRegistry(1, [g('a', ['f']), g('b', [], ['f'])]);
+      expect(_duplicateOwners(r).keys, ['f']);
+    });
+    test('flags a name in one group\'s members and api', () {
+      final r = GroupRegistry(1, [g('a', ['f'], ['f'])]);
+      expect(_duplicateOwners(r).keys, ['f']);
+    });
+    test('accepts distinct names', () {
+      final r = GroupRegistry(1, [g('a', ['f']), g('b', ['h'], ['i'])]);
+      expect(_duplicateOwners(r), isEmpty);
+    });
   });
 
   test('(b) every member is a real public top-level name', () {

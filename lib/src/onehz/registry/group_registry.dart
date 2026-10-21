@@ -114,6 +114,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
     kind: GroupKind.foundation,
     counter: 1,
     members: ['Calories.dailyEnergy'],
+    api: ['Calories.minuteEnergy', 'Calories.estimateBoutCalories'],
     files: ['lib/src/onehz/workout/calories.dart'],
   ),
   GroupDecl(
@@ -246,7 +247,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
     kind: GroupKind.algorithm,
     counter: 1,
     members: ['detectNaps', 'autoDetectWorkouts', 'positionSeries'],
-    api: ['hrRecovery'],
+    api: ['hrRecovery', 'AutoWorkoutDetector.motionPoints'],
     deps: ['found.core', 'sleep.stage', 'found.calibration'],
     files: [
       'lib/src/onehz/motion/orientation.dart',
@@ -320,6 +321,9 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'calibrateGRef',
       'enmoSeries',
       'sessionHrCeiling',
+      'HeartRateZones.timeInZone',
+      'HeartRateZones.zonesFromMaxHr',
+      'HeartRateZones.reserveZones',
     ],
     deps: [
       'found.core',
@@ -334,6 +338,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'lib/src/onehz/motion/energy_fusion.dart',
       'lib/src/onehz/motion/enmo.dart',
       'lib/src/onehz/motion/steps.dart',
+      'lib/src/onehz/workout/hr_zones.dart',
       'lib/src/onehz/workout/observed_max_hr.dart',
     ],
   ),
@@ -343,7 +348,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
     counter: 1,
     members: ['hrDip', 'nightlySkinTemp'],
     api: ['hrDipFromDayTotals'],
-    deps: ['found.core', 'found.baseline_ewma'],
+    deps: ['found.core', 'found.baseline_ewma', 'found.calibration'],
     files: [
       'lib/src/onehz/clinical/cosinor.dart',
       'lib/src/onehz/clinical/cosinor_solver.dart',
