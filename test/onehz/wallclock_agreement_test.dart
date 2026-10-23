@@ -135,7 +135,7 @@ void main() {
     for (var start = _base; start + 30 <= _base + nightOrNull.seconds; start += 30) {
       final mid = start + 15 - _base;
       final a = _at(old, mid), b = _at(stages, mid);
-      if (a == null || b == null || a == 'unobserved' || b == 'unobserved') continue;
+      // Complete label equality: 'unobserved' (and missing) epochs count too.
       compared++;
       if (a == b) agree++;
     }

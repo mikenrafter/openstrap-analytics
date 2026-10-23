@@ -399,6 +399,51 @@ void main() {
     });
   });
 
+  group('pre-bump parity edge cases', () {
+    void parity(int start, int end, List<GravTs> grav, List<HrTs> hr,
+        [List<RrTs> rr = const <RrTs>[]]) {
+      final got = AdvancedSleepStager.stageWindow(start, end, grav, hr, rr: rr);
+      final want = preBumpStageSessionCardio(start, end, grav, hr, rr);
+      expect(showSegments(got.stages), showSegments(want));
+    }
+
+    List<GravTs> flatGrav(int from, int to) =>
+        [for (var t = from; t < to; t++) GravTs(t, 0, 0, 1)];
+
+    test('sparse HR (0, 30, 60 s) over [0,90): light, as before', () {
+      parity(0, 90, flatGrav(0, 90), [for (final t in [0, 30, 60]) HrTs(t, 60)]);
+    });
+
+    test('sparse HR (seconds 0..44 only) over [0,119)', () {
+      parity(0, 119, flatGrav(0, 119), [for (var t = 0; t < 45; t++) HrTs(t, 60)]);
+    });
+
+    test('gravity context across an accel gap [500,580)', () {
+      const bump = {
+        19: 1.03, 20: 1.02, 22: 1.02, 23: 1.02, 27: 1.03, 29: 1.02,
+        30: 1.02, 31: 1.01, 32: 1.02, 36: 1.02, 38: 1.03, 39: 1.03,
+      };
+      final grav = [
+        for (var t = 0; t < 1200; t++)
+          if (t < 500 || t >= 580) GravTs(t, 0, 0, bump[t ~/ 30] ?? 1.0)
+      ];
+      parity(0, 1200, grav, [for (var t = 0; t < 1200; t++) HrTs(t, 60)]);
+    });
+
+    for (final (name, bad) in [('NaN', double.nan), ('infinite', double.infinity)]) {
+      test('non-finite RR ($name) does not throw; labels equal the oracle', () {
+        parity(0, 90, flatGrav(0, 90), [for (var t = 0; t < 90; t++) HrTs(t, 60)],
+            [RrTs(10, bad)]);
+      });
+    }
+
+    test('duplicate HR timestamps (60 then 0): last value wins as before', () {
+      parity(0, 90, flatGrav(0, 90), [
+        for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]
+      ]);
+    });
+  });
+
   group('AASM hypnogram metrics (hand-checked)', () {
     test('TIB/TST/SOL/WASO/REM-latency from a crafted hypnogram', () {
       // 1000-s session: 0-100 wake (latency), 100-400 light, 400-600 deep,
