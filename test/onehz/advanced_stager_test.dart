@@ -495,6 +495,13 @@ void main() {
         for (var t = 89; t >= 0; t--) ...[HrTs(t, 0), HrTs(t, 60)]
       ]);
     });
+
+    test('RR in reverse time order does not throw (Sol r3)', () {
+      // [0,30): the oracle abstains even with assertions on (longer windows
+      // assert sorted RR there).
+      parity(0, 30, flatGrav(0, 30), [for (var t = 0; t < 30; t++) HrTs(t, 60)],
+          [RrTs(1, 900), RrTs(0, 900)]);
+    });
   });
 
   group('AASM hypnogram metrics (hand-checked)', () {
