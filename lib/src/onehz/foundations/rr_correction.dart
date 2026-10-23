@@ -40,6 +40,13 @@ class RrCorrectionResult {
   /// spliced out; pass the timestamps.
   final List<double> nnTimesMs;
 
+  /// For each NN, the index of the input beat it came from: the beat itself,
+  /// or, for a spline-corrected beat, that beat's own index. Strictly
+  /// increasing; the input beats not listed here were dropped. Lets a caller
+  /// pair each NN with that beat's own (absolute) timestamp. Empty on a
+  /// hand-built result that did not track it.
+  final List<int> nnSourceIndex;
+
   /// Per-input-beat classification (same length as the input rr).
   final List<BeatClass> classes;
 
@@ -59,6 +66,7 @@ class RrCorrectionResult {
     required this.cleanFraction,
     required this.droppedCount,
     required this.correctedCount,
+    this.nnSourceIndex = const [],
   });
 }
 
@@ -121,7 +129,7 @@ RrCorrectionResult correctRr(
         ts: rrTsMs, cap: maxArtifactRun, alpha: alpha,
         windowBeats: windowBeats, minThresholdMs: minThresholdMs,
         reanchorGapMs: reanchorGapMs);
-    final nn = <double>[], times = <double>[];
+    final nn = <double>[], times = <double>[], source = <int>[];
     var normal = 0, dropped = 0, corrected = 0;
     for (var i = 0; i < rrMs.length; i++) {
       if (w.classes[i] == BeatClass.normal) normal++;
@@ -131,12 +139,14 @@ RrCorrectionResult correctRr(
       } else {
         nn.add(v);
         times.add(w.times[i]);
+        source.add(i);
         if (w.classes[i] != BeatClass.normal) corrected++;
       }
     }
     return RrCorrectionResult(nn: nn, nnTimesMs: times, classes: w.classes,
         cleanFraction: rrMs.isEmpty ? 0 : normal / rrMs.length,
-        droppedCount: dropped, correctedCount: corrected);
+        droppedCount: dropped, correctedCount: corrected,
+        nnSourceIndex: source);
   }
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
@@ -161,10 +171,12 @@ RrCorrectionResult correctRr(
     ];
     final nn = <double>[];
     final times = <double>[];
+    final source = <int>[];
     for (var i = 0; i < n; i++) {
       if (classes[i] == BeatClass.normal) {
         nn.add(rrMs[i]);
         times.add(tAll[i]);
+        source.add(i);
       }
     }
     return RrCorrectionResult(
@@ -174,6 +186,7 @@ RrCorrectionResult correctRr(
       cleanFraction: nn.length / n,
       droppedCount: n - nn.length,
       correctedCount: 0,
+      nnSourceIndex: source,
     );
   }
 
@@ -222,6 +235,7 @@ RrCorrectionResult correctRr(
   final isArtifact = [for (final c in classes) c != BeatClass.normal];
   final nn = <double>[];
   final times = <double>[];
+  final source = <int>[];
   var dropped = 0;
   var corrected = 0;
   var i = 0;
@@ -229,6 +243,7 @@ RrCorrectionResult correctRr(
     if (!isArtifact[i]) {
       nn.add(rrMs[i]);
       times.add(tAll[i]);
+      source.add(i);
       i++;
       continue;
     }
@@ -249,6 +264,7 @@ RrCorrectionResult correctRr(
         // — 1.6 % of a night at one missed beat in sixty.
         nn.add(corr);
         times.add(tAll[i]);
+        source.add(i);
         corrected++;
       } else {
         dropped++; // no anchors -> honest drop; the clock already elapsed
@@ -274,6 +290,7 @@ RrCorrectionResult correctRr(
     cleanFraction: normalCount / n,
     droppedCount: dropped,
     correctedCount: corrected,
+    nnSourceIndex: source,
   );
 }
 

@@ -1,17 +1,17 @@
-// RED/GUARD: the wall-clock grid against today's labels on the checked-in real
-// night (combined bump, chunk B3 + B4).
+// GUARD: the gap-anchored grid against today's labels on the checked-in real
+// night (combined bump, chunk B3 + B4; owner decision 2026-10-22).
 //
 //   * `fixtures/real_night_2026_07_hypnogram_v1.csv` is today's hypnogram for
 //     that night (AdvancedSleepStager.stageWindow at analytics 83fc308, the
 //     run-start-anchored grid), computed for a window starting at the
-//     UNALIGNED second 1700000013 (so the old grid and the wall-clock grid are
-//     3 s apart). It is frozen: regenerate it only as a deliberate decision.
-//   * AGREEMENT GUARD (B4): per 30 s wall-clock epoch, the new label equals the
-//     frozen one at least [kMinAgreement] = 0.97 of the time (both staged; the
-//     epoch's midpoint second is looked up). A pure grid move should shift a
-//     label by at most one epoch at a stage change, not rewrite the night. This
-//     passes today by construction (nothing has moved yet); it is the net under
-//     the change.
+//     UNALIGNED second 1700000013, which is also the night's first sample. It is
+//     frozen: regenerate it only as a deliberate decision.
+//   * AGREEMENT GUARD (B4): per 30 s epoch of that grid (steps of 30 s from the
+//     first sample), the new label equals the frozen one at least
+//     [kMinAgreement] = 0.97 of the time (both staged; the epoch's midpoint
+//     second is looked up). Anchoring at the first sample of each gap-free run
+//     is the old grid for a window that starts at the data, so this is a near
+//     identity; the wall-clock grid it replaced scored 0.905 here.
 //   * The harness (tool/stager_harness.dart) cannot stand in for this: it
 //     scores the decision layer on an external PSG corpus (DREAMT feature
 //     export) that is not in the repo, and it has no grid-comparison mode. The
@@ -105,7 +105,7 @@ void main() {
       for (final g in now.stages) (g.start - _base, g.end - _base, g.stage)
     ];
     var epochs = 0, compared = 0, agree = 0;
-    for (var start = (_base + 29) ~/ 30 * 30; start + 30 <= _base + nightOrNull.seconds; start += 30) {
+    for (var start = _base; start + 30 <= _base + nightOrNull.seconds; start += 30) {
       epochs++;
       final mid = start + 15 - _base;
       final a = _at(old, mid), b = _at(stages, mid);
@@ -120,16 +120,29 @@ void main() {
         reason: 'agreement $agree/$compared = ${agreement.toStringAsFixed(4)}');
   });
 
-  test('the real night\'s hypnogram boundaries sit on the wall-clock grid', () {
+  test('the real night\'s hypnogram boundaries sit on the grid of their '
+      'gap-free run (30 s steps from the run\'s first sample)', () {
+    // The run anchors, found independently of the code under test: a new run
+    // starts at the first valid sample more than 61 s after the previous one
+    // (the stager's 60 s carry-forward bridges anything shorter).
+    final anchors = <int>[];
+    int? prev;
+    for (final g in nightOrNull.grav) {
+      if (prev == null || g.ts > prev + 61) anchors.add(g.ts);
+      prev = g.ts;
+    }
+    expect(anchors.first, _base);
     final stages = now.stages;
     var checked = 0;
     for (var i = 1; i < stages.length; i++) {
       if (stages[i].stage == 'unobserved' || stages[i - 1].stage == 'unobserved') {
         continue;
       }
-      expect(stages[i].start % 30, 0,
-          reason: 'boundary at ${stages[i].start} '
-              '(${stages[i - 1].stage} -> ${stages[i].stage})');
+      final edge = stages[i].start;
+      final anchor = anchors.lastWhere((a) => a <= edge);
+      expect((edge - anchor) % 30, 0,
+          reason: 'boundary at $edge (${stages[i - 1].stage} -> '
+              '${stages[i].stage}), run anchored at $anchor');
       checked++;
     }
     expect(checked, greaterThan(20));
@@ -165,7 +178,7 @@ void main() {
         jsonEncode([for (final g in now.stages) g.toJson()]));
   });
 
-  test('DREAMT harness: per-epoch agreement of the wall-clock grid with the '
+  test('DREAMT harness: per-epoch agreement of the gap-anchored grid with the '
       'run-start grid on the PSG corpus', () {
     // Needs (1) the DREAMT feature export (stager_harness.dart's fixture JSON),
     // which is not in this repo, and (2) a grid-comparison mode in

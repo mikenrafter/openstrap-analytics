@@ -717,11 +717,10 @@ void main() {
         (3 * 3600 + 3000, 8 * 3600 - (3 * 3600 + 3000), false),
       ]);
       expect(s.unobservedSec, 2400);
-      // The wall-clock grid puts this wake-to-sleep edge 10 seconds later
-      // than the old run-start grid; the recording hole is still unchanged.
-      expect(s.wakeSec, 610);
+      expect(s.wakeSec, 600);
       expect(s.sustainedAwakenings, 1);
-      expect(s.longestSleepRunSec, 14990);
+      // 40 min of hole + 10 min of wake, both broken out of the run.
+      expect(s.longestSleepRunSec, 15000);
     });
 
     test('a wake shorter than the stated bar is not an awakening', () {

@@ -285,4 +285,52 @@ void main() {
       expect(sameBits(snap.cleanFraction, want.cleanFraction), isTrue);
     });
   });
+  group('nnSourceIndex: which input beat each NN came from', () {
+    void expectSources(List<double> rr, List<double> ts, String why,
+        {int? cap = kMaxArtifactRun}) {
+      final got = correctRr(rr, rrTsMs: ts, maxArtifactRun: cap);
+      final src = got.nnSourceIndex;
+      expect(src.length, got.nn.length, reason: '$why length');
+      for (var k = 0; k < src.length; k++) {
+        expect(src[k], inInclusiveRange(0, rr.length - 1), reason: '$why range');
+        if (k > 0) expect(src[k], greaterThan(src[k - 1]), reason: '$why order');
+        if (got.classes[src[k]] == BeatClass.normal) {
+          expect(sameBits(got.nn[k], rr[src[k]]), isTrue, reason: '$why value');
+        }
+      }
+      // every beat that is not a source was dropped
+      expect(rr.length - src.length, got.droppedCount, reason: '$why dropped');
+    }
+
+    test('synthetic nights (corrected, dropped, gap beats)', () {
+      for (final seed in [3, 23, 77]) {
+        final d = synthRr(SynthConfig(
+            seed: seed, hours: 0.2, ectopicPerMin: 2, missedPerMin: 1,
+            extraPerMin: 1, noiseRunPerMin: 0.5, gapPerHour: 12));
+        expectSources(d.rr, d.ts, 'seed $seed');
+        expectSources(d.rr, d.ts, 'seed $seed uncapped', cap: null);
+      }
+    });
+
+    test('over the cap, tiny inputs, and empty', () {
+      final (s, runs) = withRuns(8, [120, 120, 120], [33, 45]);
+      expectSources(s.rr, s.ts, 'runs');
+      final src = correctRr(s.rr, rrTsMs: s.ts).nnSourceIndex;
+      for (final (a, b) in runs) {
+        expect(src.where((i) => i >= a && i < b), isEmpty);
+      }
+      for (final n in [0, 1, 2, 3, 5]) {
+        expectSources(s.rr.sublist(0, n), s.ts.sublist(0, n), 'n=$n');
+      }
+    });
+
+    test('a spline-corrected beat is its own source', () {
+      final rr = cleanRr(Rng(5), 200);
+      rr[100] = rr[100] * 0.5;
+      final ts = rrSeries(rr).ts;
+      final got = correctRr(rr, rrTsMs: ts);
+      expect(got.correctedCount, 1);
+      expect(got.nnSourceIndex, contains(100));
+    });
+  });
 }

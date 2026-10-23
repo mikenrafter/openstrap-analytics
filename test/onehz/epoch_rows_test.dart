@@ -1,10 +1,15 @@
-// RED: the wall-clock 30 s epoch grid and its `EpochRows` accumulator
-// (combined bump, chunk B1-B3).
+// The gap-anchored 30 s epoch grid and its `EpochRows` accumulator (combined
+// bump, chunk B1-B3; owner decision 2026-10-22: anchor at the first sample after
+// each data gap, replacing the wall-clock grid).
 //
-//   B1  Epoch starts are multiples of 30,000 ms since the Unix epoch (UTC),
-//       whatever time the data starts at. An epoch is clipped only by a data
-//       gap: an epoch the data covers is a row (computed on the seconds that
-//       exist); an epoch with no data is not a row.
+//   B1  Epochs are 30,000 ms steps from the FIRST sample of each gap-free run
+//       (valid accelerometer coverage, with the stager's usable-run gap: the
+//       60 s carry-forward). A run starts at the first sample and again at the
+//       first sample after any gap longer than that. The anchor depends on the
+//       data only, never on session detection, and is final as soon as the
+//       run's first sample arrives. An epoch is clipped only by a data gap: an
+//       epoch the data covers is a row (computed on the seconds that exist);
+//       an epoch with no data is not a row.
 //   B2  `EpochRows` (lookback +-165 s accel / HR, +-150 s RR) emits per-epoch
 //       feature rows. Chunk invariance is EXACT (any chunking, with JSON
 //       save/restore between chunks); rows ~3 min behind the newest sample are
@@ -13,7 +18,8 @@
 //       `cardioEpochFeatures` rows (LF/HF excepted, see below).
 //   B3  Staging from the accumulated rows (`EpochRows.stageWindow`) equals
 //       `AdvancedSleepStager.stageWindow` in one batch, exactly, and that
-//       hypnogram's boundaries sit on the 30 s wall-clock grid.
+//       hypnogram's boundaries sit on the run's 30 s grid, whatever the session
+//       bounds.
 //
 // LF/HF is compared for presence only against today's rows: the span-dependent
 // frequency grid (cardio_stager.dart `remFeaturesFromBeats`) may be fixed in
@@ -135,66 +141,106 @@ List<(String, int)> _night() => [
     ];
 
 void main() {
-  group('B1: the wall-clock grid', () {
-    test('epochStartMs floors to a multiple of 30,000 ms', () {
-      expect(EpochRows.epochStartMs(0), 0);
-      expect(EpochRows.epochStartMs(29999), 0);
-      expect(EpochRows.epochStartMs(30000), 30000);
-      expect(EpochRows.epochStartMs(1700000013000), 1700000010000);
-      expect(EpochRows.epochStartMs(1700000039999), 1700000010000);
-      expect(EpochRows.epochStartMs(-1), -30000);
-      expect(kEpochMs, 30000);
+  group('B1: the gap-anchored grid', () {
+    test('kEpochMs is 30,000 ms', () => expect(kEpochMs, 30000));
+
+    test('no data: no runs, no epoch', () {
+      final er = EpochRows();
+      expect(er.runAnchorsMs, isEmpty);
+      expect(er.epochStartMsFor(_alignedT0), isNull);
     });
 
     for (final offsetMs in [0, 13000, 29000, 13250]) {
-      test('data starting ${offsetMs} ms past a boundary: starts are wall-clock '
-          'multiples, every covered epoch is a row', () {
+      test('data starting ${offsetMs} ms past a Unix boundary: epochs are 30 s '
+          'steps from the first sample, every covered epoch is a row', () {
         final s = _Input.make([('nrem', 700), ('wake', 140)], t0Ms: _alignedT0 + offsetMs);
-        final rows = _oneFold(s).allRows();
+        final er = _oneFold(s);
+        expect(er.runAnchorsMs, [s.t0Ms]);
+        final rows = er.allRows();
         expect(rows, isNotEmpty);
+        expect(rows.first.startMs, s.t0Ms, reason: 'the first sample opens the grid');
         for (final r in rows) {
-          expect(r.startMs % kEpochMs, 0, reason: 'start ${r.startMs}');
+          expect((r.startMs - s.t0Ms) % kEpochMs, 0, reason: 'start ${r.startMs}');
         }
         for (var i = 1; i < rows.length; i++) {
           expect(rows[i].startMs - rows[i - 1].startMs, kEpochMs,
               reason: 'contiguous data: no epoch skipped or repeated');
         }
-        final firstFull = (s.t0Ms + kEpochMs - 1) ~/ kEpochMs * kEpochMs;
         final lastEnd = s.t0Ms + s.seconds * 1000;
-        final fullEpochs = [
-          for (var e = firstFull; e + kEpochMs <= lastEnd; e += kEpochMs) e
-        ];
-        final have = rows.map((r) => r.startMs).toSet();
-        expect(fullEpochs.every(have.contains), isTrue,
-            reason: 'every epoch wholly covered by the data has a row');
-        // the epoch holding the stream's first / last sample may be a (clipped)
-        // row too, but nothing further out
-        expect(rows.first.startMs, inInclusiveRange(firstFull - kEpochMs, firstFull));
         expect(rows.last.startMs + kEpochMs,
-            inInclusiveRange(lastEnd, lastEnd + kEpochMs));
+            inInclusiveRange(lastEnd, lastEnd + kEpochMs),
+            reason: 'the epoch holding the last sample is the last row');
+        // the per-timestamp lookup agrees with the rows
+        for (final r in rows) {
+          expect(er.epochStartMsFor(r.startMs), r.startMs);
+          expect(er.epochStartMsFor(r.startMs + kEpochMs - 1), r.startMs);
+        }
+        expect(er.epochStartMsFor(s.t0Ms - 1), isNull, reason: 'before the data');
       });
     }
 
+    test('the anchor is final as soon as the first sample arrives', () {
+      final s = _Input.make([('nrem', 900)], t0Ms: _alignedT0 + 13250);
+      final er = EpochRows();
+      s.foldInto(er, 0, 5);
+      expect(er.runAnchorsMs, [s.t0Ms]);
+      s.foldInto(er, 5, 400);
+      s.foldInto(er, 400, s.seconds);
+      expect(er.runAnchorsMs, [s.t0Ms], reason: 'later data never moves it');
+      // and it does not depend on a session: nothing has been asked of the rows
+      expect(er.allRows().first.startMs, s.t0Ms);
+    });
+
+    test('a gap longer than the usable-run gap re-anchors at the first sample '
+        'after it; a shorter one does not', () {
+      // next valid accel at +61 s after the last: the carry bridges it (one run);
+      // at +62 s it does not (second run). Same threshold as the stager's
+      // usable-run split.
+      for (final (holeSec, runs) in [(60, 1), (61, 2), (100, 2), (600, 2)]) {
+        // a hole of `holeSec` missing seconds after +599 (both streams)
+        final s = _Input.make([('nrem', 1500)],
+            gaps: [(600, 600 + holeSec)], seed: 17, t0Ms: _alignedT0 + 13000);
+        final er = _oneFold(s);
+        expect(er.runAnchorsMs.length, runs, reason: 'hole $holeSec s');
+        if (runs == 2) {
+          expect(er.runAnchorsMs.last, s.t0Ms + (600 + holeSec) * 1000);
+          // the new grid steps from the new anchor, not the old one
+          final starts = er.allRows().map((r) => r.startMs).toSet();
+          expect(starts.contains(s.t0Ms + (600 + holeSec) * 1000), isTrue);
+          if ((holeSec) % 30 != 0) {
+            expect(starts.contains(s.t0Ms + (630 + (holeSec ~/ 30) * 30) * 1000),
+                isFalse, reason: 'the old phase is gone after the gap');
+          }
+        } else {
+          for (final r in er.allRows()) {
+            expect((r.startMs - s.t0Ms) % kEpochMs, 0);
+          }
+        }
+      }
+    });
+
     test('gap-only clipping: an epoch inside a gap is not a row, an epoch the '
         'gap only nibbles still is (on the seconds that exist)', () {
-      // gap A: 120 s from an aligned boundary (4 whole epochs); gap B: 10 s in
-      // the middle of one epoch. Offsets are seconds since t0 (aligned).
+      // gap A: 117 s (a new run, anchored at +417); gap B: 10 s in the middle
+      // of one epoch (bridged). Offsets are seconds since t0.
       final s = _Input.make([('nrem', 1500)],
-          gaps: [(300, 420), (810, 820)], seed: 17);
-      final rows = _oneFold(s).allRows();
-      final byStart = {for (final r in rows) r.startMs: r};
-      for (var e = 300; e < 420; e += 30) {
-        expect(byStart.containsKey(_alignedT0 + e * 1000), isFalse,
-            reason: 'epoch at +${e}s lies wholly in the gap');
+          gaps: [(300, 417), (810, 820)], seed: 17);
+      final er = _oneFold(s);
+      expect(er.runAnchorsMs, [s.t0Ms, s.t0Ms + 417000]);
+      final byStart = {for (final r in er.allRows()) r.startMs: r};
+      // the first run's grid ends with its coverage (last sample + the carry)
+      for (var e = 360; e < 417; e += 1) {
+        expect(byStart.containsKey(s.t0Ms + e * 1000), isFalse,
+            reason: 'second +${e}s lies in the gap, no epoch starts there');
       }
-      for (final e in [270, 420, 780, 840]) {
-        expect(byStart.containsKey(_alignedT0 + e * 1000), isTrue,
+      for (final e in [270, 417, 447, 777, 837]) {
+        expect(byStart.containsKey(s.t0Ms + e * 1000), isTrue,
             reason: 'epoch at +${e}s has data');
       }
-      final nibbled = byStart[_alignedT0 + 810 * 1000]!; // +810 s is aligned
+      final nibbled = byStart[s.t0Ms + 807 * 1000]!; // 417 + 13 * 30 = 807
       final present = [
         for (final h in s.hr)
-          if (h.tsMs >= _alignedT0 + 810000 && h.tsMs < _alignedT0 + 840000 && h.valid)
+          if (h.tsMs >= s.t0Ms + 807000 && h.tsMs < s.t0Ms + 837000 && h.valid)
             h.hr
       ];
       expect(present.length, 20);
@@ -209,6 +255,31 @@ void main() {
       expect(rows.first.startMs, _alignedT0);
       expect(rows.last.startMs, _alignedT0 + 1200 * 1000 - kEpochMs);
     });
+
+    test('a run that continues data folded earlier (seeded anchor) keeps the '
+        'earlier grid', () {
+      final s = _Input.make([('nrem', 2400)], t0Ms: _alignedT0 + 13250);
+      final full = _oneFold(s);
+      // fold only the part from +400 s on, telling the accumulator that the run
+      // it joins was anchored at the true first sample
+      final part = EpochRows(continuingAnchorMs: s.t0Ms);
+      s.foldInto(part, 400, s.seconds);
+      expect(part.runAnchorsMs, [s.t0Ms]);
+      final starts = part.allRows().map((r) => r.startMs).toList();
+      expect(starts, isNotEmpty);
+      for (final st in starts) {
+        expect((st - s.t0Ms) % kEpochMs, 0);
+      }
+      // rows well inside the fed part are the full-night rows
+      final want = {for (final r in full.allRows()) r.startMs: r};
+      var same = 0;
+      for (final r in part.allRows()) {
+        if (r.startMs < s.t0Ms + 400000 + 200000) continue;
+        expect(_sameRow(r, want[r.startMs]!), isTrue, reason: 'row ${r.startMs}');
+        same++;
+      }
+      expect(same, greaterThan(50));
+    });
   });
 
   group('B2: EpochRows', () {
@@ -216,7 +287,7 @@ void main() {
     late final whole = _oneFold(night).allRows();
 
     test('rows exist and are not all provisional', () {
-      expect(whole.length, greaterThan(100));
+      expect(whole.length, greaterThanOrEqualTo(100), reason: '3000 s, 30 s epochs');
       final er = _oneFold(night);
       expect(er.finalRows, isNotEmpty);
       expect(er.provisionalRows(), isNotEmpty);
@@ -351,9 +422,10 @@ void main() {
     });
   });
 
-  group('B3: staging on the wall-clock grid', () {
-    SleepSession batch(_Input s) => AdvancedSleepStager.stageWindow(
-        s.t0Ms ~/ 1000, s.t0Ms ~/ 1000 + s.seconds, s.grav, s.hrTs, rr: s.rrTsSec);
+  group('B3: staging on the gap-anchored grid', () {
+    SleepSession batch(_Input s, [int fromSec = 0, int? toSec]) =>
+        AdvancedSleepStager.stageWindow(s.t0Ms ~/ 1000 + fromSec,
+            s.t0Ms ~/ 1000 + (toSec ?? s.seconds), s.grav, s.hrTs, rr: s.rrTsSec);
 
     String show(List<StageSegment> l) => jsonEncode([for (final g in l) g.toJson()]);
 
@@ -372,7 +444,26 @@ void main() {
       });
     }
 
-    test('the hypnogram\'s boundaries sit on the 30 s wall-clock grid', () {
+    test('a session that begins inside a gap-free run is staged on that run\'s '
+        'grid (the anchor does not depend on where the session starts)', () {
+      final s = _Input.make(_night(), t0Ms: _alignedT0 + 13000, seed: 37);
+      final er = _oneFold(s);
+      for (final (from, to) in [(1000, 2400), (777, 2111), (1234, 2999)]) {
+        final t0 = s.t0Ms ~/ 1000;
+        final want = er.stageWindow(t0 + from, t0 + to);
+        final got = batch(s, from, to).stages;
+        expect(show(got), show(want), reason: 'session +$from..+${to}s');
+        // and its interior boundaries are on the run's grid, not the session's
+        for (var i = 1; i < got.length; i++) {
+          if (got[i].stage == 'unobserved' || got[i - 1].stage == 'unobserved') {
+            continue;
+          }
+          expect((got[i].start - t0) % 30, 0, reason: 'boundary ${got[i].start}');
+        }
+      }
+    });
+
+    test('the hypnogram\'s boundaries sit on the 30 s grid of the first sample', () {
       for (final offsetMs in [13000, 21000]) {
         final s = _Input.make(_night(), t0Ms: _alignedT0 + offsetMs, seed: 31);
         final st = batch(s);
@@ -388,9 +479,9 @@ void main() {
           if (stages[i].stage == 'unobserved' || stages[i - 1].stage == 'unobserved') {
             continue;
           }
-          expect(edge % 30, 0,
+          expect((edge - s.t0Ms ~/ 1000) % 30, 0,
               reason: 'boundary at $edge (${stages[i - 1].stage} -> '
-                  '${stages[i].stage}), window starts at +${offsetMs ~/ 1000}s');
+                  '${stages[i].stage}), data starts at +${offsetMs ~/ 1000}s');
           checked++;
         }
         expect(checked, greaterThan(2), reason: 'the night must change stage');
@@ -405,8 +496,33 @@ void main() {
         if (stages[i].stage == 'unobserved' || stages[i - 1].stage == 'unobserved') {
           continue;
         }
-        expect(stages[i].start % 30, 0, reason: 'boundary ${stages[i].start}');
+        expect((stages[i].start - s.t0Ms ~/ 1000) % 30, 0,
+            reason: 'boundary ${stages[i].start}');
       }
+    });
+
+    test('a hole longer than the carry-forward re-anchors the grid after it', () {
+      // 1100 % 30 = 20: the second run's grid is 20 s out of phase with the first
+      final s = _Input.make(_night(),
+          t0Ms: _alignedT0 + 13000, gaps: [(1000, 1100)], seed: 35);
+      final t0 = s.t0Ms ~/ 1000;
+      final stages = batch(s).stages;
+      var before = 0, after = 0;
+      for (var i = 1; i < stages.length; i++) {
+        if (stages[i].stage == 'unobserved' || stages[i - 1].stage == 'unobserved') {
+          continue;
+        }
+        final edge = stages[i].start - t0;
+        if (edge < 1000) {
+          expect(edge % 30, 0, reason: 'first run, boundary at +$edge');
+          before++;
+        } else {
+          expect((edge - 1100) % 30, 0, reason: 'second run, boundary at +$edge');
+          after++;
+        }
+      }
+      expect(before, greaterThan(0));
+      expect(after, greaterThan(0));
     });
   });
 }

@@ -1352,19 +1352,49 @@ class AdvancedSleepStager {
   /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
-  /// Default staging path: extract wall-clock feature rows with their full
-  /// observed context, then classify each usable accelerometer run inside the
-  /// requested session. Accel coverage carries at most 60 seconds across a
-  /// dropout. Other gaps and abstained runs remain unobserved.
+  /// Default staging path: extract feature rows on the gap-anchored grid with
+  /// their full observed context, then classify each usable accelerometer run
+  /// inside the requested session. Epochs are 30 s steps from the first sample
+  /// of each gap-free run (a run ends at a gap the 60 s carry-forward cannot
+  /// bridge), whether or not the session starts there. Accel coverage carries
+  /// at most 60 seconds across a dropout. Other gaps and abstained runs remain
+  /// unobserved.
   static List<StageSegment> _stageSessionCardio(int start, int end,
       List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
       [CardioRowCache? rowCache]) {
     if (end <= start) return const [];
-    final rows = EpochRows(rowCache: rowCache);
+    // The grid is anchored where the gap-free run holding the session start
+    // began, which can be well before the session: find that sample without
+    // folding the run's earlier data.
+    final valid = [for (final g in grav) if (g.valid) g.ts]..sort();
+    int? anchorSec;
+    var k = -1;
+    for (var a = 0, b = valid.length; a < b;) {
+      final m = (a + b) >> 1;
+      if (valid[m] <= start) {
+        k = m;
+        a = m + 1;
+      } else {
+        b = m;
+      }
+    }
+    if (k >= 0 && start <= valid[k] + maxAccelCarryForwardSec) {
+      while (k > 0 && valid[k] - valid[k - 1] <= maxAccelCarryForwardSec + 1) {
+        k--;
+      }
+      anchorSec = valid[k];
+    }
+    final anchorMs = anchorSec == null ? null : anchorSec * 1000;
     // Include feature context outside the requested session. Only actual data
     // gaps clip a row's windows; detection boundaries do not.
-    final lo = EpochRows.epochStartMs(start * 1000) - 165000;
-    final hi = EpochRows.epochStartMs(end * 1000) + 195000;
+    final first = anchorMs == null
+        ? start * 1000
+        : anchorMs + (start * 1000 - anchorMs) ~/ 30000 * 30000;
+    final lo = first - 165000;
+    final hi = end * 1000 + 30000 + 195000;
+    final rows = EpochRows(
+        rowCache: rowCache,
+        continuingAnchorMs: anchorMs != null && anchorMs < lo ? anchorMs : null);
     final beats = [for (final r in rr)
       if (r.ts * 1000 >= lo && r.ts * 1000 < hi) r];
     rows.fold(

@@ -3,13 +3,17 @@
 // Contract (lib/src/onehz/foundations/rr_sandwich.dart):
 //   RrSandwich<S, R>(inner, {maxArtifactRun = kMaxArtifactRun, ...}) is an
 //   Aggregator over RawRr (raw RR ms + beat timestamps). It corrects with the
-//   capped Lipponen-Tarvainen rule and feeds the settled NN (nnMs, with their
-//   `nnTimesMs` as timeMs) into `inner`.
+//   capped Lipponen-Tarvainen rule and feeds the settled NN (nnMs) into
+//   `inner`, each with the ABSOLUTE raw timestamp (`rrTsMs`) of the input beat
+//   it came from (`nnSourceIndex`): the beat itself, or for a spline-corrected
+//   beat that beat's own timestamp. Not correctRr's relative clock, so a seam
+//   needs no clock translation.
 //
 //   * ANY chunking (random cuts, one-beat chunks, empty chunks, chunks as
 //     ranges or as copies, combined left- or right-nested, or one state sliced)
 //     finishes to exactly what one pass gives, and that is the capped
-//     `correctRr` over all the beats: nn and nnTimesMs bit for bit.
+//     `correctRr` over all the beats: nn bit for bit, paired with the absolute
+//     timestamps of the source beats.
 //   * It obeys the aggregator laws (identity, split, associativity, singletons,
 //     slicing, finishPure, roundTrip) and checkpoints/resumes mid-stream.
 //   * Its state is bounded: it keeps a raw head and tail, not the series, so an
@@ -92,13 +96,22 @@ bool _sameBeats(Beats a, Beats b) {
   return true;
 }
 
-void _expectIsCorrectRr(Beats got, RrSeriesLike s, String why) {
-  final want = correctRr(s.rr, rrTsMs: s.ts);
-  expectBitIdentical(got.nnMs, want.nn, '$why nn');
-  expectBitIdentical(got.timeMs, want.nnTimesMs, '$why nnTimesMs');
+typedef RrSeriesLike = ({List<double> rr, List<double> ts});
+
+/// The oracle: capped (or [cap]ped) correctRr's NN, each paired with the
+/// ABSOLUTE timestamp of the input beat it came from.
+({List<double> nn, List<double> t}) _oracle(RrSeriesLike s,
+    {int? cap = kMaxArtifactRun}) {
+  final c = correctRr(s.rr, rrTsMs: s.ts, maxArtifactRun: cap);
+  return (nn: c.nn, t: [for (final i in c.nnSourceIndex) s.ts[i]]);
 }
 
-typedef RrSeriesLike = ({List<double> rr, List<double> ts});
+void _expectIsCorrectRr(Beats got, RrSeriesLike s, String why,
+    {int? cap = kMaxArtifactRun}) {
+  final want = _oracle(s, cap: cap);
+  expectBitIdentical(got.nnMs, want.nn, '$why nn');
+  expectBitIdentical(got.timeMs, want.t, '$why absolute times');
+}
 
 RawRr _raw(RrSeriesLike s) => RawRr.of(s.rr, s.ts);
 
@@ -147,9 +160,7 @@ void main() {
     test('maxArtifactRun: null is the uncapped corrector', () {
       final s = _runs(9, [150, 150], [40]);
       final got = _sandwich(maxArtifactRun: null).run(_raw(s));
-      final want = correctRr(s.rr, rrTsMs: s.ts, maxArtifactRun: null);
-      expectBitIdentical(got.nnMs, want.nn, 'nn');
-      expectBitIdentical(got.timeMs, want.nnTimesMs, 'nnTimesMs');
+      _expectIsCorrectRr(got, s, 'uncapped', cap: null);
     });
   });
 
@@ -158,7 +169,7 @@ void main() {
         G.intIn(1, 100000), (seed) {
       final s = _synth(seed, 0.07);
       final batch = _raw(s);
-      final want = correctRr(s.rr, rrTsMs: s.ts);
+      final want = _oracle(s);
       final agg = _sandwich();
       final r = Rng(seed);
       for (var k = 0; k < 3; k++) {
@@ -170,7 +181,7 @@ void main() {
           ('sliced', runSliced(agg, batch, bounds)),
         ]) {
           expectBitIdentical(got.nnMs, want.nn, '$name $bounds nn');
-          expectBitIdentical(got.timeMs, want.nnTimesMs, '$name $bounds t');
+          expectBitIdentical(got.timeMs, want.t, '$name $bounds t');
         }
       }
     }, cases: 25, budget: const Duration(seconds: 90));
@@ -198,14 +209,14 @@ void main() {
         [a + 1, a + 2, a + 3, a + 4, b - 2, b - 1],
       ]) {
         final bounds = [0, ...cuts, batch.length];
-        final want = correctRr(s.rr, rrTsMs: s.ts);
+        final want = _oracle((rr: s.rr, ts: s.ts));
         for (final got in [
           runChunked(agg, batch, bounds),
           runChunkedRight(agg, batch, bounds),
           runSliced(agg, batch, bounds),
         ]) {
           expectBitIdentical(got.nnMs, want.nn, 'cuts $cuts nn');
-          expectBitIdentical(got.timeMs, want.nnTimesMs, 'cuts $cuts t');
+          expectBitIdentical(got.timeMs, want.t, 'cuts $cuts t');
         }
       }
     });
@@ -221,17 +232,97 @@ void main() {
       ]);
       final batch = _raw(s);
       final agg = _sandwich();
-      final want = correctRr(s.rr, rrTsMs: s.ts);
+      final want = _oracle(s);
       var seams = 0;
       for (var i = 1; i < s.rr.length; i++) {
         if ((s.ts[i] - s.ts[i - 1]) - s.rr[i] > 1000) {
           seams++;
           final got = runChunked(agg, batch, [0, i - 1, i, i + 1, batch.length]);
-          expectBitIdentical(got.timeMs, want.nnTimesMs, 'seam at $i t');
+          expectBitIdentical(got.timeMs, want.t, 'seam at $i t');
           expectBitIdentical(got.nnMs, want.nn, 'seam at $i nn');
         }
       }
       expect(seams, greaterThan(0), reason: 'the series must have dropouts');
+    });
+  });
+
+  // Series much longer than the sandwich's head + tail windows, so most beats
+  // are settled into `inner` and a seam is re-corrected from the windows alone.
+  group('long series (settled middle in play)', () {
+    final long = <String, RrSeriesLike>{
+      'synthetic, dirty, long': _synth(11, 0.7),
+      'synthetic, calm, long, dropouts': _synth(12, 2.0, noise: 0.05, gaps: 30),
+      'runs over the cap, long': _runs(13, [700, 700, 700], [40, 50]),
+    };
+
+    for (final e in long.entries) {
+      test('${e.key}: random cuts, every path', () {
+        final batch = _raw(e.value);
+        expect(batch.length, greaterThan(1200), reason: 'longer than the windows');
+        final want = _oracle(e.value);
+        final agg = _sandwich();
+        _expectIsCorrectRr(agg.run(batch), e.value, 'one pass');
+        final r = Rng(e.key.length);
+        for (var k = 0; k < 4; k++) {
+          final bounds = randomBounds(r, batch.length);
+          for (final (name, got) in [
+            ('chunked', runChunked(agg, batch, bounds)),
+            ('copies', runChunked(agg, batch, bounds, copy: true)),
+            ('right', runChunkedRight(agg, batch, bounds)),
+            ('sliced', runSliced(agg, batch, bounds)),
+          ]) {
+            expectBitIdentical(got.nnMs, want.nn, '$name $bounds nn');
+            expectBitIdentical(got.timeMs, want.t, '$name $bounds t');
+          }
+        }
+      });
+    }
+
+    forAll('dense artifacts (ectopy, runs, dropouts), random cuts',
+        G.intIn(1, 100000), (seed) {
+      final s = _synth(seed, 0.5, noise: 1.5, gaps: 20);
+      final batch = _raw(s);
+      final want = _oracle(s);
+      final agg = _sandwich();
+      final bounds = randomBounds(Rng(seed), batch.length);
+      final got = runChunked(agg, batch, bounds);
+      expectBitIdentical(got.nnMs, want.nn, 'seed $seed $bounds nn');
+      expectBitIdentical(got.timeMs, want.t, 'seed $seed $bounds t');
+    }, cases: 12, budget: const Duration(seconds: 90));
+
+    test('even chunks of many sizes, left and right', () {
+      final s = long['synthetic, dirty, long']!;
+      final batch = _raw(s);
+      final agg = _sandwich();
+      for (final size in [7, 100, 283, 284, 285, 560, 561, 1000]) {
+        final bounds = [
+          for (var i = 0; i < batch.length; i += size) i,
+          batch.length,
+        ];
+        _expectIsCorrectRr(runChunked(agg, batch, bounds), s, 'size $size left');
+        _expectIsCorrectRr(
+            runChunkedRight(agg, batch, bounds), s, 'size $size right');
+      }
+    });
+
+    test('one-beat chunks over a long series', () {
+      final s = long['runs over the cap, long']!;
+      final batch = _raw(s);
+      final agg = _sandwich();
+      _expectIsCorrectRr(
+          runChunked(agg, batch, singletonBounds(batch.length)), s, 'left');
+      _expectIsCorrectRr(runSliced(agg, batch, singletonBounds(batch.length)),
+          s, 'sliced');
+    });
+
+    test('state size does not grow with the series', () {
+      // a bounded inner (Count), so only the sandwich's own windows are sized
+      final agg = RrSandwich<int, int>(const Count<Beats>());
+      int chars(RrSeriesLike s) =>
+          jsonEncode(agg.encodeState(agg.fold(_raw(s)))).length;
+      final small = _synth(14, 1.4), big = _synth(14, 2.8);
+      expect(big.rr.length, greaterThan(small.rr.length * 1.5));
+      expect(chars(big), lessThan(chars(small) * 1.1 + 200));
     });
   });
 
@@ -242,6 +333,7 @@ void main() {
       _raw((rr: _synth(3, 0.05).rr.sublist(0, 3), ts: _synth(3, 0.05).ts.sublist(0, 3))),
       _raw(_synth(4, 0.04)),
       _raw(_runs(5, [100, 100], [36])),
+      _raw(_runs(6, [300, 300], [36])),
     ];
 
     test('identity, split, associativity, singletons, slicing, finishPure, '
@@ -311,14 +403,14 @@ void main() {
   group('A3: night aggregators fed through the sandwich', () {
     // The reference: capped correctRr's NN into the batch function.
     HrvTime hrvRef(RrSeriesLike s) {
-      final c = correctRr(s.rr, rrTsMs: s.ts);
-      return hrvExpected(Beats(Float64List.fromList(c.nn), Float64List.fromList(c.nnTimesMs)),
+      final o = _oracle(s);
+      return hrvExpected(Beats(Float64List.fromList(o.nn), Float64List.fromList(o.t)),
           gapAware: true);
     }
 
     double? originOf(RrSeriesLike s) {
-      final c = correctRr(s.rr, rrTsMs: s.ts);
-      return c.nnTimesMs.isEmpty ? null : c.nnTimesMs.first;
+      final o = _oracle(s);
+      return o.t.isEmpty ? null : o.t.first;
     }
 
     for (final e in cases.entries) {
@@ -370,6 +462,35 @@ void main() {
           }
         });
       }
+    }
+
+    // Series longer than the windows: the settled middle is in play.
+    for (final e in {
+      'synthetic, dirty, long': _synth(11, 0.7),
+      'runs over the cap, long': _runs(13, [700, 700, 700], [40, 50]),
+    }.entries) {
+      test('hrvTimeAggregator and prsaAggregator, ${e.key}', () {
+        final batch = _raw(e.value);
+        expect(batch.length, greaterThan(1200));
+        final hrv = RrSandwich<dynamic, HrvTime>(
+            hrvTimeAggregator(originMs: originOf(e.value)));
+        final prsa = RrSandwich<dynamic, Metric<PrsaResult>>(
+            NnColumn<dynamic, Metric<PrsaResult>>(
+                prsaAggregator(deceleration: true)));
+        final wantPrsa = decelerationCapacity(_oracle(e.value).nn);
+        final r = Rng(e.key.length + 2);
+        final wantHrv = hrvRef(e.value);
+        for (var k = 0; k < 3; k++) {
+          final bounds = randomBounds(r, batch.length);
+          expectHrvParity(runChunked(hrv, batch, bounds), wantHrv, 'hrv $bounds');
+          expectHrvParity(
+              runChunkedRight(hrv, batch, bounds), wantHrv, 'hrv right $bounds');
+          expect(same(runChunked(prsa, batch, bounds), wantPrsa), isTrue,
+              reason: 'prsa $bounds');
+          expect(same(runChunkedRight(prsa, batch, bounds), wantPrsa), isTrue,
+              reason: 'prsa right $bounds');
+        }
+      });
     }
 
     test('the sandwiched aggregators checkpoint and resume', () {

@@ -1,9 +1,14 @@
-// Wall-clock 30 s epoch feature rows, accumulated. RED-phase stub: signatures
-// only, bodies throw. test/onehz/epoch_rows_test.dart pins the contract.
+// Gap-anchored 30 s epoch feature rows, accumulated.
+// test/onehz/epoch_rows_test.dart pins the contract.
 //
-//   * Epoch starts are multiples of [kEpochMs] since the Unix epoch (UTC),
-//     whatever time the data starts at. An epoch is clipped only by a data gap
-//     (the seconds the data does not have), never by where a session starts.
+//   * Epochs are [kEpochMs] steps from the FIRST sample of each gap-free run
+//     (the run structure of valid accelerometer coverage, with the stager's
+//     60 s carry-forward as the gap threshold). A run starts at the first
+//     sample, and again at the first sample after any gap longer than that.
+//     The anchor depends on the data alone, never on session detection, so a
+//     run's anchor is final as soon as its first sample arrives. An epoch is
+//     clipped only by a data gap (the seconds the data does not have), never by
+//     where a session starts.
 //   * A row's features are `cardioEpochFeatures`' for that epoch: motion, hr,
 //     hrSd from the epoch's own seconds (motion against the local 1 g median
 //     of the +-150 s of accel magnitudes around it), rmssd / sdnn from the
@@ -20,7 +25,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../../aggregate/json_support.dart';
-import 'advanced_stager.dart' show StageSegment;
+import 'advanced_stager.dart' show AdvancedSleepStager, StageSegment;
 import 'accounting.dart' show SleepStage;
 import 'cardio_stager.dart';
 import 'cardio_row_cache.dart';
@@ -28,10 +33,23 @@ import '../types.dart';
 import '../foundations/rr_correction_kernel.dart' show SortedMultiset;
 import '../util.dart';
 
-/// Epoch length of the UTC wall-clock grid, ms.
+/// Epoch length, ms.
 const int kEpochMs = 30000;
 
-/// Raw features of one wall-clock epoch; NaN means not measurable.
+/// Seconds a valid accelerometer sample covers: the stager's bounded
+/// carry-forward plus the sample's own second. A valid sample within this many
+/// seconds of the previous one continues the run; a later one starts a new run.
+const int _kCoverSec = AdvancedSleepStager.maxAccelCarryForwardSec + 1;
+
+/// One gap-free run of valid accelerometer coverage and its epoch grid.
+class _Run {
+  _Run(this.startSec, this.endSec, this.anchorMs, this.cursorMs);
+  int startSec, endSec; // coverage [startSec, endSec) in seconds
+  final int anchorMs; // first sample; epochs are anchorMs + k * kEpochMs
+  int cursorMs; // next epoch start to generate
+}
+
+/// Raw features of one epoch; NaN means not measurable.
 class EpochFeatureRow {
   final int startMs;
   final double motion, hr, hrSd, rmssd, lfhf, rk, sdnn;
@@ -52,7 +70,6 @@ class EpochFeatureRow {
     final l = decodeList(value);
     if (l.length != 9 ||
         l[0] is! int ||
-        (l[0] as int) % kEpochMs != 0 ||
         l[8] is! int ||
         (l[8] as int) < 0) {
       throw const FormatException('Invalid epoch row');
@@ -73,21 +90,81 @@ class EpochFeatureRow {
 /// Final feature rows and the raw time lookback needed by pending rows.
 /// Each fold advances all input channels through the same watermark. A channel
 /// omitted from a fold has no samples there, rather than arriving late later.
+///
+/// [continuingAnchorMs]: the first valid accelerometer sample folded joins a
+/// gap-free run whose first sample (at that time) is not being re-folded, so the
+/// grid steps from there. Use it to start folding mid-run without computing the
+/// run's earlier rows; the anchor itself comes from the data.
 class EpochRows {
-  EpochRows({CardioRowCache? rowCache}) : _cache = rowCache;
+  EpochRows({CardioRowCache? rowCache, int? continuingAnchorMs})
+      : _cache = rowCache,
+        _seedMs = continuingAnchorMs;
   final CardioRowCache? _cache;
+  int? _seedMs;
   final _hr = <HrSample>[];
   final _accel = <AccelSample>[];
   final _rr = <double>[], _rt = <double>[];
   final _final = <EpochFeatureRow>[];
   final _pending = <int>{};
-  // Accel coverage with the same bounded 60-second carry as the stager. These
-  // intervals cost one pair per actual outage, not one entry per second.
-  final _runs = <(int, int)>[];
+  // Accel coverage with the same bounded 60-second carry as the stager, and
+  // each run's grid. These cost one entry per actual outage, not one per second.
+  final _runs = <_Run>[];
+  int _genRun = 0; // runs before this one have generated all their epochs
   int? _newest;
 
-  static int epochStartMs(int tsMs) => tsMs - tsMs % kEpochMs;
   int? get newestMs => _newest;
+
+  /// First sample (ms) of every gap-free run seen so far: the anchors of the
+  /// epoch grids. Final as soon as the run's first sample has been folded.
+  List<int> get runAnchorsMs => [for (final r in _runs) r.anchorMs];
+
+  /// Start of the epoch (of the run whose coverage includes [tsMs]) that holds
+  /// [tsMs], or null when no run covers it.
+  int? epochStartMsFor(int tsMs) {
+    for (var i = _runs.length - 1; i >= 0; i--) {
+      final r = _runs[i];
+      if (tsMs >= r.anchorMs) {
+        return tsMs < r.endSec * 1000 ? _epochIn(r, tsMs) : null;
+      }
+    }
+    return null;
+  }
+
+  static int _epochIn(_Run r, int tsMs) =>
+      r.anchorMs + (tsMs - r.anchorMs) ~/ kEpochMs * kEpochMs;
+
+  // Extends the last run or opens a new one for a valid accel sample at tsMs.
+  void _cover(double tsMs) {
+    final ms = tsMs.floor();
+    final second = (tsMs / 1000).floor();
+    if (_runs.isNotEmpty && second <= _runs.last.endSec) {
+      final run = _runs.last;
+      run.endSec = math.max(run.endSec, second + _kCoverSec);
+      return;
+    }
+    final seed = _runs.isEmpty ? _seedMs : null;
+    if (seed != null && seed > ms) {
+      throw ArgumentError('continuing anchor is after the first sample');
+    }
+    final anchor = seed ?? ms;
+    _runs.add(_Run((anchor / 1000).floor(), second + _kCoverSec, anchor,
+        anchor + (ms - anchor) ~/ kEpochMs * kEpochMs));
+    _seedMs = null;
+  }
+
+  // Opens the epochs that exist so far: starts on a run's grid that lie inside
+  // its coverage and are not after the newest sample.
+  void _generate() {
+    for (var i = _genRun; i < _runs.length; i++) {
+      final r = _runs[i];
+      final limit = math.min(r.endSec * 1000, _newest! + 1);
+      for (; r.cursorMs < limit; r.cursorMs += kEpochMs) {
+        _pending.add(r.cursorMs);
+      }
+      // only the newest run can still grow
+      if (i + 1 < _runs.length) _genRun = i + 1;
+    }
+  }
   List<EpochFeatureRow> get finalRows => List.unmodifiable(_final);
 
   void fold(
@@ -103,8 +180,7 @@ class EpochRows {
         if (!t.isFinite || (last != null && t < last)) {
           throw ArgumentError('samples must have finite, ascending times');
         }
-        if (_newest != null &&
-            epochStartMs(t.floor()) <= epochStartMs(_newest! - 240000)) {
+        if (_newest != null && t.floor() < _newest! - 240000 + kEpochMs) {
           throw ArgumentError('sample precedes the settled watermark');
         }
         last = t;
@@ -120,7 +196,6 @@ class EpochRows {
     void observe(double t) {
       final ms = t.floor();
       _newest = _newest == null ? ms : math.max(_newest!, ms);
-      _pending.add(epochStartMs(ms));
     }
 
     for (final h in hr) {
@@ -130,14 +205,7 @@ class EpochRows {
     for (final a in accel) {
       _accel.add(a);
       observe(a.tsMs);
-      if (!a.valid) continue;
-      final second = (a.tsMs / 1000).floor();
-      if (_runs.isNotEmpty && second <= _runs.last.$2) {
-        final prev = _runs.removeLast();
-        _runs.add((prev.$1, math.max(prev.$2, second + 61)));
-      } else {
-        _runs.add((second, second + 61));
-      }
+      if (a.valid) _cover(a.tsMs);
     }
     _rr.addAll(rrMs);
     _rt.addAll(rrTsMs);
@@ -145,13 +213,14 @@ class EpochRows {
       observe(t);
     }
     if (_newest == null) return;
+    _generate();
     final starts = _pending.where((s) => s <= _newest! - 240000).toList()
       ..sort();
     _final.addAll(_rows(starts));
     _pending.removeAll(starts);
     // The oldest still-possible row starts after the final watermark; retain
     // its widest left window, even when there are no pending rows in a gap.
-    final oldest = epochStartMs(_newest! - 240000) + kEpochMs - 165000;
+    final oldest = _newest! - 240000 + 1 - 165000;
     _hr.removeWhere((h) => h.tsMs < oldest);
     _accel.removeWhere((a) => a.tsMs < oldest);
     final drop = _lower(_rt, oldest.toDouble());
@@ -328,16 +397,20 @@ class EpochRows {
     final rows = allRows();
     final pieces = <StageSegment>[];
     var cursor = startSec;
+    final byStart = {for (final r in rows) r.startMs: r};
     for (final run in _runs) {
-      final lo = math.max(startSec, run.$1), hi = math.min(endSec, run.$2);
+      final lo = math.max(startSec, run.startSec),
+          hi = math.min(endSec, run.endSec);
       if (hi <= lo) continue;
       if (lo > cursor) pieces.add(StageSegment(cursor, lo, 'unobserved'));
-      final byStart = {for (final r in rows) r.startMs: r};
-      // A carry-only epoch still consumes wall-clock time in the classifier.
+      // A carry-only epoch still consumes time in the classifier.
       // Keep its absent HR in the coverage denominator; omitting it can turn
       // an otherwise abstained run into apparently sufficient cardiac data.
+      final first = lo * 1000 <= run.anchorMs
+          ? run.anchorMs
+          : _epochIn(run, lo * 1000);
       final chosen = <EpochFeatureRow>[
-        for (var s = epochStartMs(lo * 1000); s < hi * 1000; s += kEpochMs)
+        for (var s = first; s < hi * 1000; s += kEpochMs)
           byStart[s] ??
               EpochFeatureRow(s, 0, double.nan, 0, double.nan, double.nan,
                   double.nan, double.nan)
@@ -393,8 +466,10 @@ class EpochRows {
 
   Map<String, dynamic> toJson() => {
         'type': 'EpochRows',
-        'version': 1,
+        'version': 2,
         'newest': _newest,
+        'seed': _seedMs,
+        'genRun': _genRun,
         'rows': [for (final r in _final) r._encode()],
         'pending': _pending.toList()..sort(),
         'hr': [
@@ -413,16 +488,17 @@ class EpochRows {
         'rr': _rr,
         'rt': _rt,
         'runs': [
-          for (final r in _runs) [r.$1, r.$2]
+          for (final r in _runs) [r.startSec, r.endSec, r.anchorMs, r.cursorMs]
         ],
       };
 
   factory EpochRows.fromJson(Map<String, dynamic> json) {
     try {
-      if (json['type'] != 'EpochRows' || json['version'] != 1) {
+      if (json['type'] != 'EpochRows' || json['version'] != 2) {
         throw const FormatException('Unsupported EpochRows checkpoint');
       }
-      final er = EpochRows();
+      final er = EpochRows(continuingAnchorMs: field(json, 'seed') as int?);
+      er._genRun = field(json, 'genRun') as int;
       er._newest = field(json, 'newest') as int?;
       er._final.addAll([
         for (final v in decodeList(field(json, 'rows')))
@@ -450,14 +526,27 @@ class EpochRows {
       er._rt.addAll(decodeDoubles(field(json, 'rt')));
       for (final v in decodeList(field(json, 'runs'))) {
         final l = decodeList(v);
-        if (l.length != 2 ||
-            l[0] is! int ||
-            l[1] is! int ||
+        if (l.length != 4 ||
+            l.any((x) => x is! int) ||
             (l[0] as int) >= (l[1] as int) ||
-            (er._runs.isNotEmpty && (l[0] as int) <= er._runs.last.$2)) {
+            (l[2] as int) < (l[0] as int) * 1000 ||
+            (l[2] as int) >= (l[1] as int) * 1000 ||
+            (l[3] as int) < (l[2] as int) ||
+            ((l[3] as int) - (l[2] as int)) % kEpochMs != 0 ||
+            (er._runs.isNotEmpty && (l[0] as int) <= er._runs.last.endSec)) {
           throw const FormatException('Invalid coverage run');
         }
-        er._runs.add((l[0] as int, l[1] as int));
+        er._runs.add(_Run(l[0] as int, l[1] as int, l[2] as int, l[3] as int));
+      }
+      // Every epoch start belongs to the grid of the run that covers it.
+      bool onGrid(int s) {
+        for (var i = er._runs.length - 1; i >= 0; i--) {
+          final r = er._runs[i];
+          if (s >= r.anchorMs) {
+            return s < r.endSec * 1000 && (s - r.anchorMs) % kEpochMs == 0;
+          }
+        }
+        return false;
       }
       bool ascending(Iterable<double> values) {
         double? prev;
@@ -475,19 +564,23 @@ class EpochRows {
           !er._rr.every((v) => v.isFinite) ||
           !ascending(er._final.map((r) => r.startMs.toDouble())) ||
           er._final.map((r) => r.startMs).toSet().length != er._final.length ||
+          er._final.any((r) => !onGrid(r.startMs)) ||
           er._pending.any((s) =>
-              s % kEpochMs != 0 ||
+              !onGrid(s) ||
               (er._final.isNotEmpty && s <= er._final.last.startMs)) ||
+          er._genRun > er._runs.length ||
+          (er._runs.isEmpty && er._genRun != 0) ||
+          (er._runs.isNotEmpty && er._genRun >= er._runs.length) ||
+          (er._seedMs != null && er._runs.isNotEmpty) ||
           (er._newest != null &&
               (er._final.any((r) => r.startMs > er._newest! - 240000) ||
                   er._pending.any((s) =>
-                      s <= er._newest! - 240000 ||
-                      s > epochStartMs(er._newest!)) ||
-                  er._pending.length > 14 ||
+                      s <= er._newest! - 240000 || s > er._newest!) ||
+                  er._pending.length > 20 ||
                   er._hr.any((h) => h.tsMs >= er._newest! + 1) ||
                   er._accel.any((a) => a.tsMs >= er._newest! + 1) ||
                   er._rt.any((t) => t >= er._newest! + 1) ||
-                  er._runs.any((r) => r.$2 > er._newest! ~/ 1000 + 61))) ||
+                  er._runs.any((r) => r.endSec > er._newest! ~/ 1000 + _kCoverSec))) ||
           (er._newest == null &&
               (er._final.isNotEmpty ||
                   er._pending.isNotEmpty ||
