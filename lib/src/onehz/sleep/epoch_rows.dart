@@ -421,7 +421,7 @@ class EpochRows {
         hash = (hash ^ bits.getUint64(0, Endian.little)) * 0x100000001b3;
       }
 
-      number(0x45504f434832.toDouble()); // EPOCH2, separate from old grid keys.
+      number(0x45504f434833.toDouble()); // EPOCH3: 81b9b4b changed row semantics.
       for (final a in av) {
         number(a.tsMs);
         number(a.x);
@@ -565,7 +565,7 @@ class EpochRows {
 
   Map<String, dynamic> toJson() => {
         'type': 'EpochRows',
-        'version': 3,
+        'version': 4,
         'phase': phaseMs,
         'newest': _newest,
         'seed': _seedMs,
@@ -595,7 +595,7 @@ class EpochRows {
 
   factory EpochRows.fromJson(Map<String, dynamic> json) {
     try {
-      if (json['type'] != 'EpochRows' || json['version'] != 3) {
+      if (json['type'] != 'EpochRows' || json['version'] != 4) {
         throw const FormatException('Unsupported EpochRows checkpoint');
       }
       final er = EpochRows(

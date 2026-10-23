@@ -15,7 +15,7 @@ Implemented APIs:
 - `NnColumn(inner)` delegates fold, combine, finish, and persistence to a
   `DoubleColumn` aggregator over `Beats.nnMs`.
 - `EpochRows` implements the anchored grid (below), fold,
-  final/provisional/all rows, `newestMs`, JSON restore (checkpoint version 3),
+  final/provisional/all rows, `newestMs`, JSON restore (checkpoint version 4),
   and `stageWindow`. It keeps final features and a
   raw time tail. The provisional watermark is four minutes behind the newest
   sample. Gravity references use a sliding sorted time window. Partial HR
@@ -93,7 +93,8 @@ frozen pre-bump stager (`test/onehz/support/pre_bump_stager.dart`).
   complete through a time; the stager passes the session end.
 - `stageWindow` classifies whole epochs only; a sub-epoch remainder joins the
   last one, as before the bump.
-- Checkpoint version 3 (versions 1 and 2 are refused): adds `phase` and the
+- Checkpoint version 4 (versions 1 to 3 are refused; 81b9b4b changed row
+  semantics, so version 3 rows are wrong). Version 3 added `phase` and the
   pending `anchor`. A phase its rows contradict is refused. Accel is kept 61 s
   longer so carry from a dropped sample still reaches a live window.
 - The memo does not reuse interior rows of a larger window for a smaller

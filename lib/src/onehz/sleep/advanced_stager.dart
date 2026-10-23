@@ -1352,6 +1352,17 @@ class AdvancedSleepStager {
   /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
+  // Dart's List.sort is not stable; index breaks ties so equal timestamps keep
+  // list order.
+  static List<T> _stableByTs<T>(List<T> xs, int Function(T) ts) {
+    final idx = List<int>.generate(xs.length, (i) => i)
+      ..sort((a, b) {
+        final c = ts(xs[a]).compareTo(ts(xs[b]));
+        return c != 0 ? c : a.compareTo(b);
+      });
+    return [for (final i in idx) xs[i]];
+  }
+
   /// Default staging path: 30 s epochs anchored at the session onset (the first
   /// valid accelerometer sample at or after [start], phase 0), as before the
   /// combined bump. Samples outside [start, end) are not read, so features are
@@ -1371,9 +1382,11 @@ class AdvancedSleepStager {
         rowCache: rowCache, anchorMs: onset == null ? null : onset * 1000);
     final beats = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
     rows.fold(
-      hr: [for (final h in hr)
-        if (h.ts >= start && h.ts < end) HrSample(h.ts * 1000.0, h.bpm)],
-      accel: [for (final x in g) AccelSample(x.ts * 1000.0, x.x, x.y, x.z, valid: x.valid)],
+      // Stable by time: equal timestamps keep list order (the oracle's last-wins).
+      hr: [for (final h in _stableByTs([
+        for (final h in hr) if (h.ts >= start && h.ts < end) h
+      ], (h) => h.ts)) HrSample(h.ts * 1000.0, h.bpm)],
+      accel: [for (final x in _stableByTs(g, (x) => x.ts)) AccelSample(x.ts * 1000.0, x.x, x.y, x.z, valid: x.valid)],
       rrMs: [for (final r in beats) r.rrMs],
       rrTsMs: [for (final r in beats) r.ts * 1000.0],
       throughMs: end * 1000 - 1, // the session end closes the data, as a clip
