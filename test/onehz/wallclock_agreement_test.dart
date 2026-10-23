@@ -22,6 +22,8 @@ import 'dart:io';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import 'support/pre_bump_stager.dart';
+
 const kMinAgreement = 0.97;
 const _base = 1700000013; // unaligned: 1700000013 % 30 == 3
 
@@ -118,6 +120,39 @@ void main() {
     final agreement = agree / compared;
     expect(agreement, greaterThanOrEqualTo(kMinAgreement),
         reason: 'agreement $agree/$compared = ${agreement.toStringAsFixed(4)}');
+  });
+
+  // Grid option 2 (owner decision 2026-10-23): the window start is phase 0 of
+  // the epoch grid, as before the bump. On this night the start is the first
+  // sample, so agreement with the frozen hypnogram is exactly 1.0 (it is 1.0
+  // under the gap-anchored grid too; this keeps it there).
+  test('onset grid: agreement with the frozen hypnogram is exactly 1.0', () {
+    final old = _golden();
+    final stages = [
+      for (final g in now.stages) (g.start - _base, g.end - _base, g.stage)
+    ];
+    var compared = 0, agree = 0;
+    for (var start = _base; start + 30 <= _base + nightOrNull.seconds; start += 30) {
+      final mid = start + 15 - _base;
+      final a = _at(old, mid), b = _at(stages, mid);
+      if (a == null || b == null || a == 'unobserved' || b == 'unobserved') continue;
+      compared++;
+      if (a == b) agree++;
+    }
+    expect(compared, greaterThan(1000));
+    expect(agree, compared, reason: 'agreement $agree/$compared');
+  });
+
+  test('a window that starts mid-night (unaligned to the first sample) is '
+      'staged on the onset grid: labels equal the pre-bump stager', () {
+    // 5 h in, 17 s off the 30 s steps of the first sample, 3 h long.
+    final start = _base + 18000 + 17, end = start + 3 * 3600;
+    final got = AdvancedSleepStager.stageWindow(
+            start, end, nightOrNull.grav, nightOrNull.hrTs, rr: nightOrNull.rrSec)
+        .stages;
+    final want = preBumpStageSessionCardio(
+        start, end, nightOrNull.grav, nightOrNull.hrTs, nightOrNull.rrSec);
+    expect(showSegments(got), showSegments(want));
   });
 
   test('the real night\'s hypnogram boundaries sit on the grid of their '

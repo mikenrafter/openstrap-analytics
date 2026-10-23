@@ -31,6 +31,7 @@ import 'package:test/test.dart';
 
 import '../support/property.dart';
 import 'support/causal_night.dart';
+import 'support/pre_bump_stager.dart';
 
 const _alignedT0 = 1700000010000; // = kT0Ms, a multiple of 30,000
 
@@ -444,22 +445,27 @@ void main() {
       });
     }
 
-    test('a session that begins inside a gap-free run is staged on that run\'s '
-        'grid (the anchor does not depend on where the session starts)', () {
+    test('a session that begins inside a gap-free run is staged on ITS OWN '
+        'start (grid option 2: phase 0 at the session start, as pre-bump)', () {
+      // Replaces the gap-anchored expectation (owner decision 2026-10-23): the
+      // run\'s grid no longer decides where a session\'s epochs sit.
       final s = _Input.make(_night(), t0Ms: _alignedT0 + 13000, seed: 37);
-      final er = _oneFold(s);
       for (final (from, to) in [(1000, 2400), (777, 2111), (1234, 2999)]) {
         final t0 = s.t0Ms ~/ 1000;
-        final want = er.stageWindow(t0 + from, t0 + to);
         final got = batch(s, from, to).stages;
-        expect(show(got), show(want), reason: 'session +$from..+${to}s');
-        // and its interior boundaries are on the run's grid, not the session's
+        var checked = 0;
         for (var i = 1; i < got.length; i++) {
           if (got[i].stage == 'unobserved' || got[i - 1].stage == 'unobserved') {
             continue;
           }
-          expect((got[i].start - t0) % 30, 0, reason: 'boundary ${got[i].start}');
+          expect((got[i].start - (t0 + from)) % 30, 0,
+              reason: 'session +$from..+${to}s: boundary ${got[i].start}');
+          checked++;
         }
+        expect(checked, greaterThan(2), reason: 'session +$from..+${to}s');
+        expect(show(got),
+            show(preBumpStageSessionCardio(t0 + from, t0 + to, s.grav, s.hrTs, s.rrTsSec)),
+            reason: 'session +$from..+${to}s equals the pre-bump labels');
       }
     });
 

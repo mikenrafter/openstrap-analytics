@@ -9,6 +9,8 @@ import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+import 'support/pre_bump_stager.dart';
+
 void main() {
   // Build a synthetic capture at 1 Hz: [dayH] active day, [nightH] still night
   // with low sleeping HR + physiological RR, then [tailH] active.
@@ -312,6 +314,88 @@ void main() {
       final m = AdvancedSleepStager.mainSleep(d.grav, d.hr, rr: d.rr);
       expect(m.present, isTrue);
       expect(m.note, contains('cardio'));
+    });
+  });
+
+  group('grid option 2: staging anchors its epochs at the session start', () {
+    // Owner decision 2026-10-23: the gap-anchored grid leaves the bump. The
+    // default stager's labels equal the pre-bump stager's (frozen as an oracle
+    // in support/pre_bump_stager.dart, logic of 83fc308), whatever run the
+    // session starts in.
+    test('detected sessions: labels equal the pre-bump stager exactly', () {
+      final d = build(2, 7, 1);
+      final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr, rr: d.rr);
+      expect(sessions, isNotEmpty);
+      for (final s in sessions) {
+        final want = preBumpStageSessionCardio(s.start, s.end, d.grav, d.hr, d.rr);
+        expect(showSegments(s.stages), showSegments(want),
+            reason: 'session ${s.start}..${s.end}');
+      }
+    });
+
+    test('a session that starts mid-run: every boundary is on ITS grid '
+        '(start + k * 30 s), not the run\'s', () {
+      final d = build(2, 7, 1);
+      for (final (from, to) in [(777, 9000), (1234, 20000), (4321, 25000)]) {
+        final start = d.nightStart + from, end = d.nightStart + to;
+        final got = AdvancedSleepStager.stageWindow(start, end, d.grav, d.hr,
+            rr: d.rr);
+        var checked = 0;
+        for (var i = 1; i < got.stages.length; i++) {
+          final g = got.stages[i];
+          if (g.stage == 'unobserved' || got.stages[i - 1].stage == 'unobserved') {
+            continue;
+          }
+          expect((g.start - start) % 30, 0,
+              reason: 'window +$from..+$to, boundary ${g.start}');
+          checked++;
+        }
+        expect(checked, greaterThan(5), reason: 'window +$from..+$to');
+      }
+    });
+
+    test('a session that starts mid-run: labels equal the pre-bump stager '
+        'exactly (epochs from the start, features clipped at the session)', () {
+      // Offsets of 0 and 30 s share the run's phase but not its context: the
+      // pre-bump stager reads nothing outside [start, end).
+      final d = build(2, 7, 1);
+      for (final (from, to) in [(30, 9000), (777, 9000), (1234, 20000), (4321, 25000)]) {
+        final start = d.nightStart + from, end = d.nightStart + to;
+        final got = AdvancedSleepStager.stageWindow(start, end, d.grav, d.hr,
+            rr: d.rr);
+        final want = preBumpStageSessionCardio(start, end, d.grav, d.hr, d.rr);
+        expect(showSegments(got.stages), showSegments(want),
+            reason: 'window +$from..+$to');
+      }
+    });
+
+    test('after a dropout longer than the carry the next sample re-anchors '
+        '(pre-bump); before it the grid is the session start\'s', () {
+      // Two still blocks, 110 s apart (> the 61 s usable-run gap; the second
+      // starts at 8110, 8110 % 30 = 10).
+      final g = stillBlocks([(5000, 3000), (8110, 3000)]);
+      final rr = <RrTs>[
+        for (var t = 5000; t < 11110; t++)
+          if (t < 8000 || t >= 8110) RrTs(t, 1150.0 + (t.isEven ? 20 : -20))
+      ];
+      for (final start in [5000, 5017, 5400]) {
+        final got = AdvancedSleepStager.stageWindow(start, 11110, g.grav, g.hr,
+            rr: rr);
+        var before = 0, after = 0;
+        for (var i = 1; i < got.stages.length; i++) {
+          final a = got.stages[i - 1], b = got.stages[i];
+          if (a.stage == 'unobserved' || b.stage == 'unobserved') continue;
+          if (b.start < 8000) {
+            expect((b.start - start) % 30, 0, reason: 'start $start, run 1: ${b.start}');
+            before++;
+          } else {
+            expect((b.start - 8110) % 30, 0, reason: 'start $start, run 2: ${b.start}');
+            after++;
+          }
+        }
+        expect(before, greaterThan(0), reason: 'start $start');
+        expect(after, greaterThan(0), reason: 'start $start');
+      }
     });
   });
 
