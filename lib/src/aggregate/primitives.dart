@@ -292,6 +292,8 @@ class Max<B extends Batch<B>> extends Aggregator<double?, B, double?> {
   double? decodeState(Object? json) => decodeDoubleOrNull(json);
 }
 
+// Delegates updates/removal to Welford 1962 and partition merging to Chan,
+// Golub & LeVeque 1983; full references and clamp details: RunningMoments.
 /// Centered moments of non-missing double column values.
 class Moments<B extends Batch<B>>
     extends Aggregator<RunningMoments, B, RunningMoments> {
@@ -705,6 +707,8 @@ class _AffineState {
   double offset = 0;
 }
 
+// Algebraically equal to the EWMA recurrence: f_x(c)=a*c+lambda*x, a=1-lambda;
+// f_y(f_x(c))=a*a*c+a*lambda*x+lambda*y. Floating-point order may differ.
 /// An exponentially weighted moving average, as the composed affine map of the
 /// running value: each row x applies c -> (1 - lambda) * c + lambda * x.
 ///

@@ -22,7 +22,7 @@ import 'accounting.dart' show SleepStage;
 import 'cardio_stager.dart'
     show CardioStagerResult, kDefaultDeepScoreCut, kDefaultRemScoreCut;
 
-// Internal ESTIMATE with low confidence, derived from cardioStager() score
+// Internal rule, ESTIMATE with low confidence, derived from cardioStager() score
 // cutoffs. Long 2016 / Fonseca 2015/2018 supports the underlying staging family,
 // not the unpublished margin or bounds. This is not a confidence interval.
 /// How far (in stage-score units) a score must sit from its cutoff before the

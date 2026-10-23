@@ -174,6 +174,10 @@ Metric<HrDip> hrDip(List<double> dayHr, List<double> nightHr,
 /// [hrDip] from the day side's valid-sample count and sum, accumulated in
 /// sample order (so `daySum / dayCount` is the batch day mean exactly). For a
 /// caller that keeps the waking day as running totals instead of a list.
+// HR-dip bands and minimum sample count are an internal rule, ESTIMATE with
+// low confidence. The >=10%, 0-10%, <0% bands borrow the BP-dip convention.
+// Avram 2019 / Dial 2025 above concern nocturnal RHR, not validation of these
+// HR-dip bands. The night mean here is the mean of all valid night samples.
 // Computes hrDip() with identical day mean and shared scoring when daySum is
 // accumulated in sample order over the same valid samples.
 Metric<HrDip> hrDipFromDayTotals(int dayCount, double daySum,

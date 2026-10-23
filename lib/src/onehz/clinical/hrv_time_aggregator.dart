@@ -56,6 +56,9 @@ class Beats extends Batch<Beats> {
 /// Builds the composed time-domain HRV summary for a columnar beat batch.
 ///
 /// With [gapAware] false, times and five-minute bins are deliberately ignored.
+// The jitter rejection/exemption thresholds are an internal rule, ESTIMATE
+// with low confidence; Welch 1967 and Hirsch & Bishop 1981 support spectral
+// and respiratory components only. See rmssd_gate.dart.
 // Task Force 1996 time-domain HRV, now also the hrvTime() one-slice path.
 // Moments, two-beat differences, three-beat lag products and five-minute bins
 // retain the same sufficient statistics. gapAware:false omits timestamp-

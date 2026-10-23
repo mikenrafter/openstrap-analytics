@@ -1,3 +1,4 @@
+// Rejection and breathing-line exemption thresholds are an internal rule.
 // Welch 1967 spectral estimation; Hirsch & Bishop 1981 provides the
 // breathing/RSA basis. This is hrvTime()'s existing internal jitter policy,
 // ESTIMATE with low confidence, not a published classifier. Shared formulas

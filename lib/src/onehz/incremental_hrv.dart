@@ -4,7 +4,8 @@ part of 'incremental.dart';
 // Task Force 1996 hrvTime() statistics with retained moments and gap-aware
 // differences. Applicable jitter exemptions/fallbacks invoke batch hrvTime();
 // otherwise numerical accumulation differs. The jitter policy is an internal
-// ESTIMATE with low confidence. Checked numeric field tolerance is max(1e-9
+// rule, ESTIMATE with low confidence. Welch 1967 and Hirsch & Bishop 1981
+// support spectral/respiratory components only; see rmssd_gate.dart. Checked numeric field tolerance is max(1e-9
 // absolute, 1e-8 relative); presence, tier, note, inputs and beat counts match
 // exactly.
 class IncrementalHrvTime {

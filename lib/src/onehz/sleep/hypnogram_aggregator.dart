@@ -4,7 +4,16 @@ import '../../aggregate/aggregator.dart';
 import '../../aggregate/json_support.dart';
 import 'hypnogram.dart';
 
-// Reformulation of AdvancedSleepStager.computeMetrics(): sums integer stage
+// Definition basis: Berry, R. B., et al. The AASM Manual for the Scoring of
+// Sleep and Associated Events: Rules, Terminology and Technical Specifications.
+// American Academy of Sleep Medicine. TST sums light/deep/REM durations; SOL
+// runs from session start to first sleep; efficiency is TST / session duration.
+// Application conventions: session bounds stand in for lights-off/on, stages
+// are inferred rather than PSG-scored, and WASO counts explicit wake only
+// between first sleep and the end of final sleep, excluding terminal wake.
+// Gaps are not counted as wake. Sleep segments are summed without clipping
+// to session bounds; efficiency is capped at 1. No sleep gives null SOL.
+// Reformulation of AdvancedSleepStager.hypnogramMetrics(): sums integer stage
 // durations and retains onset, final wake, first REM and wake-transition
 // boundaries, reproducing its existing hypnogram accounting.
 /// Mergeable AASM-style hypnogram metrics over start-sorted segments.

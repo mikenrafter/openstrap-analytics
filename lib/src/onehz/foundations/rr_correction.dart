@@ -1,5 +1,6 @@
 // Lipponen & Tarvainen 2019 classification with Peltola 2012 correction policy.
-// The unpublished artifact-run cap is an internal ESTIMATE with low confidence:
+// The unpublished artifact-run cap is an internal rule, ESTIMATE with low
+// confidence:
 // over-cap runs become gaps and each side is re-corrected. Without a cap split
 // the result equals uncapped correction. Shared kernel arithmetic and raw seam
 // context preserve capped batch NN/classes; settled stream plus provisional tail

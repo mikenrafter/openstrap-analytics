@@ -168,6 +168,9 @@ class HeartRateZones {
     return HeartRateZoneSet(zones: built, maxHr: maxHr, source: source);
   }
 
+  // Cadence validation, median-capped interval credit and tail credit are an
+  // internal rule, ESTIMATE with low confidence. Karvonen 1957 supports the
+  // HR-reserve zone option, not this duration-credit policy.
   /// Time-in-zone from a time-ordered HR stream.
   ///
   /// Each sample is credited with the duration until the next sample. The tail

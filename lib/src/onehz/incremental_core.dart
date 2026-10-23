@@ -5,6 +5,13 @@ import 'util.dart';
 
 /// Removable, mergeable centered moments, with an origin to retain precision
 /// when a series has a large offset and a small spread.
+// Welford, B. P. (1962). Note on a method for calculating corrected sums of
+// squares and products. Technometrics 4(3):419-420.
+// add uses Welford's recurrence; remove algebraically reverses that update,
+// with a nonnegative M2 clamp. Partition merging follows
+// Chan, T. F., Golub, G. H., LeVeque, R. J. (1983). Algorithms for computing
+// the sample variance: analysis and recommendations. The American Statistician
+// 37(3):242-247.
 // Removable/mergeable centered-moment recurrence. Algebraically equivalent to
 // batch moments; floating-point order differs. The long-run drift fixture checks
 // 1e-9, not bit identity.
@@ -103,6 +110,10 @@ class RunningMoments {
 ///
 /// Only for data that really is integral. Values that are nearly all distinct
 /// (accelerometer magnitudes) gain nothing: the list is as long as the data.
+// Hyndman, R. J., Fan, Y. (1996). Sample quantiles in statistical packages.
+// The American Statistician 50(4):361-365.
+// percentileSorted implements type 7: zero-based rank = (n - 1) * p / 100,
+// linearly interpolating adjacent ranks; this histogram preserves that rule.
 // Exact histogram reformulation of percentileSorted(): counts identify identical
 // expanded-list ranks with the same interpolation. No new estimator.
 class IntHistogram {

@@ -1,3 +1,6 @@
+// Internal rule for SD1/SD2, pNNx thresholds and sustained-window voting.
+// Task Force 1996 supports successive-difference HRV components, not this
+// classifier or its SD1/SD2 thresholds; see hrv_time.dart.
 // Internal irregular-rhythm screen, ESTIMATE with low confidence. Batch and
 // stream share irregularWindowVerdict(); centered moments reorder floating-point
 // sums, while exact counters preserve window evidence. Shared adjacency excludes

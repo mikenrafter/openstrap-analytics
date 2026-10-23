@@ -74,6 +74,10 @@ double? median(List<double> xs) => percentile(xs, 50);
 ///
 /// One sorted window is grown, then updated by binary insertion/removal; it
 /// therefore avoids a fresh window allocation and sort at every position.
+// Hyndman, R. J., Fan, Y. (1996). Sample quantiles in statistical packages.
+// The American Statistician 50(4):361-365.
+// percentileSorted implements type 7: zero-based rank = (n - 1) * p / 100.
+// These clipped-window medians use that same adjacent-rank interpolation.
 // Exact reformulation of clipped-window medians: insertion/removal preserves
 // List.sort total order; percentileSorted retains the same ranks and
 // interpolation.
