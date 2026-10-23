@@ -485,13 +485,15 @@ class JitterState {
   NoiseShareSums closed = NoiseShareSums();
   double ssd = 0;
   int nd = 0;
-  SplayTreeSet<double> mags = SplayTreeSet<double>();
+  // Only coarseLattice reads magnitudes numerically; it ignores their order.
+  // Checkpoints sort these sets on encode to retain their original ordering.
+  Set<double> mags = <double>{};
 
   final SplayTreeMap<int, _Win> wins = SplayTreeMap<int, _Win>();
   _WinRun? headRun, tailRun;
   double winSsd = 0;
   int winNd = 0;
-  SplayTreeSet<double> winMags = SplayTreeSet<double>();
+  Set<double> winMags = <double>{};
 
   JitterState copy() {
     final c = JitterState()
@@ -505,12 +507,12 @@ class JitterState {
       ..tail = tail?.copy()
       ..ssd = ssd
       ..nd = nd
-      ..mags = SplayTreeSet.of(mags)
+      ..mags = Set.of(mags)
       ..headRun = headRun?.copy()
       ..tailRun = tailRun?.copy()
       ..winSsd = winSsd
       ..winNd = winNd
-      ..winMags = SplayTreeSet.of(winMags);
+      ..winMags = Set.of(winMags);
     _addSums(c.closed, closed);
     for (final e in wins.entries) {
       c.wins[e.key] = e.value.copy();
@@ -782,7 +784,7 @@ class JitterEvidenceAggregator
         ],
         'ssd': encodeDouble(s.ssd),
         'nd': s.nd,
-        'mags': [for (final m in s.mags) encodeDouble(m)],
+        'mags': [for (final m in (s.mags.toList()..sort())) encodeDouble(m)],
         'wins': [
           for (final e in s.wins.entries) [e.key, e.value.toJson()]
         ],
@@ -790,7 +792,7 @@ class JitterEvidenceAggregator
         'tailRun': s.tailRun?.toJson(),
         'winSsd': encodeDouble(s.winSsd),
         'winNd': s.winNd,
-        'winMags': [for (final m in s.winMags) encodeDouble(m)],
+        'winMags': [for (final m in (s.winMags.toList()..sort())) encodeDouble(m)],
       };
 
   @override
@@ -828,12 +830,12 @@ class JitterEvidenceAggregator
     s
       ..ssd = decodeDouble(field(m, 'ssd'))
       ..nd = decodeCount(field(m, 'nd'))
-      ..mags = SplayTreeSet.of(decodeDoubles(field(m, 'mags')))
+      ..mags = Set.of(decodeDoubles(field(m, 'mags')))
       ..headRun = _WinRun.fromJson(field(m, 'headRun'))
       ..tailRun = _WinRun.fromJson(field(m, 'tailRun'))
       ..winSsd = decodeDouble(field(m, 'winSsd'))
       ..winNd = decodeCount(field(m, 'winNd'))
-      ..winMags = SplayTreeSet.of(decodeDoubles(field(m, 'winMags')));
+      ..winMags = Set.of(decodeDoubles(field(m, 'winMags')));
     for (final e in decodeList(field(m, 'wins'))) {
       final pair = decodeList(e);
       if (pair.length != 2 || pair[0] is! int) {

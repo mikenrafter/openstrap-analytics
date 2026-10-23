@@ -70,6 +70,42 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   double? originMs,
   bool gapAware = true,
 }) {
+  final core = _numericCore(originMs: originMs, gapAware: gapAware);
+  // Streaming finish uses the evidence already collected and merged by fold.
+  final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
+  final combined = validateCheckpoint(both(core, evidence),
+      (json) => _validateVersioned(json, gapAware));
+  final checked = gapAware ? _FiniteTimes(combined) : combined;
+  return checked.map((result) => _finish(
+      result.$1.$1, result.$1.$2, result.$1.$3, result.$1.$4,
+      () => result.$2, gapAware: gapAware));
+}
+
+/// Runs the same numeric core over one slice, building jitter evidence only
+/// when the ACF floor requires it. This helper is not exported by the public libraries.
+HrvTime hrvTimeOneSlice(Beats beats, {
+  double? originMs,
+  bool gapAware = true,
+}) {
+  final core = _numericCore(originMs: originMs, gapAware: gapAware);
+  final result = (gapAware ? _FiniteTimes(core) : core).run(beats);
+  JitterEvidence? cached;
+  JitterEvidence evidence() => cached ??= JitterEvidenceAggregator(
+      originMs: originMs, gapAware: gapAware).run(beats);
+  return _finish(result.$1, result.$2, result.$3, result.$4, evidence,
+      gapAware: gapAware);
+}
+
+typedef _CoreSummary = (
+  _DiffSummary, _LagSummary, RunningMoments, Map<int, RunningMoments>
+);
+
+// Mapping only the finished summaries leaves both the accumulation order and
+// checkpoint state shape unchanged, including the gap-unaware branch.
+Aggregator<dynamic, Beats, _CoreSummary> _numericCore({
+  double? originMs,
+  required bool gapAware,
+}) {
   final diffs = both(
     Lookback<Beats, _DiffState, _DiffSummary>(
         2, _DiffStats(gapAware: gapAware),
@@ -79,18 +115,10 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
         batchFromJson: Beats.fromJson),
   );
   final levels = Moments<Beats>((batch) => batch.nnMs);
-  // Under the ACF floor hrvTime reads the difference runs (hrv_jitter_evidence
-  // .dart); the checkpoint carries that evidence since version 2 of this
-  // aggregator's state, and a version 1 checkpoint (without it) is refused.
-  final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
-
   if (!gapAware) {
-    final core = both(diffs, levels);
-    return validateCheckpoint(both(core, evidence),
-            (json) => _validateVersioned(json, false))
-        .map((result) => _finish(result.$1.$1.$1, result.$1.$1.$2,
-            result.$1.$2, const <int, RunningMoments>{}, result.$2,
-            gapAware: false));
+    return both(diffs, levels).map((result) => (
+        result.$1.$1, result.$1.$2, result.$2,
+        const <int, RunningMoments>{}));
   }
 
   final bins = GroupBy<Beats, RunningMoments, RunningMoments>(
@@ -101,12 +129,8 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
     },
     Moments<Beats>((batch) => batch.nnMs),
   );
-  final core = both(diffs, both(levels, bins));
-  return _FiniteTimes(validateCheckpoint(
-          both(core, evidence), (json) => _validateVersioned(json, true)))
-      .map((result) => _finish(result.$1.$1.$1, result.$1.$1.$2,
-          result.$1.$2.$1, result.$1.$2.$2, result.$2,
-          gapAware: true));
+  return both(diffs, both(levels, bins)).map((result) => (
+      result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2));
 }
 
 /// Refuses a slice holding a non-finite beat time before any state changes
@@ -428,7 +452,7 @@ class _LagStats extends Aggregator<_LagState, Beats, _LagSummary> {
 }
 
 HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
-    Map<int, RunningMoments> bins, JitterEvidence evidence,
+    Map<int, RunningMoments> bins, JitterEvidence Function() evidence,
     {required bool gapAware}) {
   if (levels.count < 2) return HrvTime(nBeats: levels.count);
 
@@ -446,8 +470,8 @@ HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
   // line on a low floor, and then a timed night may still publish RMSSD from
   // the windows on a breathing line steady in Hz: both read from [evidence].
   final jittery =
-      acf1 != null && acf1 < kNnDiffAcf1Floor && evidence.refused();
-  final breathing = jittery && gapAware ? evidence.breathingRmssd() : null;
+      acf1 != null && acf1 < kNnDiffAcf1Floor && evidence().refused();
+  final breathing = jittery && gapAware ? evidence().breathingRmssd() : null;
 
   double? sdann;
   double? sdnnIndex;

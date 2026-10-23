@@ -16,7 +16,6 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
-import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
 import 'hrv_time_aggregator.dart';
@@ -437,8 +436,8 @@ Metric<HrvTime> hrvTime(
     );
   }
 
-  // The values come from [hrvTimeAggregator] run over the whole series in one
-  // slice; this function adds only the envelope (confidence, note).
+  // The values come from the same numeric core as [hrvTimeAggregator], run
+  // in one slice; this function adds only the envelope (confidence, note).
   //
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
@@ -459,9 +458,8 @@ Metric<HrvTime> hrvTime(
   final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
   final nn = Float64List.fromList(nnMs);
   final times = gapAware ? Float64List.fromList(nnTimesMs) : Float64List(nn.length);
-  final v = hrvTimeAggregator(
-          originMs: gapAware ? times[0] : null, gapAware: gapAware)
-      .run(Beats(nn, times));
+  final v = hrvTimeOneSlice(Beats(nn, times),
+      originMs: gapAware ? times[0] : null, gapAware: gapAware);
   final acf1 = v.diffAcf1;
   // pNN50 is null with a real ACF1 (>= 30 pairs) only when the floor refused.
   final jittery = acf1 != null && v.pnn50 == null;
