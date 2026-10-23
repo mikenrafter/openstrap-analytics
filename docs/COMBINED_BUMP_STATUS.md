@@ -1,7 +1,5 @@
-The RR cap, the epoch accumulator, the RR sandwich and the gap-anchored grid
-are implemented. One existing guard still fails: the advanced-stager still-night
-efficiency (0.808 against the required 0.85), for the reason given under
-"Grid". The branch is not fully green until that is decided.
+The RR cap, the epoch accumulator, the RR sandwich and the onset-anchored grid
+(option 2, see "Grid") are implemented.
 
 Implemented APIs:
 
@@ -16,8 +14,8 @@ Implemented APIs:
   including one-beat folds, JSON restarts, and 10,000 junk beats.
 - `NnColumn(inner)` delegates fold, combine, finish, and persistence to a
   `DoubleColumn` aggregator over `Beats.nnMs`.
-- `EpochRows` implements the gap-anchored grid (below), fold,
-  final/provisional/all rows, `newestMs`, JSON restore (checkpoint version 2),
+- `EpochRows` implements the anchored grid (below), fold,
+  final/provisional/all rows, `newestMs`, JSON restore (checkpoint version 3),
   and `stageWindow`. It keeps final features and a
   raw time tail. The provisional watermark is four minutes behind the newest
   sample. Gravity references use a sliding sorted time window. Partial HR
@@ -70,65 +68,42 @@ not detect a reach down to about 2H (they fail at reach 6), so the margin is
 conservative and unmeasured. With `maxArtifactRun: null` the reach is sized as
 for the default cap and a run longer than that is not bounded-state exact.
 
-Grid (owner decision 2026-10-22: gap-anchored, replacing the wall-clock grid).
-Epochs are 30 s steps from the first valid accelerometer sample of each
-gap-free run. A run starts at the first sample and again at the first sample
-after any gap the stager's usable-run split cannot bridge, i.e. more than
-`AdvancedSleepStager.maxAccelCarryForwardSec` (60 s) of carry plus the
-sample's own second: the next valid sample must come within 61 s of the last or
-a new run starts. The constant is reused, not copied. The anchor depends only
-on the data; a run's anchor is final when its first sample is folded.
+Grid (owner decision 2026-10-23, option 2: onset-anchored; replaces the
+gap-anchored grid of 2026-10-22). The stager puts its 30 s epochs at the
+detected session onset (phase 0), as before the bump. The onset is the first
+valid accelerometer sample at or after the session start. A run that follows a
+dropout longer than the carry (more than 61 s between valid samples) re-anchors
+at its own first sample, as the pre-bump stager did. The stager reads nothing
+outside [start, end): it clips samples to the session, so its labels equal the
+frozen pre-bump stager (`test/onehz/support/pre_bump_stager.dart`).
 
-- `EpochRows.epochStartMs` (static, Unix-epoch floor) is removed. New:
-  `runAnchorsMs` (anchor of every run seen), `epochStartMsFor(tsMs)` (start of
-  the epoch holding a time, null outside any run's coverage), and the
-  constructor option `continuingAnchorMs` (the first sample folded joins a run
-  that began earlier and is not re-folded). Row starts are no longer multiples
-  of 30 s; they are `anchor + k * 30 s`. Epochs are opened for starts inside a
-  run's coverage that are not after the newest sample, so a row set is the same
-  for any chunking. Checkpoint version 2 (version 1 is refused); a checkpoint
-  now carries each run's anchor and generation cursor.
-- The stager finds the anchor of the run holding the session start with a
-  backward scan over the valid accel timestamps (no rows computed), feeds
-  samples from the epoch containing the start minus 165 s, and passes the
-  anchor as `continuingAnchorMs` when it precedes that window. So a session
-  that starts mid-run is staged on the run's grid, identical to staging from
-  the run's first sample.
-- Chunk invariance, finality about 4 min behind, checkpoint/resume and staging
-  from rows == batch staging all hold exactly (tests below).
+- `EpochRows({anchorMs})`: the first run's grid passes through `anchorMs`. Rows
+  start at the anchor, or at the epoch holding the first sample when the anchor
+  lies before it. `EpochRows.phaseMs` is the anchor mod 30 s. Without
+  `anchorMs` the first sample anchors, as before.
+- `EpochRowsMemo({maxPhases = 2})`: rows keyed by phase. `rowsFor(anchorMs, ...)`
+  takes cumulative input. A held phase folds only samples it has not consumed.
+  An unheld phase, or an anchor earlier than the held rows were built for, is
+  built from scratch (exact). Least recently used phases beyond `maxPhases` are
+  dropped. `toJson` / `fromJson` carry each phase's rows and consumed counts.
+- Carry-forward matches the pre-bump dense array: for features, `EpochRows`
+  repeats the last valid vector each second for up to 60 s (until the next real
+  sample). Epochs that start after a run's last real sample are classified but
+  hidden from `allRows` / `finalRows`. `fold(throughMs:)` states that data is
+  complete through a time; the stager passes the session end.
+- `stageWindow` classifies whole epochs only; a sub-epoch remainder joins the
+  last one, as before the bump.
+- Checkpoint version 3 (versions 1 and 2 are refused): adds `phase` and the
+  pending `anchor`. A phase its rows contradict is refused. Accel is kept 61 s
+  longer so carry from a dropped sample still reaches a live window.
+- The memo does not reuse interior rows of a larger window for a smaller
+  session. The stager builds rows from the clipped session, which is exact and
+  costs what the pre-bump stager cost. A caller that wants reuse must hand the
+  memo input already clipped to the session.
 
-Agreement and efficiency, measured:
-
-| Measure | Wall-clock grid | Gap-anchored grid | Required |
-| --- | ---: | ---: | ---: |
-| Frozen-night agreement (test/onehz/wallclock_agreement_test.dart) | 966/1,067 = 0.9053 | 1,068/1,068 = 1.0 | 0.97 |
-| Advanced-stager still-night efficiency (test/onehz/advanced_stager_test.dart) | 0.8081 | 0.8081 | > 0.85 |
-
-The frozen night starts its window at the first sample, so the new grid is the
-old grid there: agreement is 1.0 (the previous 1,067 compared epochs became
-1,068 because the comparison now steps from the first sample, not from the next
-wall-clock boundary). The sleep_honesty SLP-03 change made for the wall-clock
-grid (610 s / 14,990 s) is reverted to the original 600 s / 15,000 s, which now
-holds again.
-
-The efficiency guard still fails, and the cause is the stager's phase
-sensitivity, not the implementation. The fixture is a 2 h active block followed
-by a 7 h still night in ONE gap-free run, so the anchor is the first sample,
-2 h before the detected session start, and the session starts 19 s into an
-epoch of that grid (start 7,369 s, 7,369 mod 30 = 19). The old stager anchored
-at the detected session start (phase 0). A control that forces the anchor to
-the session start minus p seconds, everything else unchanged, gives:
-
-| p (s) | 0 | 3 | 7 | 11 | 15 | 19 | 23 | 27 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| efficiency | 0.8588 | 0.8262 | 0.7864 | 0.8166 | 0.8166 | 0.8096 | 0.7805 | 0.8214 |
-
-Only phase 0 clears 0.85, and by 0.009; the other seven phases sit 0.03-0.07
-below. So the old pass depended on anchoring at the session start. Under the
-decided grid the session start is wherever it falls in the run's phase.
-Nothing was loosened. Fixing this is the owner's item (c), "fix the stager's
-phase sensitivity", which is queued last; the guard needs that fix or a
-decision about the fixture, which is a synthetic still night.
+Measured: frozen-night agreement is 1.0 (window starts at the first sample).
+The advanced-stager still-night efficiency guard (> 0.85) passes again (phase 0
+gave 0.8588 in the earlier control).
 
 Tests changed:
 
@@ -172,8 +147,7 @@ Tests changed:
   whether the active gap is physiological or detected by the soft classifier.
 
 The existing advanced-stager efficiency assertion and the 0.97 agreement
-assertion have not been weakened. The former measures 0.8081177843034716
-against its required >0.85.
+assertion have not been weakened. With option 2 the former passes again.
 
 The capped latency is above target, the still-night efficiency guard fails
 (see Grid), and the sandwich reach and the adversarial soft-run influence
@@ -208,11 +182,12 @@ lookup).
 Final full-suite summary:
 
 ```text
-+2568 ~7 -1: Some tests failed.
++2596 ~7 -1: Some tests failed.
 ```
 
-That is 2,568 passed, 7 skipped, and 1 failed: the advanced-stager still-night
-efficiency guard (0.808 against > 0.85, phase sensitivity, see Grid). The
+That is 2,596 passed, 7 skipped, and 1 failed: the epoch_rows_test B3 test
+"staged on ITS OWN start", whose `checked > 2` count cannot hold for window
++777..+2111 s (the pre-bump labels there have only two boundaries). The
 sandwich tests, the frozen-night agreement guard (1.0 against 0.97), the RR cap,
 checkpoint regression, batch oracles, epoch-row parity, cache behavior,
 registry closure, and counter tests pass. `dart analyze` reports no issues.

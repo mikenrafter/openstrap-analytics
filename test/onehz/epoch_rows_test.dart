@@ -462,7 +462,8 @@ void main() {
               reason: 'session +$from..+${to}s: boundary ${got[i].start}');
           checked++;
         }
-        expect(checked, greaterThan(2), reason: 'session +$from..+${to}s');
+        // +777..+2111 has two boundaries in the pre-bump labels too.
+        expect(checked, greaterThan(1), reason: 'session +$from..+${to}s');
         expect(show(got),
             show(preBumpStageSessionCardio(t0 + from, t0 + to, s.grav, s.hrTs, s.rrTsSec)),
             reason: 'session +$from..+${to}s equals the pre-bump labels');

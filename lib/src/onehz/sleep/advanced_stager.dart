@@ -1352,59 +1352,31 @@ class AdvancedSleepStager {
   /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
-  /// Default staging path: extract feature rows on the gap-anchored grid with
-  /// their full observed context, then classify each usable accelerometer run
-  /// inside the requested session. Epochs are 30 s steps from the first sample
-  /// of each gap-free run (a run ends at a gap the 60 s carry-forward cannot
-  /// bridge), whether or not the session starts there. Accel coverage carries
-  /// at most 60 seconds across a dropout. Other gaps and abstained runs remain
-  /// unobserved.
+  /// Default staging path: 30 s epochs anchored at the session onset (the first
+  /// valid accelerometer sample at or after [start], phase 0), as before the
+  /// combined bump. Samples outside [start, end) are not read, so features are
+  /// clipped at the session edges. A usable run that follows a dropout the 60 s
+  /// carry-forward cannot bridge re-anchors at its own first sample. Other gaps
+  /// and abstained runs remain unobserved.
   static List<StageSegment> _stageSessionCardio(int start, int end,
       List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
       [CardioRowCache? rowCache]) {
     if (end <= start) return const [];
-    // The grid is anchored where the gap-free run holding the session start
-    // began, which can be well before the session: find that sample without
-    // folding the run's earlier data.
-    final valid = [for (final g in grav) if (g.valid) g.ts]..sort();
-    int? anchorSec;
-    var k = -1;
-    for (var a = 0, b = valid.length; a < b;) {
-      final m = (a + b) >> 1;
-      if (valid[m] <= start) {
-        k = m;
-        a = m + 1;
-      } else {
-        b = m;
-      }
+    final g = [for (final g in grav) if (g.ts >= start && g.ts < end) g];
+    int? onset;
+    for (final x in g) {
+      if (x.valid && (onset == null || x.ts < onset)) onset = x.ts;
     }
-    if (k >= 0 && start <= valid[k] + maxAccelCarryForwardSec) {
-      while (k > 0 && valid[k] - valid[k - 1] <= maxAccelCarryForwardSec + 1) {
-        k--;
-      }
-      anchorSec = valid[k];
-    }
-    final anchorMs = anchorSec == null ? null : anchorSec * 1000;
-    // Include feature context outside the requested session. Only actual data
-    // gaps clip a row's windows; detection boundaries do not.
-    final first = anchorMs == null
-        ? start * 1000
-        : anchorMs + (start * 1000 - anchorMs) ~/ 30000 * 30000;
-    final lo = first - 165000;
-    final hi = end * 1000 + 30000 + 195000;
     final rows = EpochRows(
-        rowCache: rowCache,
-        continuingAnchorMs: anchorMs != null && anchorMs < lo ? anchorMs : null);
-    final beats = [for (final r in rr)
-      if (r.ts * 1000 >= lo && r.ts * 1000 < hi) r];
+        rowCache: rowCache, anchorMs: onset == null ? null : onset * 1000);
+    final beats = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
     rows.fold(
       hr: [for (final h in hr)
-        if (h.ts * 1000 >= lo && h.ts * 1000 < hi) HrSample(h.ts * 1000.0, h.bpm)],
-      accel: [for (final g in grav)
-        if (g.ts * 1000 >= lo && g.ts * 1000 < hi)
-          AccelSample(g.ts * 1000.0, g.x, g.y, g.z, valid: g.valid)],
+        if (h.ts >= start && h.ts < end) HrSample(h.ts * 1000.0, h.bpm)],
+      accel: [for (final x in g) AccelSample(x.ts * 1000.0, x.x, x.y, x.z, valid: x.valid)],
       rrMs: [for (final r in beats) r.rrMs],
       rrTsMs: [for (final r in beats) r.ts * 1000.0],
+      throughMs: end * 1000 - 1, // the session end closes the data, as a clip
     );
     return rows.stageWindow(start, end);
   }
