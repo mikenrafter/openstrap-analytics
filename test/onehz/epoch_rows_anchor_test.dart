@@ -282,6 +282,20 @@ void main() {
       expectSameRows(r.allRows(), _batch(more, a2).allRows(), 'other phase');
     });
 
+    test('a memo embedding a version-3 row checkpoint is refused', () {
+      final m = EpochRowsMemo();
+      _ask(m, a1, night.between(0, 1000));
+      final good = jsonDecode(jsonEncode(m.toJson())) as Map<String, dynamic>;
+      for (final v in [1, 2, 3]) {
+        final bad = jsonDecode(jsonEncode(good)) as Map<String, dynamic>;
+        for (final p in bad['phases'] as List) {
+          (p['rows'] as Map<String, dynamic>)['version'] = v;
+        }
+        expect(() => EpochRowsMemo.fromJson(bad),
+            throwsA(isA<FormatException>()), reason: 'rows version $v');
+      }
+    });
+
     test('a checkpoint is refused when it is of another type or shape', () {
       final m = EpochRowsMemo();
       _ask(m, a1, night.between(0, 600));

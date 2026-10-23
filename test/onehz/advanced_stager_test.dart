@@ -442,6 +442,59 @@ void main() {
         for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]
       ]);
     });
+
+    test('a pre-81b9b4b (EPOCH2) cache entry is never served', () {
+      // Keys and values as the old extractor stored them for gravity (0,0,1)
+      // each second and HR 60 then 0 at each second over [0,90): HR 60 where
+      // the oracle's last-wins reading has none (0-90:unobserved).
+      final stale = CardioRowCache.fromJson({
+        'version': 2,
+        'rows': [
+          for (final (s, fp) in [
+            (0, '-518569928497453641'),
+            (30, '6424718457559164343'),
+            (60, '6000305869726000567'),
+          ])
+            {
+              'startSec': s,
+              'epochSec': 30,
+              'fingerprint': fp,
+              'motion': 0.0,
+              'hr': 60.0,
+              'hrSd': 0.0,
+              'rmssd': 'NaN',
+              'lfhf': 'NaN',
+              'rk': 'NaN',
+              'sdnn': 'NaN',
+            }
+        ],
+      });
+      final grav = flatGrav(0, 90);
+      final hr = [for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]];
+      final got = AdvancedSleepStager.stageWindow(0, 90, grav, hr,
+          rowCache: stale);
+      expect(stale.hits, 0, reason: 'old-identity entries must not hit');
+      expect(showSegments(got.stages),
+          showSegments(preBumpStageSessionCardio(0, 90, grav, hr, const [])));
+    });
+
+    test('gravity in reverse time order: labels equal the oracle', () {
+      parity(0, 90, flatGrav(0, 90).reversed.toList(),
+          [for (var t = 0; t < 90; t++) HrTs(t, 60)]);
+    });
+
+    test('HR in reverse time order: labels equal the oracle', () {
+      parity(0, 90, flatGrav(0, 90),
+          [for (var t = 89; t >= 0; t--) HrTs(t, 60)]);
+    });
+
+    test('unsorted HR with duplicate seconds keeps list-order last-wins', () {
+      // Seconds descending, but within a second the records stay (0, 60): the
+      // oracle keeps 60 (the later record), so the night is stageable.
+      parity(0, 90, flatGrav(0, 90), [
+        for (var t = 89; t >= 0; t--) ...[HrTs(t, 0), HrTs(t, 60)]
+      ]);
+    });
   });
 
   group('AASM hypnogram metrics (hand-checked)', () {

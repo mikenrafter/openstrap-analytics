@@ -393,6 +393,20 @@ void main() {
       }
     });
 
+    test('checkpoints written before 81b9b4b (versions 1-3) are refused', () {
+      final er = EpochRows();
+      night.foldInto(er, 0, 1000);
+      final good = jsonDecode(jsonEncode(er.toJson())) as Map<String, dynamic>;
+      expect(good['version'], 4, reason: 'row semantics changed: new version');
+      for (final v in [1, 2, 3]) {
+        // Finalized rows carry the old (wrong) values; the shape is otherwise
+        // what version 3 wrote.
+        final bad = {...good, 'version': v};
+        expect(() => EpochRows.fromJson(bad), throwsA(isA<FormatException>()),
+            reason: 'version $v');
+      }
+    });
+
     test('on an aligned contiguous stream the interior rows are today\'s '
         'cardioEpochFeatures rows', () {
       final s = _Input.make(_night()); // aligned t0
