@@ -5,6 +5,9 @@ import 'util.dart';
 
 /// Removable, mergeable centered moments, with an origin to retain precision
 /// when a series has a large offset and a small spread.
+// Removable/mergeable centered-moment recurrence. Algebraically equivalent to
+// batch moments; floating-point order differs. The long-run drift fixture checks
+// 1e-9, not bit identity.
 class RunningMoments {
   int _count = 0;
   double _origin = 0, _meanOffset = 0, _m2 = 0;
@@ -100,6 +103,8 @@ class RunningMoments {
 ///
 /// Only for data that really is integral. Values that are nearly all distinct
 /// (accelerometer magnitudes) gain nothing: the list is as long as the data.
+// Exact histogram reformulation of percentileSorted(): counts identify identical
+// expanded-list ranks with the same interpolation. No new estimator.
 class IntHistogram {
   static const _maxInt64 = 0x7fffffffffffffff;
 
@@ -236,6 +241,9 @@ class IntHistogram {
 
 /// Fixed-grid spectral sums. Raw snapshots establish that each sync is a
 /// genuine prefix; callers may revise or remove any earlier sample.
+// Press & Rybicki 1989 lombScargle() on the identical fixed grid using retained
+// trigonometric sums and centered moments. Algebraically equal; long-run drift
+// fixtures check 1e-9, not bit identity.
 class IncrementalLombScargle {
   final List<double> _frequencies;
   List<double> _t = [], _y = [];

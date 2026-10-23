@@ -25,8 +25,27 @@ Implemented APIs:
 - The default advanced stager delegates to these rows. Feature
   context extends beyond the requested session. The existing bounded accel
   coverage and unobserved-run semantics remain in use.
-- Registry counters `found.rr_correction` and `sleep.stage` are 2. Other
-  counters remain 1; the registry's dependency closure covers `epoch_rows.dart`.
+- Registry counters `found.core`, `found.rr_correction`, `sleep.stage`,
+  `hrv.freq`, `night.rhythm` and `activity.load` are 2. A group's own algorithm
+  changes, including rounding and abstention, require a bump; dependency-only
+  changes propagate through `deps`. One bump per group covers this PR:
+  - `found.core`: Lomb-Scargle now subtracts the first timestamp.
+  - `found.rr_correction`: the artifact-run cap, already bumped.
+  - `sleep.stage`: retain the existing bump; its direct staging path also
+    computes adopted HRV statistics. Session-onset/post-gap anchoring is retained.
+  - `hrv.freq`: adopted HRV rounding and non-finite-time abstention.
+  - `night.rhythm`: adopted cosinor/circadian statistics, the cosinor singularity
+    gate, timestamp-gap irregular-screen pairs and invalid-time refusals.
+  - `activity.load`: adopted TRIMP, CTL/ATL and time-in-zone rounding.
+  Other counters remain 1. `found.energy` preserves ordered minute billing;
+  `found.staging_helpers`, `found.baseline_ewma` and `found.calibration` have no
+  direct output changes. `day.blocks`, `readiness.stress_illness`,
+  `body.spo2_temp_coverage` and `human.insights` have no direct algorithm change;
+  changed upstream inputs propagate through dependencies. In particular,
+  importing the cosinor file in a source closure does not mean an entry point
+  calls it: `nightlySkinTemp` does not call `tempCircadian`/`cosinor`.
+  Hypnogram integer accounting, SRI counts, readiness suffix scoring and
+  sample-order HR-dip totals preserve their existing arithmetic.
 
 The corrector checkpoint is version 2. Version 1 is refused, including a
 pre-cap checkpoint whose already-settled output could conflict with a later

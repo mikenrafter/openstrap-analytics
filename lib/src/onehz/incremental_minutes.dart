@@ -22,6 +22,11 @@ class _MinuteBill {
 /// Retains nonlinear TRIMP and energy contributions by caller-supplied key.
 /// Keys must be unique. Day duration must be a finite whole number of minutes,
 /// matching the batch dailyEnergy API's integer duration.
+// Banister 1991 / Morton 1990 TRIMP; Keytel 2005 / Mifflin-St Jeor 1990 / Tudor-
+// Locke 2019 energy. Retains identical keyed minute contributions; edits replace
+// them and dependency changes rebuild. Checked numeric field tolerance is
+// max(1e-9 absolute, 1e-8 relative); presence, tier, inputs, notes, minute keys,
+// counts, sources and abstention reasons match exactly.
 class IncrementalMinuteMetrics {
   final Map<int, _MinuteBill> _bills = {};
   final List<int> _keys = [];

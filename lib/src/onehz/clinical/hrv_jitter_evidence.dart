@@ -1,3 +1,8 @@
+// Welch 1967 spectral estimation; Hirsch & Bishop 1981 provides the
+// breathing/RSA basis. This is hrvTime()'s existing internal jitter policy,
+// ESTIMATE with low confidence, not a published classifier. Shared formulas
+// preserve the calculation; reordered sums can change decisions within rounding
+// of a threshold.
 // CLINICAL — mergeable evidence for the RMSSD jitter gate, for
 // `hrvTimeAggregator`.
 //

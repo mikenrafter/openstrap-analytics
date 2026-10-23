@@ -35,6 +35,13 @@ import '../types.dart';
 import '../foundations/rr_correction_kernel.dart' show SortedMultiset;
 import '../util.dart';
 
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 /// Epoch length, ms.
 const int kEpochMs = 30000;
 

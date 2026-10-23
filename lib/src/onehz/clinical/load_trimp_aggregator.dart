@@ -10,6 +10,9 @@ const _trimpInputs = ['hr_per_min', 'resting_hr', 'max_hr'];
 const _trimpNote =
     'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)';
 
+// Banister 1991 / Morton 1990 TRIMP. banisterTrimp() runs this per-minute HR-
+// reserve sum in one slice. Merge order changes rounding; checked relative
+// tolerance is 1e-12. Retains ESTIMATE tier and confidence 0.6.
 /// Builds a mergeable Banister TRIMP summary over per-minute mean HR values.
 ///
 /// The resulting metric has the same missing-input and empty-input behaviour as
@@ -59,6 +62,10 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
   });
 }
 
+// Banister impulse-response model, now also the ctlAtlTsb() one-slice path. The
+// identical bounded-prefix prime seeds affine compositions of the same EWMA
+// recurrence. Composition is algebraically equal; checked absolute and relative
+// tolerances are 1e-9.
 /// Builds a mergeable CTL/ATL/TSB summary over a daily-TRIMP column (oldest
 /// first), matching [ctlAtlTsb].
 ///

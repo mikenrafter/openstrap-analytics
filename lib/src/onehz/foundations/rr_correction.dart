@@ -1,3 +1,10 @@
+// Lipponen & Tarvainen 2019 classification with Peltola 2012 correction policy.
+// The unpublished artifact-run cap is an internal ESTIMATE with low confidence:
+// over-cap runs become gaps and each side is re-corrected. Without a cap split
+// the result equals uncapped correction. Shared kernel arithmetic and raw seam
+// context preserve capped batch NN/classes; settled stream plus provisional tail
+// equals capped batch. RrSandwich preserves source-beat absolute timestamps;
+// uncapped arbitrarily long artifact runs have no exactness guarantee.
 // FOUNDATION — RR artifact correction.
 //
 // Lipponen & Tarvainen 2019 ("A robust algorithm for heart rate variability

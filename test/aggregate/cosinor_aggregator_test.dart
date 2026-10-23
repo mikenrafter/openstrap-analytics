@@ -12,7 +12,7 @@
 //    throws, also for periodHours <= 0 (then every run is absent).
 //  * Absent exactly when cosinor() is absent: n < max(4, minPoints),
 //    periodHours <= 0 ('too few points for cosinor'), or a singular design
-//    (pivot < 1e-12 in the same _solve3 elimination;
+//    (relative centered determinant <= 1e-12 of the diagonal product;
 //    'singular cosinor design (insufficient phase coverage)').
 //    Absent metrics carry the same tier, inputs_used and note.
 //  * Present: mesor, amplitude, acrophaseRad within relTol 1e-9 (acrophaseRad
@@ -23,8 +23,8 @@
 //    acrophaseHours within
 //    relTol 1e-9 of the period, modulo periodHours; periodHours equal; r2,
 //    r2Adj, confidence absTol 1e-7; tier, inputs_used, note equal.
-//  * Test data are well away from the singular threshold, so the two
-//    implementations cannot disagree about absent-ness through rounding.
+//  * Batch now runs the same aggregator. The near-singular fixture below
+//    pins its relative gate; ordinary parity fixtures avoid that threshold.
 
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -185,6 +185,27 @@ TimedValues _lawSeries(Rng r, int i) {
 }
 
 void main() {
+  test('tiny phase coverage returns an absent metric, not a fabricated fit', () {
+    // Distinct finite times, clustered around phase pi/4. The two centered
+    // design columns become nearly collinear despite enough observations.
+    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-6];
+    final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
+    final batch = _tv(t, y);
+    final agg = cosinorAggregator();
+    final left = agg.addSlice(agg.empty(), batch, 0, 8);
+    final right = agg.addSlice(agg.empty(), batch, 8, batch.length);
+    for (final result in [agg.run(batch),
+      agg.finish(agg.combine(left, right)), cosinor(t, y)]) {
+      expect(result.value, isNull);
+      expect(result.present, isFalse);
+      expect(result.confidence, 0);
+      expect(result.tier, Tier.high);
+      expect(result.inputs_used, ['signal_timeseries']);
+      expect(result.note,
+          'singular cosinor design (insufficient phase coverage)');
+    }
+  });
+
   group('TimedValues batch', () {
     final d = _tv([0, 1, 2, 3, 4], [10, 11, 12, 13, 14]);
     test('length, copyRange, join', () {

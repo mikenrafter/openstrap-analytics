@@ -1,36 +1,20 @@
-// RED: the analytics-side algorithm counters for the combined bump
-// (wall-clock epoch grid + RR artifact-run cap).
-//
-// This package has no `kAlgoVersion` (that lives in edge). What it versions is
-// the calculation-group registry: `GroupDecl.counter` is "a plain integer,
-// bumped when the group's algorithm changes" (group_registry.dart). The
-// combined bump changes two groups' outputs:
-//   * found.rr_correction: correctRr / RrCorrector cap artifact runs at
-//     kMaxArtifactRun (a longer run is a gap);
-//   * sleep.stage: the epoch grid is the 30 s wall clock, not the usable run's
-//     start.
-// Everything else keeps its counter (groups that depend on these re-derive
-// through `deps`, not through their own counter).
+// Counters move for direct algorithm/output changes, including rounding and
+// abstention. Dependency-only changes propagate through deps.
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
 void main() {
-  int counterOf(String id) =>
-      kAnalyticsGroupRegistry.groups.firstWhere((g) => g.id == id).counter;
-
-  test('found.rr_correction and sleep.stage are on counter 2', () {
-    expect(counterOf('found.rr_correction'), 2);
-    expect(counterOf('sleep.stage'), 2);
-  });
-
-  test('no other group\'s counter moved', () {
-    final moved = {
-      for (final g in kAnalyticsGroupRegistry.groups)
-        if (g.counter != 1 &&
-            g.id != 'found.rr_correction' &&
-            g.id != 'sleep.stage')
-          g.id: g.counter
+  test('PR output changes move their owning groups to counter 2', () {
+    const changed = {
+      'found.core', // Lomb-Scargle first-sample origin.
+      'found.rr_correction', // Artifact-run cap, already bumped.
+      'sleep.stage', // Already bumped; also owns adopted HRV staging paths.
+      'hrv.freq', // HRV aggregator rounding and invalid-time abstention.
+      'night.rhythm', // Cosinor/circadian and gap-aware irregular screening.
+      'activity.load', // TRIMP, CTL/ATL and time-in-zone aggregation.
     };
-    expect(moved, isEmpty);
+    expect({for (final g in kAnalyticsGroupRegistry.groups)
+      if (g.counter != 1) g.id: g.counter},
+      {for (final id in changed) id: 2});
   });
 }

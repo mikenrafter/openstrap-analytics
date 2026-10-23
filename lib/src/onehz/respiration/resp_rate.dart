@@ -453,6 +453,9 @@ Metric<RespEstimate> _rsaMetricFromSegments(
 /// NN is kept once more in [_sorted] ([double.compareTo] order, as `median`
 /// sorts); a snapshot merges the tail in. Checkpoint version 2 carries it; a
 /// version 1 checkpoint (span-based ceiling, no gappy sub-windows) is refused.
+// Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker &
+// Strackee 1984, as in rsaRespRate(). Shared segment scoring, retained exact NN
+// median and provisional windows reproduce batch.
 class RsaRespStream {
   final List<double> _nn = [], _times = [];
   List<double> _sorted = [];

@@ -74,6 +74,9 @@ double? median(List<double> xs) => percentile(xs, 50);
 ///
 /// One sorted window is grown, then updated by binary insertion/removal; it
 /// therefore avoids a fresh window allocation and sort at every position.
+// Exact reformulation of clipped-window medians: insertion/removal preserves
+// List.sort total order; percentileSorted retains the same ranks and
+// interpolation.
 List<double> slidingMedians(List<double> xs, int halfWin) {
   if (xs.isEmpty) return <double>[];
   if (halfWin < 0) {

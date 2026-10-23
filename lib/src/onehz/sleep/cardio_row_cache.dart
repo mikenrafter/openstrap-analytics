@@ -2,6 +2,13 @@
 
 import '../../aggregate/json_support.dart';
 
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 /// A cache identity for one cardio feature epoch.
 ///
 /// [fingerprint] is an unsigned 64-bit FNV-1a digest assembled by the stager

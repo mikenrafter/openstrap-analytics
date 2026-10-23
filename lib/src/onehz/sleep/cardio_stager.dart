@@ -443,6 +443,13 @@ CardioStagerResult cardioStager(
 ///
 /// [rrTsMs] must be non-decreasing when it is paired with [rrMs]. Invalid grid
 /// inputs return zero rows, as does a session with fewer than three epochs.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 CardioEpochFeatures cardioEpochFeatures(
   List<double> hr1hz,
   List<AccelSample> accel, {
@@ -917,6 +924,13 @@ void _removeEpochSorted(List<double> sorted, double value) {
 /// [remScoreCut] / [deepScoreCut] default to the shipped constants and exist so
 /// a calibration harness can sweep them on a DEVELOPMENT split and report the
 /// held-out result. Production callers should not pass them.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 CardioStagerResult classifyCardioEpochs(
   CardioEpochFeatures f, {
   int epochSec = _epochSec,

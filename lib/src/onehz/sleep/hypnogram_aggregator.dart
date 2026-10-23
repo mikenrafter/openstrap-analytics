@@ -4,6 +4,9 @@ import '../../aggregate/aggregator.dart';
 import '../../aggregate/json_support.dart';
 import 'hypnogram.dart';
 
+// Reformulation of AdvancedSleepStager.computeMetrics(): sums integer stage
+// durations and retains onset, final wake, first REM and wake-transition
+// boundaries, reproducing its existing hypnogram accounting.
 /// Mergeable AASM-style hypnogram metrics over start-sorted segments.
 class HypnogramAggregator
     extends Aggregator<_HypnogramState, ListBatch<StageSegment>, HypnogramMetrics> {

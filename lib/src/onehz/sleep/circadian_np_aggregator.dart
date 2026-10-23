@@ -240,6 +240,11 @@ class _CircadianStatsAggregator
 
 /// Mergeable nonparametric circadian metrics, matching
 /// [circadianNonparametric].
+// Witting 1990 / van Someren 1999 nonparametric circadian indices, now also the
+// circadianNonparametric() one-slice path. Phase sums/counts, centered variance
+// and successive squared differences reproduce the formulas. Checked relative
+// tolerances are 1e-12 for integer fixtures and 1e-9 for real fixtures; real-
+// valued near-ties can select different L5/M10 start epochs.
 Aggregator<dynamic, EpochSeries, Metric<CircadianNp>> circadianNpAggregator(
   int epochsPerDay, {
   int? m10Epochs,

@@ -47,14 +47,14 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 ### `foundations/` — shared math every family builds on
 | Function | File | Method |
 |---|---|---|
-| `correctRr` | `foundations/rr_correction.dart` | Lipponen & Tarvainen 2019 RR artifact correction (dRR/mRR/sRR beat classification, Kubios-style) |
+| `correctRr` | `foundations/rr_correction.dart` | Lipponen & Tarvainen 2019 RR artifact correction (dRR/mRR/sRR classification); Peltola 2012 correction policy; unpublished artifact-run cap is ESTIMATE with low confidence |
 | `Baselines` (Winsorized-EWMA) | `foundations/ewma_baselines.dart` | Winsorized exponentially-weighted moving baseline — the rolling personal reference most other metrics compare against |
 | inverse-variance fusion | `foundations/fusion.dart` | Standard inverse-variance weighting for combining multiple noisy estimates of the same quantity |
 
 ### `clinical/` — Tier-1 cardiac/autonomic metrics
 | Function | File | Method | Citation |
 |---|---|---|---|
-| `hrvTime` | `clinical/hrv_time.dart` | RMSSD/SDNN/pNNx | standard time-domain HRV |
+| `hrvTime` | `clinical/hrv_time.dart` | RMSSD/SDNN/pNNx | Task Force 1996 |
 | `nocturnalRmssd` | `clinical/hrv_time.dart` | median-of-5-min-window nightly RMSSD | — |
 | `sleepSessionWindowedRmssd` / `sleepSessionRmssdDetail` | `clinical/hrv_time.dart` | mean-of-5-min-window RMSSD; windows need ≥ 20 clean successive differences (ultra-short RMSSD literature); Malik 20 % ectopic rejection | Malik et al.; Munoz et al. 2015; Baek et al. 2015 |
 | `rrCoverage` | `clinical/hrv_time.dart` | Σ plausible RR ÷ wall-clock span; > 1.10 means duplicated or interleaved beats, and `hrvTime` / `nocturnalRmssd` / `nightHrvShape` / the sleep-session headline refuse RMSSD; the headline also drops any 5-min window holding more beat-time than its length | — (integrity check; contiguous runs measure 0.963–1.001) |
@@ -74,7 +74,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `trimpStrain` | `clinical/load_trimp.dart` | TRIMP → 0-100 strain, honesty-wrapped (absent without real HRmax/RHR anchors) | — |
 | `ctlAtlTsb` | `clinical/load_trimp.dart` | Fitness-Fatigue-Form: EWMA CTL (42d) / ATL (7d) / TSB = CTL-ATL | Banister impulse-response model |
 | `baevskyStressIndex` | `clinical/stress_si.dart` | Baevsky Stress Index, 5-min sliding RR-histogram | Baevsky & Berseneva 2008 |
-| `irregularBeatScreen` | `clinical/irregular_rhythm.dart` | Poincaré SD1/SD2 + pNN70 irregular-rhythm screen | — (screen, not a diagnosis; no ECG) |
+| `irregularBeatScreen` | `clinical/irregular_rhythm.dart` | Poincaré SD1/SD2 + pNN70 irregular-rhythm screen | Internal ESTIMATE with low confidence; screen, not a diagnosis; no ECG |
 | `cardiacCoherence` | `clinical/cardiac_coherence.dart` | peak-band vs. remaining spectral power ratio, live RR during guided breathing | McCraty & Zayas 2014; McCraty et al. 2009 |
 
 ### `sleep/` — staging, structure, circadian
@@ -86,12 +86,12 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `segmentSleep` (`SleepSegmentation`) | `sleep/segment.dart` | **single source of truth** for sleep windowing; delegates staging to `cardioStager` |
 | `cardioStager` | `sleep/cardio_stager.dart` | Webster/Cole-Kripke actigraphy + HRV fusion — explicitly replaces Walch 2019 (documented WAKE over-call bias) |
 | `CausalStager.observe` | `sleep/causal_stager.dart` | **online** wake/NREM/REM for live decisions: `cardioStager`'s features, REM weights and cutoffs on past-only (trailing) windows and expanding baselines; returns stage + confidence + evidence age + a serialisable next state, and **abstains with a reason** (stale/off-wrist/missing HR or accel/thin coverage/warm-up) rather than guess. No look-ahead, deterministic, replacement-tolerant. Not PSG, not a replacement for `cardioStager` — see `docs/CAUSAL_STAGER.md` | `cardioStager`'s basis (linear-discriminant cardiorespiratory staging: Long 2016; Fonseca 2015/2018; weights measured on DREAMT); the causal adaptation itself has no publication — `ESTIMATE` |
-| `stageMinuteRanges` | `sleep/stage_ranges.dart` | per-stage [lo, hi] minutes from `cardioStager`'s `epochEvidence`: uncovered epochs could be any stage, scores within `kStageScoreMargin` of a cutoff count toward both neighbours. A bound, not a confidence interval | `cardioStager`'s cutoffs — `ESTIMATE` |
+| `stageMinuteRanges` | `sleep/stage_ranges.dart` | per-stage [lo, hi] minutes from `cardioStager`'s `epochEvidence`: uncovered epochs could be any stage, scores within `kStageScoreMargin` of a cutoff count toward both neighbours. A bound, not a confidence interval | Internal ESTIMATE with low confidence; underlying staging: Long 2016; Fonseca 2015/2018 |
 | `AdvancedSleepStager` | `sleep/advanced_stager.dart` | AASM-style 4-class staging + hypnogram metrics (TIB/TST/SOL/WASO/REM-latency); `StagingMethod.cardio` is the wired production default, v1/v2 kept for regression coverage only |
 | `sleepAccounting` | `sleep/accounting.dart` | TIB/TST/WASO/efficiency accounting | — |
 | `cardiopulmonaryCoupling` | `sleep/cpc.dart` | cardiopulmonary coupling | — |
 | `sleepCyclesMetric` | `sleep/cycles.dart` | fractal ultradian sleep-cycle detection | Rosenblum et al. 2024 |
-| `circadianNonparametric` | `sleep/circadian_np.dart` | IS/IV/RA/L5/M10 nonparametric circadian indices | — |
+| `circadianNonparametric` | `sleep/circadian_np.dart` | IS/IV/RA/L5/M10 nonparametric circadian indices | Witting 1990; van Someren 1999 |
 | `phillipsSri` | `sleep/sri.dart` | true Phillips epoch-agreement Sleep Regularity Index | Phillips et al. 2017 |
 
 ### `respiration/`
@@ -99,7 +99,7 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 |---|---|---|---|
 | `rsaRespRate` | `respiration/resp_rate.dart` | respiratory sinus arrhythmia — HF spectral peak of the RR series: Lomb–Scargle on native beat times in 300 s Welch sub-windows (≥ 80 % covered by clean beats), median across them with an agreement gate; beat-rate Nyquist from the median NN | Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker & Strackee 1984 |
 | `riivRespRate` / `fuseRespRate` | `respiration/resp_rate.dart` | respiration-induced intensity variation, fused with the RSA estimate | Pimentel et al. (multi-grid RIIV fusion) |
-| `cvhrApnea` / `cvhrApneaScreen` | `respiration/cvhr_apnea.dart` | cyclic-variation-in-HR apnea screening | — |
+| `cvhrApnea` / `cvhrApneaScreen` | `respiration/cvhr_apnea.dart` | cyclic-variation-in-HR apnea screening | Hayano 2011 |
 | `relativeOdi` | `respiration/relative_odi.dart` | ratio-of-ratios relative desaturation index — **never an absolute SpO2 claim** | — |
 | `breathingRateVariability` | `respiration/brv_trend.dart` | within-user breathing-rate variability trend | — |
 
@@ -140,6 +140,45 @@ Grouped by family (subdirectory under `lib/src/onehz/`). File paths are relative
 | `glassBoxReadiness` | `human/readiness_glassbox.dart` | **deprecated** — kept only for its percentile-of-you breakdown + narrative and edge back-compat; `readinessComposite` is canonical | — |
 | `sleepNeed` / `strainTarget` / `recommendedBedtime` / `recommendedWake` / `sleepPerformance` | `human/coaching.dart` | deterministic coaching layer over the metrics above (naps come from `sleep/nap.dart`, not here) | — |
 | `journalCorrelations` | `human/coaching.dart` | per-tag mean-difference correlation vs. logged outcomes, on-device, personal | — |
+
+### Mergeable and incremental forms
+
+Paths below are relative to `lib/src/onehz/`. Structural combinators, codecs,
+checkpoints and caches add no physiological estimator. Tolerances in the adjacent
+code comments describe parity tests, not universal numerical guarantees.
+
+| Function | File | Method | Citation |
+|---|---|---|---|
+| `cosinor / cosinorAggregator` | `clinical/cosinor_aggregator.dart` | Centered least-squares sufficient statistics; relative singularity gate | Halberg & Nelson 1979 |
+| `hrvTimeAggregator` | `clinical/hrv_time_aggregator.dart` | Mergeable time-domain statistics; timestamp behavior requires gapAware:true | Task Force 1996; internal jitter policy is ESTIMATE |
+| `RMSSD jitter gate / JitterEvidenceAggregator` | `clinical/rmssd_gate.dart; clinical/hrv_jitter_evidence.dart` | Shared spectral evidence; internal rejection/exemption thresholds, ESTIMATE with low confidence | Welch 1967; Hirsch & Bishop 1981 |
+| `banisterTrimpAggregator` | `clinical/load_trimp_aggregator.dart` | Mergeable per-minute Banister TRIMP sum | Banister 1991; Morton 1990 |
+| `ctlAtlTsbAggregator` | `clinical/load_trimp_aggregator.dart` | Bounded-prefix priming and affine EWMA composition | Banister impulse-response model |
+| `prsaAggregator` | `clinical/prsa_aggregator.dart` | Mergeable PRSA anchor/profile sums | Bauer et al. 2006 |
+| `readinessLnRmssdFromSuffix / readinessLnRmssdAggregator` | `clinical/readiness_lnrmssd.dart; clinical/readiness_lnrmssd_aggregator.dart` | Shared readiness arithmetic over the required suffix; positional aggregator history | Plews et al. 2013 |
+| `circadianNpAggregator` | `sleep/circadian_np_aggregator.dart` | Mergeable IS/IV/RA/L5/M10; near-tie start epochs can differ | Witting 1990; van Someren 1999 |
+| `bestCircularWindow` | `sleep/circadian_window.dart` | Shared circular L5/M10 search | Witting 1990; van Someren 1999 |
+| `sriAggregator` | `sleep/sri_aggregator.dart` | Integer adjacent-day epoch agreement counts | Phillips et al. 2017 |
+| `HypnogramAggregator / AdvancedSleepStager.computeMetrics` | `sleep/hypnogram_aggregator.dart` | Existing duration/boundary accounting expressed as mergeable statistics | — |
+| `correctRr / RrCapWindow / RrCorrector` | `foundations/rr_correction.dart; foundations/rr_correction_kernel.dart; foundations/rr_correction_stream.dart` | Shared capped batch/stream correction; internal artifact-run cap is ESTIMATE with low confidence | Lipponen & Tarvainen 2019; Peltola 2012 |
+| `RrSandwich / NnColumn` | `foundations/rr_sandwich.dart` | Re-corrects raw seams, preserves source timestamps; uncapped long-run limitation | Lipponen & Tarvainen 2019; Peltola 2012; inner method attribution applies |
+| `EpochRows / EpochRowsMemo / CardioRowCache / cardioEpochFeatures / classifyCardioEpochs` | `sleep/epoch_rows.dart; sleep/cardio_row_cache.dart; sleep/cardio_stager.dart` | Session-anchored feature rows and dependency-checked reuse; internal rules are ESTIMATE | van Hees 2013; Long 2016; Fonseca 2015/2018 |
+| `HrvFreqStream` | `clinical/hrv_freq_stream.dart` | Append-only batch-equivalent Welch band processing | Laguna, Moody & Mark 1998; Bigger 1992; Welch 1967 |
+| `RsaRespStream` | `respiration/resp_rate.dart` | Append-only RSA windows and exact median-NN ceiling | Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker & Strackee 1984 |
+| `CvhrStream` | `respiration/cvhr_apnea.dart` | Shared batch/stream CVHR screening | Hayano 2011 |
+| `irregularBeatScreenDetailed / irregularWindowVerdict / IrregularScreenState` | `clinical/irregular_rhythm.dart; clinical/irregular_window.dart; clinical/irregular_rhythm_state.dart; clinical/irregular_diagnostics.dart` | Shared heuristic screen and diagnostic accounting; ESTIMATE with low confidence | Internal ESTIMATE with low confidence |
+| `RunningMoments` | `incremental_core.dart` | Removable/mergeable centered moments | — |
+| `IntHistogram` | `incremental_core.dart` | Exact expanded-list percentileSorted order statistics | — |
+| `IncrementalLombScargle` | `incremental_core.dart` | Fixed-grid sufficient sums for Lomb-Scargle | Press & Rybicki 1989 |
+| `IncrementalHrvTime` | `incremental_hrv.dart` | Incremental HRV with batch jitter fallback | Task Force 1996; internal jitter policy is ESTIMATE |
+| `IncrementalEnmoSeries` | `incremental_enmo.dart` | Explicit-reference motion updates; automatic calibration uses batch | van Hees 2013; Vähä-Ypyä 2015; internal dynAmp adaptation |
+| `IncrementalMinuteMetrics` | `incremental_minutes.dart` | Keyed batch TRIMP and energy contributions | Banister 1991; Morton 1990; Keytel 2005; Mifflin-St Jeor 1990; Tudor-Locke 2019 |
+| `HeartRateZones.timeInZone / timeInZoneAggregator` | `workout/time_in_zone_aggregator.dart` | Cadence validation and gap-capped zone durations via exact gap histograms | — |
+| `hrDipFromDayTotals` | `clinical/nocturnal.dart` | Shared HR-dip scoring from sample-order day totals | — |
+| `Calories.minuteEnergyPricer / assembleMinuteEnergySeries` | `workout/calories.dart` | Shared dailyEnergy minute billing and ordered assembly | Keytel et al. 2005; Mifflin-St Jeor 1990; Tudor-Locke et al. 2019 |
+| `slidingMedians` | `util.dart` | Same clipped-window median via maintained sorted values | — |
+| `lombScargle` | `util.dart` | First-sample time origin reduces argument error; mathematically time-shift invariant | Press & Rybicki 1989 |
+| `Sum / SumOf / SumSq / Moments / Ewma` | `../aggregate/primitives.dart` | Mergeable sums, centered moments and affine EWMA composition | — |
 
 ---
 

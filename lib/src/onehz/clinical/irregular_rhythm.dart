@@ -1,3 +1,8 @@
+// Internal irregular-rhythm screen, ESTIMATE with low confidence. Batch and
+// stream share irregularWindowVerdict(); centered moments reorder floating-point
+// sums, while exact counters preserve window evidence. Shared adjacency excludes
+// timestamp-gap pairs. Diagnostics account for evidence without adding a
+// clinical estimator.
 // CLINICAL — 24/7 irregular-rhythm SCREEN (NOT a diagnosis).
 //
 // A pulse-derived screen for sustained beat-to-beat irregularity over a long RR

@@ -21,19 +21,25 @@
   corrected / dropped counts (passed in as `RrCleaningCounts`), artifact
   fraction, window counts (total, voting, flagged, the final OPEN window and
   what became of it, sustained share seen vs required) and the thresholds — for
-  a screen that ran and for one that abstained (with the reason). Batch and
-  streamed results are identical. `irregularBeatScreen` returns the same Metric
-  as before. `IrregularScreenState` checkpoints are now version 2 (two more
-  counters); a version 1 checkpoint is refused rather than restored with counts
-  it never kept. A NaN beat no longer makes the checkpoint unencodable.
+  a screen that ran and for one that abstained (with the reason). Detailed
+  diagnostics preserve the wrapper's result for the same screen calculation.
+  `IrregularScreenState` checkpoints are version 3, carrying diagnostic counters
+  and the previous kept beat's time. Versions 1 and 2, and incomplete version 3
+  states, are refused. A NaN beat no longer makes the checkpoint unencodable.
   `IrregularDiagnostics.artifactFraction` is null (absent) when the corrector was
   handed no beats: a share of nothing has no value, and the `1 - cleanFraction`
   of an empty series (1.0) must not read as "every beat is an artifact".
-  Verdicts are unchanged.
+  Output change: timestamp-gap pairs no longer contribute successive differences,
+  so Poincaré statistics, pNNx, window votes and screen verdicts can change.
 - Incremental states for centered moments, fixed-grid Lomb–Scargle, time-domain
   HRV, motion with a measured gravity reference, and keyed minute TRIMP/energy.
   Appends reuse retained contributions; edits, removals and changed dependencies
-  update or rebuild them. Batch algorithms remain available as test oracles.
+  update or rebuild them. Batch APIs remain available. `phillipsSri` uses
+  `sriAggregator` for normal inputs, retaining the legacy short-validity-mask
+  path; `AdvancedSleepStager.computeMetrics` uses `HypnogramAggregator`.
+  The batch functions listed under Changed also run their aggregators. Other
+  batch implementations remain separate, sometimes sharing kernels/scoring
+  helpers with incremental forms.
 - Bounded dependency-aware `CalculationCache` and explicit `CalculationMode`.
   Only `periodicAwake` permits reuse. Sleep, heavy and forced runs use full math.
 - Minute summary mode avoids constructing per-minute energy records when only
@@ -63,21 +69,41 @@
   coverage; an hour with no covered minute is null, not zero.
 
 ### Changed
-- **Output change (combined bump, planned; edge must bump kAlgoVersion when
-  pinning this): RR artifact-run cap and a gap-anchored 30 s epoch grid.**
+- **Output change (combined bump; edge must bump kAlgoVersion when pinning
+  this): capped RR artifact runs become gaps; downstream metrics may change.**
   `correctRr(maxArtifactRun:)` and `RrCorrector(maxArtifactRun:)` (default
-  `kMaxArtifactRun` = 32; null = uncapped) turn an artifact run longer than the
-  cap into a gap: the series splits there and each side is corrected on its own.
-  Runs of 32 or fewer, the only kind on 18 days of real data, give today's
-  output exactly. Sleep staging lays its 30 s epochs from the first sample of
-  each gap-free run (a gap the stager's 60 s accel carry-forward cannot bridge
-  starts a new run), not from the start of the detected session; the anchor
-  depends on the data only, so it streams. New `EpochRows` accumulates the
-  per-epoch feature rows. `RrSandwich` / `RawRr` / `NnColumn` feed capped,
-  corrected NN into the night aggregators from raw RR in mergeable chunks, each
-  NN with the absolute timestamp of the beat it came from
-  (`RrCorrectionResult.nnSourceIndex` says which beat that was). Registry counters
-  `found.rr_correction` and `sleep.stage` go to 2.
+  `kMaxArtifactRun` = 32; null = uncapped) split over-cap runs and re-correct
+  each side. Without a cap split the result equals uncapped correction.
+  Staging retains the pre-bump session-onset 30 s grid and labels, except for
+  separately documented RR or spectral changes. After an accelerometer gap
+  exceeding the 60 s carry-forward limit, the next usable run re-anchors at
+  its first sample, as before. `EpochRows` accumulates these feature rows;
+  `EpochRowsMemo` caches rows by grid phase and recomputes an unavailable phase.
+  `RrSandwich` / `RawRr` / `NnColumn` feed capped corrected NN into aggregators,
+  retaining source-beat absolute timestamps via `nnSourceIndex`.
+  Registry counters `found.rr_correction` and `sleep.stage` remain at 2.
+- **Output change: aggregator adoption (7483030).** `hrvTime`, `banisterTrimp`,
+  `ctlAtlTsb`, `cosinor`, `HeartRateZones.timeInZone` and
+  `circadianNonparametric` now return their aggregators' one-slice run.
+  Ordinary finite-input outputs move only in the last digits within tested
+  tolerances: HRV fields 1e-9 absolute plus 1e-9 relative; TRIMP 1e-12 relative;
+  CTL/ATL/TSB 1e-9 absolute and relative; zone seconds 1e-9 absolute / 1e-12
+  relative; circadian indices 1e-12 relative on integer fixtures and 1e-9 on
+  real fixtures. Circadian near-ties can select different L5/M10 start epochs.
+  Cosinor mesor/amplitude use 1e-9 relative, with a near-zero amplitude floor
+  of 1e-12 * max(1, |mesor|); near-zero mesor has a 1e-12 data-scale floor.
+  Circular phase error uses 1e-9 * max(1, |phaseRad|) in radians and
+  1e-9 * periodHours in hours; phase is not compared for rounding-noise
+  amplitudes. R², adjusted R² and confidence use 1e-7 absolute. These are checked
+  parity tolerances, not universal bounds.
+  SDANN/SDNN-index pins moved to 1e-9 relative.
+- **Output change: near-singular cosinor designs.** The relative determinant
+  test replaces the old batch solver's absolute 1e-12 pivot test. Insufficient
+  phase coverage returns a null-valued `Metric` with the singular-design note;
+  the two tests can disagree about whether a fit is identifiable.
+- Registry counters `found.core`, `hrv.freq`, `night.rhythm` and `activity.load`
+  go to 2 for the spectral origin, HRV, rhythm and load changes. Dependent
+  groups re-derive through `deps`; see `docs/COMBINED_BUMP_STATUS.md`.
 - `IrregularScreenState` checkpoints are version 3: they carry the previous kept
   beat's time, because a pair across a time hole is no longer successive.
   Versions 1 and 2, and a version 3 checkpoint without `prevT`, are refused.
@@ -89,22 +115,20 @@
   (respiratory-line exemption, breathing-line fallback) from mergeable
   evidence (O(5-min windows), never the beats). Its checkpoint state is now
   `[core, evidence]`; a checkpoint without the evidence is refused whole.
-- `cvhrApneaScreen` abstains with 'non-finite beat time' on a NaN or infinite
-  beat time (as `rsaRespRate` / `hrvFreq` do); `CvhrStream` refuses such a
-  fold and answers a snapshot with such a tail the same way. Finite input:
-  output unchanged.
-- **Output change: hrvFreq / cardiacCoherence move at the ~1e-6 relative level;
-  edge must bump kAlgoVersion when pinning this.** `lombScargle` now measures
-  time from the first sample (`t - t.first`) instead of raw epoch seconds,
-  whose trig arguments reach ~1e10 rad and carried up to ~5e-6 relative error
-  per frequency. Every `lombScargle` caller moves: `hrvFreq`, `cardiacCoherence`,
-  the respiration RSA/peak rate, and the cardio stager's LF/HF. Band-integrated
-  results move far less than the per-frequency worst case (on the checked-in
-  July 2026 night at epoch timestamps, LF/HF/total and coherence ratio change by
-  about 1e-14 relative), but any threshold they feed can in principle flip, so
-  recompute stored rows. `IncrementalLombScargle` already used first-sample
-  time and is unchanged; it now agrees with batch on epoch seconds to within 1e-9
-  (the new precision test saw 9e-6 before the change).
+- Output change for invalid timestamps: `hrvTime`, `nocturnalRmssd`,
+  `sleepSessionRmssdDetail`, `rsaRespRate` and `cvhrApneaScreen` return absent
+  metrics for non-finite beat times. Streaming folds refuse invalid times
+  before mutation; snapshots with invalid provisional times abstain.
+  Finite-input formulas are unchanged by these guards.
+- **Output change: all `lombScargle` callers can move; edge must bump
+  kAlgoVersion when pinning this.** Time is now measured from the first sample.
+  The old error reached approximately 5e-6 relative per frequency; integrated
+  metric changes depend on the input and were approximately 1e-14 on the
+  checked night. Threshold decisions can therefore change. Callers include
+  `hrvFreq`, `cardiacCoherence`, respiration RSA/peak rate and the cardio
+  stager's LF/HF. `IncrementalLombScargle` already used first-sample time and
+  is unchanged; it now agrees with batch on epoch seconds within 1e-9 in the
+  precision test, which saw 9e-6 before the change.
 
 ### Unchanged
 - `Calories.dailyEnergy` outputs are bit-for-bit identical. Its loop body moved

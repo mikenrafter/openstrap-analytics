@@ -240,6 +240,9 @@ Metric<CvhrResult> _cvhrMetric(
 /// Exact, append-only state for [cvhrApneaScreen]. Closed gap-free stretches
 /// are reduced to their scored contributions; only the current stretch's beats
 /// are retained for the provisional end-window calculation.
+// Hayano 2011 CVHR screening, as in cvhrApneaScreen(). Closed gap-free stretches
+// retain scored contributions; the current stretch is rescored provisionally
+// with shared batch stages.
 class CvhrStream {
   final double minWidthSec, maxWidthSec, depthWidthRatioMin, envWindowSec,
       maxGapSec;

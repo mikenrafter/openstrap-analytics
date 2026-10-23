@@ -529,6 +529,10 @@ class Calories {
 
   /// Prepares fixed profile and anchor math once for independent minute bills.
   /// Returns null under the same anchor gate as [dailyEnergy].
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
   static MinuteEnergyPricer? minuteEnergyPricer({
     required WorkoutUserProfile profile,
     required double hrmax,
@@ -543,6 +547,10 @@ class Calories {
   /// Assembles previously priced minute bills without evaluating HR or cadence.
   /// Intended for keyed incremental callers that retain the exact bills and
   /// replace only changed minutes. Walking is already included in active.
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
   static MinuteEnergySeries assembleMinuteEnergySeries(
     List<
             ({
@@ -596,6 +604,10 @@ class Calories {
   /// zero. The bucket is `floor((minute + minuteOffset) / 60)`: with index
   /// minutes that is "hours since the series start"; with epoch minutes pass
   /// the local UTC offset in minutes (e.g. 330) to bucket by local hour.
+  // Keytel et al. 2005 active energy, Mifflin-St Jeor 1990 basal energy and Tudor-
+  // Locke et al. 2019 cadence METs, as in dailyEnergy(). Shared minute bills
+  // preserve bill order and separate HR/walking accumulation; hourly output sums
+  // covered records without extrapolation.
   static List<HourlyEnergy> hourlyRollup(
     List<MinuteEnergy> minutes, {
     int minuteOffset = 0,

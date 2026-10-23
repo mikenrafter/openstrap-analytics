@@ -56,6 +56,10 @@ class HrStream extends Batch<HrStream> {
 /// It has the same cadence validation and duration crediting as
 /// [HeartRateZones.timeInZone]. The exact gap histograms let it defer the
 /// global cadence median until [Aggregator.finish].
+// Histogram reformulation of HeartRateZones.timeInZone(), now its one-slice
+// path. Exact cadence-gap counts and zone-credit gaps retain the same global
+// median, cadence validation and duration-credit rule. Grouped sums change
+// rounding; checked tolerances are 1e-12 relative and 1e-9 absolute.
 Aggregator<dynamic, HrStream, TimeInHeartRateZone?> timeInZoneAggregator(
   HeartRateZoneSet zoneSet,
 ) =>

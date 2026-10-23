@@ -121,6 +121,10 @@ Metric<ReadinessLnRmssd> _tooShort(int n, int minNights) =>
 /// Shared by [readinessLnRmssd] and the aggregator (not public API): the
 /// arithmetic after the length check, given the history length [n] and its
 /// last min(windowDays + 1, n) values [suffix] (tonight last).
+// Plews et al. 2013, as implemented by readinessLnRmssd(). Retains the history
+// count and relevant prior-night suffix, then calls identical scoring
+// arithmetic. The aggregator uses positional history; calendar-date filtering
+// remains in the batch wrapper.
 Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
   int n,
   List<double> suffix, {

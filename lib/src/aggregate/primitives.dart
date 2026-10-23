@@ -1,3 +1,8 @@
+// Mergeable sums, centered moments and affine EWMA composition reformulate
+// the corresponding batch arithmetic. Composition is algebraically equal;
+// floating-point evaluation order can differ. Count/min/max and structural
+// wrappers are definitional operations, not additional physiological estimators.
+
 import 'dart:typed_data';
 
 import '../onehz/incremental_core.dart' show RunningMoments;

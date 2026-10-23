@@ -1,9 +1,8 @@
 // group_registry.dart — the calculation-group registry (design 06 phase 1b).
 //
 // Types moved verbatim from edge's lib/compute/groups/group_types.dart (same
-// API). Pure Dart, const-constructible. This file is a RED-phase stub:
-// [kAnalyticsGroupRegistry] is empty until the green phase declares the real
-// groups. test/registry_closure_test.dart pins what it must contain.
+// API). Pure Dart, const-constructible. test/registry_closure_test.dart pins
+// the declared groups and their source closures.
 
 /// What a group is. Foundations carry no cost rule; edge transforms are the
 /// gating/assembly steps edge runs around analytics results.
@@ -24,7 +23,9 @@ class GroupDecl {
   final String id;
   final GroupKind kind;
 
-  /// Plain integer, bumped when the group's algorithm changes.
+  /// Plain integer, bumped when the group's algorithm changes, including
+  /// output rounding or abstention changes. Dependency-only changes propagate
+  /// through [deps]; they do not require another bump of this counter.
   final int counter;
 
   /// Exported function names, at most 3.
@@ -73,7 +74,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'found.core',
     kind: GroupKind.foundation,
-    counter: 1,
+    counter: 2,
     members: ['median'],
     api: ['needBaselineNote'],
     files: ['lib/src/onehz/types.dart', 'lib/src/onehz/util.dart'],
@@ -185,7 +186,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'hrv.freq',
     kind: GroupKind.algorithm,
-    counter: 1,
+    counter: 2,
     members: ['hrvFreq'],
     api: [
       'nightHrvShape',
@@ -212,7 +213,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'night.rhythm',
     kind: GroupKind.algorithm,
-    counter: 1,
+    counter: 2,
     members: ['rsaRespRate', 'cvhrApneaScreen', 'decelerationCapacity'],
     api: [
       'accelerationCapacity',
@@ -318,7 +319,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'activity.load',
     kind: GroupKind.algorithm,
-    counter: 1,
+    counter: 2,
     members: ['banisterTrimp', 'dailyActiveMinutes', 'strainScore'],
     api: [
       'strainFromNetTrimp',

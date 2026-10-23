@@ -174,6 +174,8 @@ Metric<HrDip> hrDip(List<double> dayHr, List<double> nightHr,
 /// [hrDip] from the day side's valid-sample count and sum, accumulated in
 /// sample order (so `daySum / dayCount` is the batch day mean exactly). For a
 /// caller that keeps the waking day as running totals instead of a list.
+// Computes hrDip() with identical day mean and shared scoring when daySum is
+// accumulated in sample order over the same valid samples.
 Metric<HrDip> hrDipFromDayTotals(int dayCount, double daySum,
         List<double> nightHr, {int minSamples = hrDipMinSamples}) =>
     _hrDip(dayCount, dayCount == 0 ? null : daySum / dayCount, nightHr,

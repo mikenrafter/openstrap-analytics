@@ -56,6 +56,13 @@ class Beats extends Batch<Beats> {
 /// Builds the composed time-domain HRV summary for a columnar beat batch.
 ///
 /// With [gapAware] false, times and five-minute bins are deliberately ignored.
+// Task Force 1996 time-domain HRV, now also the hrvTime() one-slice path.
+// Moments, two-beat differences, three-beat lag products and five-minute bins
+// retain the same sufficient statistics. gapAware:false omits timestamp-
+// dependent bins and gap tests. Floating-point order can change rounding and
+// jitter-threshold decisions. Checked field tolerances are 1e-9 absolute plus
+// 1e-9 relative; near-constant differences and jitter gates have the
+// qualifications in test/aggregate/hrv_time_aggregator_test.dart.
 Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   double? originMs,
   bool gapAware = true,

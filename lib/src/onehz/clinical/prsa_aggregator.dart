@@ -6,6 +6,11 @@ import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'prsa.dart';
 
+// Bauer et al. 2006 PRSA, as in decelerationCapacity()/accelerationCapacity().
+// Lookback(2*l+1) reproduces the same anchor bounds and [i-l,i+l) profile.
+// Merged profile sums and anchor counts give the same mathematical result.
+// Checked capacity/profile absolute and relative tolerances are 1e-9; confidence
+// absolute tolerance is 1e-12.
 /// Running PRSA sums: the per-offset profile total and the anchor count.
 class _PrsaState {
   _PrsaState(int l)

@@ -91,6 +91,10 @@ import 'cardio_stager.dart'
         weightedAxisScore;
 import 'segment.dart' show kMaxSleepConfidence;
 
+// Published staging basis inherited from cardioStager(): Long 2016; Fonseca
+// 2015/2018. This unpublished past-only adaptation is ESTIMATE with low
+// confidence; trailing windows and baselines intentionally differ from
+// retrospective staging.
 /// Epoch length (s). Fixed: every cutoff inherited from [cardioStager] is
 /// specified at 30 s.
 const int kCausalEpochSec = 30;

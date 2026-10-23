@@ -1,6 +1,12 @@
 part of 'incremental.dart';
 
 /// Appends NN moments, gap-aware differences and mutable five-minute bins.
+// Task Force 1996 hrvTime() statistics with retained moments and gap-aware
+// differences. Applicable jitter exemptions/fallbacks invoke batch hrvTime();
+// otherwise numerical accumulation differs. The jitter policy is an internal
+// ESTIMATE with low confidence. Checked numeric field tolerance is max(1e-9
+// absolute, 1e-8 relative); presence, tier, note, inputs and beat counts match
+// exactly.
 class IncrementalHrvTime {
   List<double> _nn = [];
   List<double>? _times;

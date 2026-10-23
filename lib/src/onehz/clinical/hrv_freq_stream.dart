@@ -53,6 +53,9 @@ List<double> _welchGrid(double lo, double hi, double seg, double oversample) {
   return freqGrid(lo, hi, ((hi - lo) / df).ceil() + 1);
 }
 
+// Laguna, Moody & Mark 1998 / Bigger 1992 HRV with Welch 1967 segmentation, as
+// in hrvFreq(). Closed segments use the exact shared segment function; open data
+// is evaluated provisionally with the same origin, grid and segment order.
 /// Exact, append-only Welch state for [hrvFreq].
 class HrvFreqStream {
   final double oversample;
