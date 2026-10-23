@@ -63,6 +63,18 @@
   coverage; an hour with no covered minute is null, not zero.
 
 ### Changed
+- **Output change (combined bump, planned; edge must bump kAlgoVersion when
+  pinning this): RR artifact-run cap and a wall-clock 30 s epoch grid.**
+  `correctRr(maxArtifactRun:)` and `RrCorrector(maxArtifactRun:)` (default
+  `kMaxArtifactRun` = 32; null = uncapped) turn an artifact run longer than the
+  cap into a gap: the series splits there and each side is corrected on its own.
+  Runs of 32 or fewer, the only kind on 18 days of real data, give today's
+  output exactly. Sleep staging lays its 30 s epochs on the wall clock (starts
+  are multiples of 30 s since the Unix epoch) instead of at the start of each
+  usable run; new `EpochRows` accumulates the per-epoch feature rows,
+  `RrSandwich` / `RawRr` / `NnColumn` feed capped, corrected NN into the night
+  aggregators from raw RR in mergeable chunks. Registry counters
+  `found.rr_correction` and `sleep.stage` go to 2.
 - `IrregularScreenState` checkpoints are version 3: they carry the previous kept
   beat's time, because a pair across a time hole is no longer successive.
   Versions 1 and 2, and a version 3 checkpoint without `prevT`, are refused.

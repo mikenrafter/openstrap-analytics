@@ -109,6 +109,10 @@ class RrCorrector {
   final int windowBeats;
   final double minThresholdMs;
   final double reanchorGapMs;
+
+  /// Longest artifact run carried; a longer one is a gap. null = uncapped.
+  /// Same meaning as [correctRr]'s `maxArtifactRun`.
+  final int? maxArtifactRun;
   final int _h;
 
   // ---- persisted state ----
@@ -137,6 +141,7 @@ class RrCorrector {
     this.windowBeats = 91,
     this.minThresholdMs = 100,
     this.reanchorGapMs = 1000,
+    this.maxArtifactRun = kMaxArtifactRun,
   }) : _h = windowBeats ~/ 2 {
     if (windowBeats < 1) throw ArgumentError.value(windowBeats, 'windowBeats');
   }

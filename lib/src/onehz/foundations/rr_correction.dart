@@ -15,6 +15,13 @@
 
 import 'rr_correction_kernel.dart';
 
+/// Longest artifact run (beats) the corrector will carry. A longer run is not a
+/// correction problem but an absence: it breaks the series into independent
+/// segments and its beats are left out (a gap). 32 beats leaves no run on the
+/// owner's 18 days of data over the cap (longest seen: 16) and bounds the
+/// streaming state; see combined-bump/brief.md.
+const int kMaxArtifactRun = 32;
+
 /// Artifact label for a single beat.
 enum BeatClass { normal, ectopic, longShort, missed, extra }
 
@@ -73,6 +80,10 @@ class RrCorrectionResult {
 /// `rec_ts*1000` and therefore whole-second — and re-anchors to the real
 /// timestamp whenever the wall step exceeds the interval by more than
 /// [reanchorGapMs], i.e. at a dropout.
+///
+/// [maxArtifactRun] caps a run of artifact beats: a longer run splits the series
+/// (output = correctRr(before) ++ correctRr(after), times absolute, the run's
+/// beats absent). null = uncapped, the pre-cap behaviour.
 RrCorrectionResult correctRr(
   List<double> rrMs, {
   List<double>? rrTsMs,
@@ -80,6 +91,7 @@ RrCorrectionResult correctRr(
   int windowBeats = 91,
   double minThresholdMs = 100,
   double reanchorGapMs = 1000,
+  int? maxArtifactRun = kMaxArtifactRun,
 }) {
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
