@@ -143,6 +143,14 @@ class EpochRows {
     return null;
   }
 
+  // The run whose grid holds the epoch starting at [startMs].
+  _Run? _runAt(int startMs) {
+    for (var i = _runs.length - 1; i >= 0; i--) {
+      if (startMs >= _runs[i].anchorMs) return _runs[i];
+    }
+    return null;
+  }
+
   static int _epochIn(_Run r, int tsMs) =>
       r.anchorMs + (tsMs - r.anchorMs) ~/ kEpochMs * kEpochMs;
 
@@ -231,9 +239,6 @@ class EpochRows {
     check(hr.map((v) => v.tsMs), _hr.isEmpty ? null : _hr.last.tsMs);
     check(accel.map((v) => v.tsMs), _accel.isEmpty ? null : _accel.last.tsMs);
     check(rrTsMs, _rt.isEmpty ? null : _rt.last);
-    for (final v in rrMs) {
-      if (!v.isFinite) throw ArgumentError('non-finite RR');
-    }
     void observe(double t) {
       final ms = t.floor();
       _newest = _newest == null ? ms : math.max(_newest!, ms);
@@ -302,6 +307,8 @@ class EpochRows {
     for (final a in _accel) {
       if (!a.valid) continue;
       if (prev != null) carry((a.tsMs / 1000).floor() - 1);
+      // Two valid samples at one time: the later one stands.
+      if (out.isNotEmpty && out.last.tsMs == a.tsMs) out.removeLast();
       out.add(a);
       prev = a;
     }
@@ -349,8 +356,19 @@ class EpochRows {
     var lo = 0, hi = 0;
     final out = <EpochFeatureRow>[];
     for (final start in starts) {
-      final nextLo = _sampleLower(eff, start - 150000.0, (a) => a.tsMs);
-      final nextHi = _sampleLower(eff, start + 180000.0, (a) => a.tsMs);
+      // The gravity reference reads only the epoch's own run, as the pre-bump
+      // stager classified each run on its own.
+      final run = _runAt(start);
+      final nextLo = _sampleLower(
+          eff,
+          math.max(start - 150000.0,
+              run == null ? -double.infinity : run.startSec * 1000.0),
+          (a) => a.tsMs);
+      final nextHi = _sampleLower(
+          eff,
+          math.min(start + 180000.0,
+              run == null ? double.infinity : run.endSec * 1000.0),
+          (a) => a.tsMs);
       while (lo < nextLo && lo < hi) {
         sorted.remove(mag[lo]);
         lo++;
@@ -368,19 +386,29 @@ class EpochRows {
 
   EpochFeatureRow _row(int start, List<AccelSample> eff, {double? reference}) {
     final end = start + kEpochMs;
+    final run = _runAt(start);
     final ab = _sampleLower(
-        eff, start - (reference == null ? 150000.0 : 0.0), (a) => a.tsMs);
+        eff,
+        math.max(start - (reference == null ? 150000.0 : 0.0),
+            run == null ? -double.infinity : run.startSec * 1000.0),
+        (a) => a.tsMs);
     final ae = _sampleLower(
-        eff, end + (reference == null ? 150000.0 : 0.0), (a) => a.tsMs);
+        eff,
+        math.min(end + (reference == null ? 150000.0 : 0.0),
+            run == null ? double.infinity : run.endSec * 1000.0),
+        (a) => a.tsMs);
     final hb = _sampleLower(_hr, start.toDouble(), (h) => h.tsMs);
     final he = _sampleLower(_hr, end.toDouble(), (h) => h.tsMs);
     final av = [
       for (var i = ab; i < ae; i++)
         if (eff[i].valid) eff[i]
     ];
+    // One value per timestamp, the last one: a later record replaces an
+    // earlier one at the same time (a later 0 off-skin erases it).
     final hv = [
       for (var i = hb; i < he; i++)
-        if (_hr[i].valid) _hr[i].hr
+        if (_hr[i].valid && (i + 1 == he || _hr[i + 1].tsMs != _hr[i].tsMs))
+          _hr[i].hr
     ];
     final low = start - 135000.0, high = start + 165000.0;
     final rb = _lower(_rt, low), re = _lower(_rt, high + 0.001);
@@ -499,12 +527,9 @@ class EpochRows {
           sdnn: [for (final r in chosen) r.sdnn]);
       final result = classifyCardioEpochs(features);
       final labels = result.base.stages;
-      final hrSeconds = chosen.fold<int>(0, (sum, row) => sum + row._hrSeconds);
-      // Partial epochs must not inflate coverage: one observed second in
-      // each epoch is still sparse HR, even if every epoch has a mean.
-      if (hi - lo < 90 ||
-          labels.isEmpty ||
-          hrSeconds / (hi - lo) < minHrCoverage) {
+      // The classifier's own per-epoch HR coverage gate abstains (no labels),
+      // exactly as the pre-bump stager did; there is no second, per-second one.
+      if (hi - lo < 90 || labels.isEmpty) {
         pieces.add(StageSegment(lo, hi, 'unobserved'));
       } else {
         var at = lo;
@@ -561,7 +586,7 @@ class EpochRows {
               a.valid
             ]
         ],
-        'rr': _rr,
+        'rr': [for (final v in _rr) encodeDouble(v)],
         'rt': _rt,
         'runs': [
           for (final r in _runs) [r.startSec, r.endSec, r.anchorMs, r.cursorMs]
@@ -637,7 +662,6 @@ class EpochRows {
           !ascending(er._hr.map((h) => h.tsMs)) ||
           !ascending(er._accel.map((a) => a.tsMs)) ||
           !ascending(er._rt) ||
-          !er._rr.every((v) => v.isFinite) ||
           !ascending(er._final.map((r) => r.startMs.toDouble())) ||
           er._final.map((r) => r.startMs).toSet().length != er._final.length ||
           er._final.any((r) => !onGrid(r.startMs)) ||
