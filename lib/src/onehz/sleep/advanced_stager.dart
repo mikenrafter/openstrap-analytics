@@ -1380,7 +1380,8 @@ class AdvancedSleepStager {
     }
     final rows = EpochRows(
         rowCache: rowCache, anchorMs: onset == null ? null : onset * 1000);
-    final beats = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
+    final beats = _stableByTs(
+        [for (final r in rr) if (r.ts >= start && r.ts < end) r], (r) => r.ts);
     rows.fold(
       // Stable by time: equal timestamps keep list order (the oracle's last-wins).
       hr: [for (final h in _stableByTs([
