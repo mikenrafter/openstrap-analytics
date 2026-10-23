@@ -317,7 +317,7 @@ void main() {
         <String, dynamic>{},
       ]) {
         expect(() => EpochRows.fromJson(bad), throwsA(isA<FormatException>()),
-            reason: jsonEncode(bad).substring(0, 60));
+            reason: jsonEncode(bad));
       }
     });
 

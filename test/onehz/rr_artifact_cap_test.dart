@@ -224,6 +224,24 @@ void main() {
       });
     }
 
+    test('settling through a gap retains the new segment boundary', () {
+      final (s, _) = withRuns(51, [300, 700], [100], nearRun: true);
+      var c = RrCorrector();
+      final nn = <double>[], times = <double>[];
+      final classes = <BeatClass>[];
+      for (var i = 0; i < s.rr.length; i++) {
+        final out = c.fold([s.rr[i]], tsMs: [s.ts[i]]);
+        nn.addAll(out.nn);
+        times.addAll(out.nnTimes);
+        classes.addAll(out.classes);
+        if (i % 19 == 0 || i == s.rr.length - 1) {
+          c = RrCorrector.fromJson(jsonRoundTrip(c.toJson()));
+          expectPrefix(c, nn, times, classes, s, i + 1, kMaxArtifactRun,
+              'across a settled gap at $i');
+        }
+      }
+    });
+
     test('maxArtifactRun survives the checkpoint (a value, the default, null)', () {
       for (final k in <int?>[5, kMaxArtifactRun, null]) {
         final c = RrCorrector(maxArtifactRun: k)

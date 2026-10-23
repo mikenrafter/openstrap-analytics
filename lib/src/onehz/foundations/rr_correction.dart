@@ -93,6 +93,51 @@ RrCorrectionResult correctRr(
   double reanchorGapMs = 1000,
   int? maxArtifactRun = kMaxArtifactRun,
 }) {
+  if (maxArtifactRun != null && maxArtifactRun < 1) {
+    throw ArgumentError.value(maxArtifactRun, 'maxArtifactRun');
+  }
+  if (windowBeats < 1) throw ArgumentError.value(windowBeats, 'windowBeats');
+  if (maxArtifactRun != null) {
+    // The overwhelmingly common path has no run over the cap. Reuse the
+    // original vectorized correction verbatim, including its clock, and only
+    // evaluate split windows when a run actually requires a cut.
+    var hardRun = 0, hardGap = false;
+    for (final rr in rrMs) {
+      hardRun = rr < 300 || rr > 2000 ? hardRun + 1 : 0;
+      if (hardRun > maxArtifactRun) { hardGap = true; break; }
+    }
+    if (!hardGap) {
+      final ordinary = correctRr(rrMs, rrTsMs: rrTsMs, alpha: alpha,
+          windowBeats: windowBeats, minThresholdMs: minThresholdMs,
+          reanchorGapMs: reanchorGapMs, maxArtifactRun: null);
+      var run = 0, gap = false;
+      for (final cls in ordinary.classes) {
+        run = cls == BeatClass.normal ? 0 : run + 1;
+        if (run > maxArtifactRun) { gap = true; break; }
+      }
+      if (!gap) return ordinary;
+    }
+    final w = RrCapWindow.evaluate(rrMs,
+        ts: rrTsMs, cap: maxArtifactRun, alpha: alpha,
+        windowBeats: windowBeats, minThresholdMs: minThresholdMs,
+        reanchorGapMs: reanchorGapMs);
+    final nn = <double>[], times = <double>[];
+    var normal = 0, dropped = 0, corrected = 0;
+    for (var i = 0; i < rrMs.length; i++) {
+      if (w.classes[i] == BeatClass.normal) normal++;
+      final v = w.values[i];
+      if (v == null) {
+        dropped++;
+      } else {
+        nn.add(v);
+        times.add(w.times[i]);
+        if (w.classes[i] != BeatClass.normal) corrected++;
+      }
+    }
+    return RrCorrectionResult(nn: nn, nnTimesMs: times, classes: w.classes,
+        cleanFraction: rrMs.isEmpty ? 0 : normal / rrMs.length,
+        droppedCount: dropped, correctedCount: corrected);
+  }
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
   // every branch below reads a clock instead of advancing its own.

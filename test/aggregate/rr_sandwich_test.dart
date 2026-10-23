@@ -211,7 +211,14 @@ void main() {
     });
 
     test('a cut at every beat of a dropout seam (the clock re-anchors)', () {
-      final s = _synth(51, 0.06, gaps: 60);
+      final original = _synth(51, 0.06, gaps: 60);
+      // A dropout rate is probabilistic; this seed currently draws none.
+      // Insert a definite two-minute hole so this seam test always runs.
+      final at = original.rr.length ~/ 2;
+      final s = (rr: original.rr, ts: [
+        for (var i = 0; i < original.ts.length; i++)
+          original.ts[i] + (i >= at ? 120000 : 0),
+      ]);
       final batch = _raw(s);
       final agg = _sandwich();
       final want = correctRr(s.rr, rrTsMs: s.ts);

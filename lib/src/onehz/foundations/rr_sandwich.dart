@@ -122,18 +122,24 @@ class NnColumn<S, R> extends Aggregator<S, Beats, R> {
   final Aggregator<S, DoubleColumn, R> inner;
 
   @override
-  S empty() => throw UnimplementedError('NnColumn.empty');
+  S empty() => inner.empty();
 
   @override
   S addSlice(S state, Beats batch, int start, int end) =>
-      throw UnimplementedError('NnColumn.addSlice');
+      inner.addSlice(state, DoubleColumn(batch.nnMs), start, end);
 
   @override
-  S combine(S left, S right) => throw UnimplementedError('NnColumn.combine');
+  S combine(S left, S right) => inner.combine(left, right);
 
   @override
-  R finish(S state) => throw UnimplementedError('NnColumn.finish');
+  R finish(S state) => inner.finish(state);
 
   @override
   bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+
+  @override
+  S decodeState(Object? json) => inner.decodeState(json);
 }

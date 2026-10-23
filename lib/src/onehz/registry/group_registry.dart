@@ -61,7 +61,7 @@ class GroupRegistry {
   const GroupRegistry(this.registryVersion, this.groups);
 }
 
-/// The groups analytics declares (registry version 1, every counter 1).
+/// The groups analytics declares (registry schema version 1).
 ///
 /// `members` are the group's cost-bearing entry functions (at most 3); `api`
 /// lists the other exported functions whose output depends on the group, so
@@ -81,7 +81,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'found.rr_correction',
     kind: GroupKind.foundation,
-    counter: 1,
+    counter: 2,
     members: ['correctRr'],
     deps: ['found.core'],
     files: [
@@ -131,7 +131,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'sleep.stage',
     kind: GroupKind.algorithm,
-    counter: 1,
+    counter: 2,
     members: ['segmentSleep', 'stageMinuteRanges', 'cardioStager'],
     api: [
       'resetCardioObservations',
@@ -165,6 +165,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'lib/src/onehz/incremental_core.dart',
       'lib/src/onehz/sleep/advanced_stager.dart',
       'lib/src/onehz/sleep/band_offset.dart',
+      'lib/src/onehz/sleep/epoch_rows.dart',
       'lib/src/onehz/sleep/cardio_row_cache.dart',
       'lib/src/onehz/sleep/cardio_stager.dart',
       'lib/src/onehz/sleep/cpc.dart',

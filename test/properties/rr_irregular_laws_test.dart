@@ -112,6 +112,7 @@ const List<(double, int, double, double)> _corrCfgs = [
 RrCorrector _newCorrector(int cfg) {
   final c = _corrCfgs[cfg];
   return RrCorrector(
+    maxArtifactRun: null, // This harness pins the uncapped pipeline layout.
       alpha: c.$1, windowBeats: c.$2, minThresholdMs: c.$3, reanchorGapMs: c.$4);
 }
 
@@ -603,7 +604,7 @@ void _l2Corrector(_Case c) {
   List l(String k) => j[k] as List;
   switch (kind % 11) {
     case 0:
-      const versions = <Object?>[0, 2, 3, -1, 99, '1', null, true, 1 << 40, 'v1'];
+      const versions = <Object?>[0, 1, 3, -1, 99, '2', null, true, 1 << 40, 'v2'];
       j['version'] = versions[a % versions.length];
       return (j, Must.refuse);
     case 1:
@@ -2425,7 +2426,7 @@ void main() {
       // (If the reader is ever hardened to refuse a nonzero d[0], this becomes
       // the refusal test.)
       List<BeatClass> classesAfter(double d0) {
-        final c = RrCorrector(windowBeats: 1)..fold([600]);
+        final c = RrCorrector(windowBeats: 1, maxArtifactRun: null)..fold([600]);
         final j = (jsonDecode(jsonEncode(c.toJson())) as Map).cast<String, dynamic>();
         (j['d'] as List)[0] = d0;
         return RrCorrector.fromJson(j).fold([800, 800]).classes;
@@ -2629,7 +2630,7 @@ void main() {
     });
 
     test('RrCorrector.fromJson bounds counters by their pipeline stages', () {
-      final short = RrCorrector()..fold([800.0, 800.0, 800.0]);
+      final short = RrCorrector(maxArtifactRun: null)..fold([800.0, 800.0, 800.0]);
       Map<String, dynamic> shortJson() =>
           (jsonDecode(jsonEncode(short.toJson())) as Map).cast<String, dynamic>();
       final shortCheckpoint = shortJson();
@@ -2647,7 +2648,7 @@ void main() {
             reason: '$field: $value');
       }
 
-      final long = RrCorrector()..fold([for (var i = 0; i < 300; i++) 800.0]);
+      final long = RrCorrector(maxArtifactRun: null)..fold([for (var i = 0; i < 300; i++) 800.0]);
       final longCheckpoint =
           (jsonDecode(jsonEncode(long.toJson())) as Map).cast<String, dynamic>();
       final c2 = longCheckpoint['c2'] as int;
@@ -2667,7 +2668,7 @@ void main() {
 
     test('RrCorrector.fromJson refuses a checkpoint whose counters are '
         'impossible', () {
-      final c = RrCorrector()
+      final c = RrCorrector(maxArtifactRun: null)
         ..fold([for (var i = 0; i < 300; i++) 800.0 + (i % 7) * 11],
             tsMs: [for (var i = 0; i < 300; i++) 1.76e12 + i * 1000]);
       Map<String, dynamic> fresh() =>

@@ -34,6 +34,11 @@
 // `correctRr` clips its windows at the end of the data; [RrCorrector.snapshot]
 // re-evaluates just that tail with the same clipping.
 //
+// With a cap, a future split also changes the windows to its left. The capped
+// path keeps 4H + 2K + 4 beats provisional (248 at the defaults), then up to K
+// more to avoid committing part of a short artifact run. Uncapped mode retains
+// the original stage-by-stage latency described above.
+//
 // The arithmetic (window, threshold, class, spline) is shared with `correctRr`
 // through rr_correction_kernel.dart.
 
@@ -114,6 +119,7 @@ class RrCorrector {
   /// Same meaning as [correctRr]'s `maxArtifactRun`.
   final int? maxArtifactRun;
   final int _h;
+  final _CappedState? _capState;
 
   // ---- persisted state ----
   int _n = 0; // beats folded
@@ -142,8 +148,12 @@ class RrCorrector {
     this.minThresholdMs = 100,
     this.reanchorGapMs = 1000,
     this.maxArtifactRun = kMaxArtifactRun,
-  }) : _h = windowBeats ~/ 2 {
+  }) : _h = windowBeats ~/ 2,
+       _capState = maxArtifactRun == null ? null : _CappedState() {
     if (windowBeats < 1) throw ArgumentError.value(windowBeats, 'windowBeats');
+    if (maxArtifactRun != null && maxArtifactRun! < 1) {
+      throw ArgumentError.value(maxArtifactRun, 'maxArtifactRun');
+    }
   }
 
   /// Restores a corrector from [toJson]. Throws [FormatException] on a
@@ -162,17 +172,25 @@ class RrCorrector {
     if (j['type'] != 'RrCorrector') {
       throw FormatException('not an RrCorrector checkpoint: ${j['type']}');
     }
-    if (j['version'] != 1) {
+    if (j['version'] != 2) {
       throw FormatException('unsupported RrCorrector version ${j['version']}');
     }
     List<double> doubles(String k) =>
         [for (final x in j[k] as List) (x as num).toDouble()];
     final c = RrCorrector(
+      maxArtifactRun: j['maxArtifactRun'] as int?,
       alpha: (j['alpha'] as num).toDouble(),
       windowBeats: j['windowBeats'] as int,
       minThresholdMs: (j['minThresholdMs'] as num).toDouble(),
       reanchorGapMs: (j['reanchorGapMs'] as num).toDouble(),
     );
+    if (!j.containsKey('maxArtifactRun')) {
+      throw const FormatException('missing artifact cap');
+    }
+    if (c._capState != null) {
+      c._capState.restore(j['capped'] as Map<String, dynamic>, c._h);
+      return c;
+    }
     c._n = j['n'] as int;
     c._wall = j['wall'] as bool?;
     c._origin = (j['origin'] as num).toDouble();
@@ -225,11 +243,21 @@ class RrCorrector {
     return c;
   }
 
-  /// Checkpoint: `{'version': 1, 'type': 'RrCorrector', ...}`, plain JSON
+  /// Checkpoint: `{'version': 2, 'type': 'RrCorrector', ...}`, plain JSON
   /// (survives `jsonEncode`/`jsonDecode` bit-exactly), and bounded — it holds
   /// the unsettled window, not the series.
-  Map<String, dynamic> toJson() => {
-        'version': 1,
+  Map<String, dynamic> toJson() {
+    if (_capState != null) {
+      return {
+        'version': 2, 'type': 'RrCorrector',
+        'maxArtifactRun': maxArtifactRun, 'alpha': alpha,
+        'windowBeats': windowBeats, 'minThresholdMs': minThresholdMs,
+        'reanchorGapMs': reanchorGapMs, 'capped': _capState.toJson(),
+      };
+    }
+    return {
+        'version': 2,
+        'maxArtifactRun': maxArtifactRun,
         'type': 'RrCorrector',
         'alpha': alpha,
         'windowBeats': windowBeats,
@@ -255,15 +283,17 @@ class RrCorrector {
         'corrected': _corrected,
         'lastNormals': _lastNormals,
       };
+  }
 
   /// Beats whose output is final.
-  int get settledBeats => _ce;
+  int get settledBeats => _capState?.edge ?? _ce;
 
   /// Appends beats. [tsMs] (same length as [rrMs]) is either given on EVERY
   /// fold or on none; mixing throws [StateError]. A non-finite RR throws
   /// [ArgumentError] and leaves the corrector unchanged. An empty chunk is a
   /// no-op.
   RrSettled fold(List<double> rrMs, {List<double>? tsMs}) {
+    if (_capState != null) return _capState.fold(this, rrMs, tsMs);
     if (rrMs.isEmpty) {
       return const RrSettled(nn: [], nnTimes: [], classes: []);
     }
@@ -459,6 +489,7 @@ class RrCorrector {
 
   /// Provisional tail and totals; does not change the corrector.
   RrSnapshot snapshot() {
+    if (_capState != null) return _capState.snapshot(this);
     final n = _n;
     if (n == 0) {
       return const RrSnapshot(
@@ -598,5 +629,186 @@ class RrCorrector {
     }
     _wPos = -1;
     _w2Pos = -1;
+  }
+}
+
+// The cap can cut a window that an uncapped detector has already read. Keep
+// that decision provisional until both the run and its left influence have
+// settled. No stage-1/2 arrays from across a cut are ever reused.
+class _CappedState {
+  int n = 0, off = 0, edge = 0, segmentStart = 0;
+  int normal = 0, dropped = 0, corrected = 0;
+  bool? wall;
+  bool gap = false, hardGap = false;
+  double origin = 0, clock = 0;
+  BeatClass previous = BeatClass.normal;
+  final rr = <double>[], ts = <double>[], normals = <double>[];
+
+  RrCapWindow evaluate(RrCorrector c) => RrCapWindow.evaluate(rr,
+      ts: wall == true ? ts : null,
+      cap: c.maxArtifactRun!,
+      alpha: c.alpha,
+      windowBeats: c.windowBeats,
+      minThresholdMs: c.minThresholdMs,
+      reanchorGapMs: c.reanchorGapMs,
+      from: edge - off,
+      previous: previous,
+      leftNormals: normals,
+      leadingGap: gap,
+      leadingHardGap: hardGap,
+      segmentStart: math.max(0, segmentStart - off),
+      clock: clock,
+      origin: origin);
+
+  RrSettled fold(RrCorrector c, List<double> values, List<double>? times) {
+    if (values.isEmpty)
+      return const RrSettled(nn: [], nnTimes: [], classes: []);
+    if (times != null && times.length != values.length) {
+      throw ArgumentError('RR and timestamp lengths differ');
+    }
+    if (wall != null && wall != (times != null)) {
+      throw StateError('timestamps must be given on every fold or on none');
+    }
+    for (var i = 0; i < values.length; i++) {
+      if (!values[i].isFinite || (times != null && !times[i].isFinite)) {
+        throw ArgumentError('non-finite beat at index $i');
+      }
+    }
+    wall = times != null;
+    if (n == 0) origin = times == null ? 0 : times.first - values.first;
+    rr.addAll(values);
+    if (times != null) ts.addAll(times);
+    n += values.length;
+    final w = evaluate(c);
+    final nn = <double>[], nt = <double>[], classes = <BeatClass>[];
+    // Two centred threshold windows, the cap decision and its backwards
+    // influence. Extra normal anchors settle isolated spline corrections.
+    var limit = math.max(edge, n - (4 * c._h + 2 * c.maxArtifactRun! + 4));
+    // Do not split a short artifact run between folds: its final beat must
+    // never be mistaken for an isolated artifact at the next pending edge.
+    while (limit > edge &&
+        w.classes[limit - off - 1] != BeatClass.normal &&
+        !w.gaps[limit - off - 1]) {
+      limit--;
+    }
+    for (var i = edge - off; i < limit - off; i++) {
+      final cl = w.classes[i];
+      classes.add(cl);
+      previous = cl;
+      if (cl == BeatClass.normal) {
+        normal++;
+        normals.add(rr[i]);
+        if (normals.length > 2) normals.removeAt(0);
+      }
+      if (w.gaps[i]) normals.clear();
+      final v = w.values[i];
+      if (v == null) {
+        dropped++;
+      } else {
+        nn.add(v);
+        nt.add(w.times[i]);
+        if (cl != BeatClass.normal) corrected++;
+      }
+      clock = w.times[i];
+      if (gap && !w.gaps[i]) segmentStart = off + i;
+      gap = w.gaps[i];
+      hardGap = w.hardGaps[i];
+    }
+    edge = limit;
+    final nextOff = math.max(0, edge - 2 * c._h - 2);
+    final trim = nextOff - off;
+    if (trim > 0) {
+      rr.removeRange(0, trim);
+      if (wall == true) ts.removeRange(0, trim);
+      off = nextOff;
+    }
+    return RrSettled(nn: nn, nnTimes: nt, classes: classes);
+  }
+
+  RrSnapshot snapshot(RrCorrector c) {
+    final w = evaluate(c);
+    final nn = <double>[], nt = <double>[], classes = <BeatClass>[];
+    var nc = normal, dc = dropped, cc = corrected;
+    for (var i = edge - off; i < rr.length; i++) {
+      final cl = w.classes[i];
+      classes.add(cl);
+      if (cl == BeatClass.normal) nc++;
+      final v = w.values[i];
+      if (v == null) {
+        dc++;
+      } else {
+        nn.add(v);
+        nt.add(w.times[i]);
+        if (cl != BeatClass.normal) cc++;
+      }
+    }
+    return RrSnapshot(
+        n: n,
+        tailNn: nn,
+        tailNnTimes: nt,
+        tailClasses: classes,
+        normalCount: nc,
+        droppedCount: dc,
+        correctedCount: cc,
+        settledBeats: edge,
+        classifiedBeats: edge);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'n': n,
+        'off': off,
+        'edge': edge,
+        'segmentStart': segmentStart,
+        'hardGap': hardGap,
+        'normal': normal,
+        'dropped': dropped,
+        'corrected': corrected,
+        'wall': wall,
+        'gap': gap,
+        'origin': origin,
+        'clock': clock,
+        'previous': previous.index,
+        'rr': rr,
+        'ts': ts,
+        'normals': normals,
+      };
+
+  void restore(Map<String, dynamic> j, int half) {
+    n = j['n'] as int;
+    off = j['off'] as int;
+    edge = j['edge'] as int;
+    segmentStart = j['segmentStart'] as int;
+    hardGap = j['hardGap'] as bool;
+    normal = j['normal'] as int;
+    dropped = j['dropped'] as int;
+    corrected = j['corrected'] as int;
+    wall = j['wall'] as bool?;
+    gap = j['gap'] as bool;
+    origin = (j['origin'] as num).toDouble();
+    clock = (j['clock'] as num).toDouble();
+    previous = BeatClass.values[j['previous'] as int];
+    List<double> read(String key) =>
+        [for (final v in j[key] as List) (v as num).toDouble()];
+    rr.addAll(read('rr'));
+    ts.addAll(read('ts'));
+    normals.addAll(read('normals'));
+    if (segmentStart < 0 ||
+        segmentStart > edge ||
+        (hardGap && !gap) ||
+        off != math.max(0, edge - 2 * half - 2) ||
+        edge < off ||
+        n < edge ||
+        rr.length != n - off ||
+        (gap && (previous == BeatClass.normal || normals.isNotEmpty)) ||
+        (wall == true ? ts.length != rr.length : ts.isNotEmpty) ||
+        (n > 0 && wall == null) ||
+        normals.length > 2 ||
+        normal < 0 ||
+        dropped < 0 ||
+        corrected < 0 ||
+        normal + dropped + corrected != edge ||
+        ![...rr, ...ts, ...normals, origin, clock].every((v) => v.isFinite)) {
+      throw const FormatException('inconsistent capped RR checkpoint');
+    }
   }
 }
