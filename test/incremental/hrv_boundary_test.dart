@@ -27,6 +27,15 @@ import 'support.dart';
   return (nn: nn, t: t);
 }
 
+/// Equal null-ness and within 1e-9 relative (the aggregator's stated
+/// tolerance; hrvTime now runs hrvTimeAggregator).
+void _near9(double? got, double? want, String reason) {
+  expect(got == null, want == null, reason: reason);
+  if (got != null && want != null) {
+    expect(got, closeTo(want, 1e-9 * want.abs()), reason: reason);
+  }
+}
+
 void main() {
   test('night shape: beats exactly on 30-min edges, incl. last beat on an edge', () {
     // 1000 ms steps from 0 => beat times are multiples of 1000, bins at 1.8e6
@@ -86,8 +95,9 @@ void main() {
         if (!want.present) continue;
         expect(got.value!.rmssd, want.value!.rmssd, reason: 'b=$b');
         expect(got.value!.pnn50, want.value!.pnn50, reason: 'b=$b');
-        expect(got.value!.sdann, want.value!.sdann);
-        expect(got.value!.sdnnIndex, want.value!.sdnnIndex);
+        // 1e-9 relative: hrvTime now runs hrvTimeAggregator (was exact).
+        _near9(got.value!.sdann, want.value!.sdann, 'sdann b=$b');
+        _near9(got.value!.sdnnIndex, want.value!.sdnnIndex, 'sdnnIndex b=$b');
         expect(got.value!.nBeats, want.value!.nBeats);
         expect(got.note, want.note, reason: 'b=$b');
       }

@@ -19,6 +19,10 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
   required double? maxHr,
   required Sex sex,
 }) {
+  // `maxHr <= restingHr` is FALSE when either is NaN, so the finiteness checks
+  // are load-bearing: a NaN anchor otherwise makes a NaN reserve, and every
+  // clamp below (`hrr < 0`, `hrr > 1`) is false for NaN too, so the sum comes
+  // out NaN inside a PRESENT metric.
   final anchorsValid = restingHr != null &&
       maxHr != null &&
       restingHr.isFinite &&
@@ -29,6 +33,8 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
     Count<DoubleColumn>(),
     SumOf<DoubleColumn>((batch) => batch.values, (hr) {
       if (!anchorsValid || !hr.isFinite || hr <= 0) return double.nan;
+      // ONE Banister implementation for the whole package: the sex-specific
+      // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
       var hrr = (hr - restingHr) / reserve;
       if (hrr < 0) hrr = 0.0;
       if (hrr > 1) hrr = 1.0;
