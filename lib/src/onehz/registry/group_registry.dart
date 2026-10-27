@@ -132,9 +132,11 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'sleep.stage',
     kind: GroupKind.algorithm,
-    counter: 2,
+    counter: 3,
     members: ['segmentSleep', 'stageMinuteRanges', 'cardioStager'],
     api: [
+      'computeNightBaselines',
+      'hmm628Stages',
       'resetCardioObservations',
       'takeCardioObservations',
       'detectSleepCycles',
@@ -156,6 +158,7 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'found.calibration',
     ],
     files: [
+      'lib/src/onehz/sleep/sleep_pipeline_hmm.dart',
       'lib/src/aggregate/aggregator.dart',
       'lib/src/aggregate/json_support.dart',
       'lib/src/aggregate/primitives.dart',

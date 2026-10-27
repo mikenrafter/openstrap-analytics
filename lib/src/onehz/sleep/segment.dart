@@ -39,6 +39,7 @@
 // fabricated. Stages are tier ESTIMATE (3-class autonomic, not PSG).
 
 import 'dart:math' as math;
+import 'sleep_pipeline_hmm.dart';
 import '../types.dart';
 import '../util.dart';
 import 'van_hees.dart';
@@ -286,6 +287,9 @@ class SleepSegmentation {
   /// `window.offsetMs ~/ 1000 + bandOffsetTrimSec`.
   final int? bandOffsetTrimSec;
 
+  final double? hrMinNight, rmssdMeanNight;
+  final StagingMethod stagingMethod;
+
   const SleepSegmentation({
     required this.window,
     required this.stages,
@@ -305,7 +309,21 @@ class SleepSegmentation {
     required this.confidence,
     this.absenceReason,
     this.bandOffsetTrimSec,
+    this.hrMinNight,
+    this.rmssdMeanNight,
+    this.stagingMethod = StagingMethod.cardio,
   });
+
+  /// Absence retains the selected classifier for cache/provenance, even when
+  /// that classifier correctly abstained on all epochs.
+  const SleepSegmentation.absentForMethod(this.stagingMethod,
+      {this.absenceReason})
+      : window = null, stages = const [], stages4 = const [],
+        tstSec = null, wasoSec = null, inBedSec = null,
+        unobservedSec = null, efficiencyPct = null, nremSec = null,
+        lightSec = null, deepSec = null, remSec = null, wakeSec = null,
+        sustainedAwakenings = null, longestSleepRunSec = null, confidence = 0,
+        bandOffsetTrimSec = null, hrMinNight = null, rmssdMeanNight = null;
 
   /// Honest "no qualifying sleep" result — all figures null, confidence 0.
   static const SleepSegmentation absent = SleepSegmentation(
@@ -370,6 +388,12 @@ class SleepSegmentation {
 
   Map<String, dynamic> toJson() => {
         'window': window?.toJson(),
+        'hr_min_night': hrMinNight,
+        'rmssd_mean_night': rmssdMeanNight,
+        'staging_method': stagingMethod.name,
+        'staging_note': stagingMethod == StagingMethod.hmm628
+            ? 'Experimental #628 offline staging; not a medical device; not validated against PSG.'
+            : 'Estimated sleep staging; not a medical device.',
         if (bandOffsetTrimSec != null) 'band_offset_trim_sec': bandOffsetTrimSec,
         'tst_sec': tstSec,
         'waso_sec': wasoSec,
@@ -433,16 +457,23 @@ SleepSegmentation segmentSleep(
   /// the same signal as [ts,state] pairs; not forwarded here.)
   List<int>? bandSleepState,
   CardioRowCache? rowCache,
+  StagingMethod method = StagingMethod.cardio,
+  List<bool>? contactLost,
 }) {
+  SleepSegmentation absent([String? reason]) =>
+      SleepSegmentation.absentForMethod(method, absenceReason: reason);
+  // Staging and measured metadata share the expensive feature rows even
+  // when the caller does not maintain a persistent cross-derive cache.
+  final effectiveRowCache = rowCache ?? CardioRowCache();
   final n = math.min(accel.length, hr1hz.length);
   // A forced window (manual entry / user confirmation, Approach 1) is asserted
   // by the human, so it skips the 3 h sample-count gate the auto path enforces —
   // a user may log a 2 h nap, and partial data inside the window is fine (those
   // seconds just stay unstaged/wake). We still need SOME data to stage.
   if (forcedWindow == null && n < _minQualifyingSleepSec) {
-    return SleepSegmentation.absent;
+    return absent();
   }
-  if (n == 0) return SleepSegmentation.absent;
+  if (n == 0) return absent();
 
   final trimmedAccel = accel.sublist(0, n);
   final trimmedHr = hr1hz.sublist(0, n);
@@ -481,6 +512,7 @@ SleepSegmentation segmentSleep(
         // Dropping this flag here published 8 h of undecoded accel as
         // "TST 28619 s, efficiency 100.0 %, unobserved 0 s". See [GravTs.valid].
         valid: trimmedAccel[i].valid,
+        contactLost: contactLost != null && i < contactLost.length && contactLost[i],
       ),
   ];
   final hr = <HrTs>[
@@ -497,11 +529,11 @@ SleepSegmentation segmentSleep(
   if (forcedWindow != null) {
     final onsetSec = forcedWindow.onsetSec;
     final offsetSec = forcedWindow.offsetSec;
-    if (offsetSec <= onsetSec) return SleepSegmentation.absent;
+    if (offsetSec <= onsetSec) return absent();
     // Stage the user-asserted window directly — no detection, no gates.
     final session =
         AdvancedSleepStager.stageWindow(onsetSec, offsetSec, grav, hr,
-            rr: rr, rowCache: rowCache);
+            rr: rr, rowCache: effectiveRowCache, method: method);
     chosen = _SleepGroup(
       sessions: [session],
       start: onsetSec,
@@ -514,9 +546,10 @@ SleepSegmentation segmentSleep(
       hr,
       rr: rr,
       tzOffsetResolver: tzAt,
-      rowCache: rowCache,
+      rowCache: effectiveRowCache,
+      method: method,
     );
-    if (sessions.isEmpty) return SleepSegmentation.absent;
+    if (sessions.isEmpty) return absent();
 
     chosen = _pickMainSleepGroup(
       _bridgeAdjacentSessions(sessions),
@@ -524,7 +557,7 @@ SleepSegmentation segmentSleep(
       habitualMidsleepSec: habitualMidsleepSec,
     );
   }
-  if (chosen == null) return SleepSegmentation.absent;
+  if (chosen == null) return absent();
 
   final tsSec = [for (final a in trimmedAccel) a.tsMs ~/ 1000];
   int? bandOffsetTrimSec;
@@ -551,12 +584,12 @@ SleepSegmentation segmentSleep(
   final onset = _lowerBoundInt(tsSec, chosen.start);
   final offset = _lowerBoundInt(tsSec, chosen.end);
   final inBed = chosen.end - chosen.start;
-  if (inBed <= 0) return SleepSegmentation.absent;
+  if (inBed <= 0) return absent();
   // The empty-index and 3 h in-bed floors are AUTO-path sanity gates; a forced
   // window is the user's word — honor any positive-length window.
   if (forcedWindow == null &&
       (offset <= onset || inBed < _minQualifyingSleepSec)) {
-    return SleepSegmentation.absent;
+    return absent();
   }
 
   // OBSERVED mask over the wall-clock window. `inBed` is wall-clock length but
@@ -613,7 +646,7 @@ SleepSegmentation segmentSleep(
 
   final observedSec = inBed - unobservedSec;
   if (observedSec < inBed * kMinObservedFractionForSleep) {
-    return SleepSegmentation.unobservedWindow(
+    return absent(
       'only ${observedSec}s of a ${inBed}s window were observed '
       '(sample + heart rate); below the '
       '${(kMinObservedFractionForSleep * 100).round()}% floor',
@@ -689,7 +722,7 @@ SleepSegmentation segmentSleep(
     // the 3 h and index gates, so this used to publish tst 0 / efficiency 0 % as
     // a PRESENT metric — "0 h 0 m slept, 0 % efficiency" for a night we simply
     // did not observe. That is a fabricated measurement, not an abstention.
-    return SleepSegmentation.absent;
+    return absent();
   }
   // Denominator is OBSERVED in-bed time, not wall clock — see [efficiencyPct].
   final efficiency = observedSec > 0 ? 100.0 * tst / observedSec : 0.0;
@@ -725,7 +758,25 @@ SleepSegmentation segmentSleep(
   final conf =
       ((windowConf + stagingConf) / 2.0).clamp(0.0, kMaxSleepConfidence);
 
+  // Each constituent session is evaluated independently. Publish metadata
+  // for the first selected session, which defines the night's onset window;
+  // a later session cannot refill a missing baseline from an earlier one.
+  final firstSession = chosen.sessions.first;
+  // Copy immutable cached values cheaply, keeping metadata lookups and its
+  // horizon-edge rows out of the caller's staging-cache counters/history.
+  final baselineCache = CardioRowCache()..merge(effectiveRowCache);
+  final baselines = computeNightBaselines(
+    // Last baseline epoch starts before +7200s; +180s preserves all feature
+    // lookahead without a second full-night spectral scan.
+    AdvancedSleepStager.measuredEpochs(firstSession.start,
+        math.min(math.min(firstSession.end, chosen.end), firstSession.start + 7380),
+        grav, hr, rr, rowCache: baselineCache),
+    sessionStartSec: firstSession.start,
+  );
   return SleepSegmentation(
+    hrMinNight: baselines.hrMinNight,
+    rmssdMeanNight: baselines.rmssdMeanNight,
+    stagingMethod: method,
     window: SleepWindow(
       onsetIdx: onset,
       offsetIdx: offset,
