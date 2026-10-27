@@ -72,6 +72,14 @@ class GroupRegistry {
 /// public. test/registry_closure_test.dart re-derives all of this from source.
 const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
+    id: 'wake.evidence',
+    kind: GroupKind.algorithm,
+    counter: 1,
+    members: ['wakeHrBaseline', 'wakeRecentEnmo', 'wakeEnmoTrend'],
+    api: ['wakeRecentHr', 'wakeBaselineEnmo'],
+    files: ['lib/src/onehz/sleep/wake_evidence.dart'],
+  ),
+  GroupDecl(
     id: 'found.core',
     kind: GroupKind.foundation,
     counter: 2,
