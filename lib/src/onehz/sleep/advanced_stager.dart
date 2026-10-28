@@ -1529,14 +1529,23 @@ class AdvancedSleepStager {
   }
 
   /// Marks every 30-s epoch (on the session grid) that contains an explicit
-  /// contact-loss second or an invalid accel vector as 'unobserved', cutting
+  /// contact-loss second, an invalid accel vector or a missing second as
+  /// 'unobserved', cutting
   /// [segs] and keeping them a gap-free tiling of [start, end).
   static List<StageSegment> _imposeSensorGaps(
       List<StageSegment> segs, int start, int end, List<GravTs> grav) {
-    final holes = <int>{};
+    // An epoch is a hole when any of its seconds lacks a usable gravity sample:
+    // explicit contact loss, an undecoded vector, or no sample at all (HMM's own
+    // measuredEpochs breaks its chain at all three).
+    final good = <int>{};
     for (final g in grav) {
-      if (g.ts < start || g.ts >= end) continue;
-      if (!g.valid || g.contactLost) holes.add((g.ts - start) ~/ 30);
+      if (g.ts >= start && g.ts < end && g.valid && !g.contactLost) {
+        good.add(g.ts);
+      }
+    }
+    final holes = <int>{};
+    for (var t = start; t < end; t++) {
+      if (!good.contains(t)) holes.add((t - start) ~/ 30);
     }
     if (holes.isEmpty) return segs;
     final epochs = holes.toList()..sort();
