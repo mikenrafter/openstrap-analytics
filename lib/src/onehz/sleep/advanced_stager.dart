@@ -1560,15 +1560,20 @@ class AdvancedSleepStager {
     // An epoch is a hole when any of its seconds lacks a usable gravity sample:
     // explicit contact loss, an undecoded vector, or no sample at all (HMM's own
     // measuredEpochs breaks its chain at all three).
-    final good = <int>{};
+    // Explicit loss and undecoded vectors take precedence over a valid sample
+    // at the same timestamp (measuredEpochs rejects such an epoch too).
+    final good = <int>{}, bad = <int>{};
     for (final g in grav) {
-      if (g.ts >= start && g.ts < end && g.valid && !g.contactLost) {
+      if (g.ts < start || g.ts >= end) continue;
+      if (g.valid && !g.contactLost) {
         good.add(g.ts);
+      } else {
+        bad.add(g.ts);
       }
     }
     final holes = <int>{};
     for (var t = start; t < end; t++) {
-      if (!good.contains(t)) holes.add((t - start) ~/ 30);
+      if (bad.contains(t) || !good.contains(t)) holes.add((t - start) ~/ 30);
     }
     for (final sec in extraHoleEpochs) {
       holes.add((sec - start) ~/ 30);
