@@ -14,11 +14,17 @@ class HmmEpoch {
   final int startSec;
   final double? hr, rmssd;
   final bool contactLost;
+
+  /// RED-PHASE FIELD (spec addendum): per-epoch wrist motion, carried but not
+  /// yet used. true = a >5 degree turn between consecutive seconds, false =
+  /// observed still, null = unknown.
+  final bool? moved;
   const HmmEpoch(
     this.startSec, {
     this.hr,
     this.rmssd,
     this.contactLost = false,
+    this.moved,
   });
 }
 
