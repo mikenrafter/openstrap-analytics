@@ -140,11 +140,12 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
   GroupDecl(
     id: 'sleep.stage',
     kind: GroupKind.algorithm,
-    counter: 3,
+    counter: 4,
     members: ['segmentSleep', 'stageMinuteRanges', 'cardioStager'],
     api: [
       'computeNightBaselines',
       'hmm628Stages',
+      'hmm628IsDegenerate',
       'resetCardioObservations',
       'takeCardioObservations',
       'detectSleepCycles',
