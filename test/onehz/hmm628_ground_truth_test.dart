@@ -222,6 +222,45 @@ void main() {
     });
   });
 
+  group('duplicate-timestamp sensor gaps through the fallback (review K3)', () {
+    // why: a valid sample must not outvote an explicit contact-loss or invalid
+    // sample at the same timestamp; measuredEpochs already rejects the epoch.
+    test('RED K3: a contact-loss duplicate beats a valid sample at the same second', () {
+      final n = _flat8h();
+      final grav = [
+        ...n.grav,
+        for (var i = 7200; i < 7800; i++) GravTs(_raw0 + i, 0, 0, 1, contactLost: true),
+      ];
+      final s = AdvancedSleepStager.stageWindow(_raw0, _raw0 + 8 * 3600, grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+      expect(s.stagingFallback, 'hmm628_degenerate');
+      _tile(s.stages, _raw0, _raw0 + 8 * 3600);
+      expect(_gaps(s.stages), [(7200, 7800)]);
+    });
+
+    test('RED K3: an invalid duplicate beats a valid sample at the same second', () {
+      final n = _flat8h();
+      final grav = [
+        ...n.grav,
+        for (var i = 9000; i < 9600; i++) GravTs(_raw0 + i, 0, 0, 0, valid: false),
+      ];
+      final s = AdvancedSleepStager.stageWindow(_raw0, _raw0 + 8 * 3600, grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+      expect(s.stagingFallback, 'hmm628_degenerate');
+      _tile(s.stages, _raw0, _raw0 + 8 * 3600);
+      expect(_gaps(s.stages), [(9000, 9600)]);
+    });
+
+    test('CONTROL K3: a harmless valid duplicate leaves no gap', () {
+      final n = _flat8h();
+      final grav = [...n.grav, for (var i = 7200; i < 7800; i++) GravTs(_raw0 + i, 0, 0, 1)];
+      final s = AdvancedSleepStager.stageWindow(_raw0, _raw0 + 8 * 3600, grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+      expect(s.stagingFallback, 'hmm628_degenerate');
+      expect(_gaps(s.stages), isEmpty);
+    });
+  });
+
   group('the 10-27 night, synthetic (section 12 recipe)', () {
     // Minutes 0-25 still wrist, HR 90 -> 140 -> 105, RMSSD ~110 (artifact);
     // 25-80 awake in bed (a 30-90 degree turn in ~45% of minutes, HR 82-90);
