@@ -846,9 +846,18 @@ void main() {
       final s = AdvancedSleepStager.detectSleep(differ.grav, differ.hrTs,
           rr: differ.rrRows, method: StagingMethod.hmm628, tzOffsetSec: 0);
       expect(s, isNotEmpty, reason: 'positive control: a night was detected');
-      for (final x in s) {
+      // Sessions of >= 3600 s hold >= 120 epochs and are degenerate; the 1618 s
+      // tail session (53 epochs) is below the floor and keeps HMM.
+      final long = s.where((x) => x.end - x.start >= 3600).toList();
+      final short = s.where((x) => x.end - x.start < 3600).toList();
+      expect(long.length, greaterThanOrEqualTo(3));
+      for (final x in long) {
         expect(x.stagingFallback, _fallback);
         expect(x.effectiveMethod, StagingMethod.cardio);
+      }
+      for (final x in short) {
+        expect(x.stagingFallback, isNull);
+        expect(x.effectiveMethod, StagingMethod.hmm628);
       }
     });
 

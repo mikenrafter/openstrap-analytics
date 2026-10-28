@@ -111,7 +111,9 @@ void main() {
       expect(payload['hr_min_night'], 60);
       expect(payload['rmssd_mean_night'], closeTo(100, 1e-9));
       expect(payload['staging_method'], method.name);
-      expect(payload['staging_note'], contains('not a medical'));
+      expect(payload['staging_note'], method == StagingMethod.hmm628
+          ? contains('Not for medical decisions.')
+          : contains('not a medical'));
       if (method == StagingMethod.cardio) {
         expect(jsonEncode(payload), jsonEncode(reference.toJson()),
             reason: 'the omitted default must be exactly explicit cardio');

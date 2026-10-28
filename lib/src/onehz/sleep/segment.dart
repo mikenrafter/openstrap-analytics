@@ -288,7 +288,23 @@ class SleepSegmentation {
   final int? bandOffsetTrimSec;
 
   final double? hrMinNight, rmssdMeanNight;
+
+  /// The REQUESTED staging method (compatibility field; never "what ran").
   final StagingMethod stagingMethod;
+
+  /// What produced the stages: 'cardio' | 'hmm628' | 'v1' | 'v2' | 'mixed'.
+  /// Null on an absent night (nothing was staged).
+  final String? stagingEffectiveMethod;
+
+  /// 'hmm628_degenerate' when at least one in-window session was staged by the
+  /// default cardio staging because the HMM output carried almost no variation.
+  final String? stagingFallback;
+
+  /// Wall-clock seconds of the window covered by fallback sessions: the sum of
+  /// |[session.start, session.end) clipped to the window| over sessions that
+  /// fell back. Sensor holes inside a session count; bridge gaps and the
+  /// end-trimmed tail do not. Non-null exactly when [stagingFallback] is.
+  final int? stagingFallbackSec;
 
   const SleepSegmentation({
     required this.window,
@@ -312,6 +328,9 @@ class SleepSegmentation {
     this.hrMinNight,
     this.rmssdMeanNight,
     this.stagingMethod = StagingMethod.cardio,
+    this.stagingEffectiveMethod,
+    this.stagingFallback,
+    this.stagingFallbackSec,
   });
 
   /// Absence retains the selected classifier for cache/provenance, even when
@@ -323,7 +342,9 @@ class SleepSegmentation {
         unobservedSec = null, efficiencyPct = null, nremSec = null,
         lightSec = null, deepSec = null, remSec = null, wakeSec = null,
         sustainedAwakenings = null, longestSleepRunSec = null, confidence = 0,
-        bandOffsetTrimSec = null, hrMinNight = null, rmssdMeanNight = null;
+        bandOffsetTrimSec = null, hrMinNight = null, rmssdMeanNight = null,
+        stagingEffectiveMethod = null, stagingFallback = null,
+        stagingFallbackSec = null;
 
   /// Honest "no qualifying sleep" result — all figures null, confidence 0.
   static const SleepSegmentation absent = SleepSegmentation(
@@ -391,8 +412,15 @@ class SleepSegmentation {
         'hr_min_night': hrMinNight,
         'rmssd_mean_night': rmssdMeanNight,
         'staging_method': stagingMethod.name,
+        if (stagingEffectiveMethod != null)
+          'staging_effective_method': stagingEffectiveMethod,
+        if (stagingFallback != null) 'staging_fallback': stagingFallback,
+        if (stagingFallbackSec != null)
+          'staging_fallback_sec': stagingFallbackSec,
         'staging_note': stagingMethod == StagingMethod.hmm628
-            ? 'Experimental #628 offline staging; not a medical device; not validated against PSG.'
+            ? (stagingFallback == null
+                ? kHmm628Claim
+                : '$kHmm628Claim $kHmm628FallbackNote')
             : 'Estimated sleep staging; not a medical device.',
         if (bandOffsetTrimSec != null) 'band_offset_trim_sec': bandOffsetTrimSec,
         'tst_sec': tstSec,
@@ -439,6 +467,17 @@ class SleepSegmentation {
 /// the signature (all three edge call sites pass a real baseline) so wiring the
 /// step up later is a one-file change — but until then, onset and offset are
 /// NOT HR-refined, whatever the header says.
+/// The claim shipped with every ordinary experimental-HMM result, and its
+/// addition when the stager fell back to the default estimate
+/// (hmm-fix-spec.md section 4). Restored variation is not correct stages, and
+/// agreement with the default staging is not validation.
+const String kHmm628Claim =
+    'Experimental sleep-stage estimates. Not validated against a clinical '
+    'sleep study. Not for medical decisions.';
+const String kHmm628FallbackNote =
+    'The experimental model showed little stage variation; showing the '
+    'default estimate.';
+
 SleepSegmentation segmentSleep(
   List<AccelSample> accel,
   List<double> hr1hz, {
@@ -773,10 +812,32 @@ SleepSegmentation segmentSleep(
         grav, hr, rr, rowCache: baselineCache),
     sessionStartSec: firstSession.start,
   );
+  // Provenance over the sessions that REMAIN in the (possibly end-trimmed)
+  // window: a session wholly removed by trimming does not count; a partly
+  // trimmed one counts if its retained part overlaps the window.
+  final effectiveNames = <String>{};
+  var fallbackReason = '';
+  var fallbackSec = 0;
+  for (final session in chosen.sessions) {
+    final lo = math.max(session.start, chosen.start);
+    final hi = math.min(session.end, chosen.end);
+    if (hi <= lo) continue;
+    effectiveNames.add((session.effectiveMethod ?? method).name);
+    if (session.stagingFallback != null) {
+      fallbackReason = session.stagingFallback!;
+      fallbackSec += hi - lo;
+    }
+  }
+  final effective = effectiveNames.isEmpty
+      ? method.name
+      : (effectiveNames.length == 1 ? effectiveNames.single : 'mixed');
   return SleepSegmentation(
     hrMinNight: baselines.hrMinNight,
     rmssdMeanNight: baselines.rmssdMeanNight,
     stagingMethod: method,
+    stagingEffectiveMethod: effective,
+    stagingFallback: fallbackReason.isEmpty ? null : fallbackReason,
+    stagingFallbackSec: fallbackReason.isEmpty ? null : fallbackSec,
     window: SleepWindow(
       onsetIdx: onset,
       offsetIdx: offset,
