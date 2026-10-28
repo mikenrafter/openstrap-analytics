@@ -222,6 +222,27 @@ void main() {
     });
   });
 
+  group('reanchored artifact spans through the fallback (review L1)', () {
+    test('RED L1: a gravity dropout reanchors the epochs; the whole rejected span stays a gap', () {
+      // Gravity missing for seconds 300..328 shifts every later measured epoch
+      // to start at 329 + 30k, so the rejected stretch [7199, 7799) is off the
+      // session grid. Every rejected second must be unobserved.
+      final n = _flat8h(override: (i) => (i >= 7199 && i < 7799) ? (140.0, 110.0) : null);
+      final grav = [for (final g in n.grav) if (g.ts - _raw0 < 300 || g.ts - _raw0 >= 329) g];
+      final s = AdvancedSleepStager.stageWindow(_raw0, _raw0 + 8 * 3600, grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+      expect(s.stagingFallback, 'hmm628_degenerate', reason: 'precondition');
+      _tile(s.stages, _raw0, _raw0 + 8 * 3600);
+      final g = _gaps(s.stages);
+      expect(g, hasLength(2), reason: '$g');
+      expect(g[0], (300, 330), reason: 'the dropout epoch');
+      expect(g[1].$1, lessThanOrEqualTo(7199), reason: '$g');
+      expect(g[1].$2, greaterThanOrEqualTo(7799), reason: '$g');
+      expect(7199 - g[1].$1, lessThanOrEqualTo(29), reason: 'at most one grid epoch of slack');
+      expect(g[1].$2 - 7799, lessThanOrEqualTo(29));
+    });
+  });
+
   group('duplicate-timestamp sensor gaps through the fallback (review K3)', () {
     // why: a valid sample must not outvote an explicit contact-loss or invalid
     // sample at the same timestamp; measuredEpochs already rejects the epoch.
