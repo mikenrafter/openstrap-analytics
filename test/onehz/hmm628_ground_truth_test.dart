@@ -34,6 +34,38 @@ String _p(List<String> l) =>
     l.map((x) => {'wake': 'W', 'light': 'L', 'deep': 'D', 'rem': 'R'}[x] ?? '.').join();
 String _rep(String c, int n) => List.filled(n, c).join();
 
+/// Segments tile [lo, hi) exactly (sorted, contiguous, no empty piece).
+void _tile(List<StageSegment> segs, int lo, int hi) {
+  expect(segs, isNotEmpty);
+  expect(segs.first.start, lo);
+  expect(segs.last.end, hi);
+  for (var i = 0; i < segs.length; i++) {
+    expect(segs[i].end, greaterThan(segs[i].start), reason: 'empty segment $i');
+    if (i > 0) expect(segs[i].start, segs[i - 1].end, reason: 'gap/overlap before $i');
+  }
+}
+
+/// The unobserved ranges of [segs], as (start, end) offsets from _raw0.
+List<(int, int)> _gaps(List<StageSegment> segs) => [
+      for (final s in segs)
+        if (s.stage == 'unobserved') (s.start - _raw0, s.end - _raw0)
+    ];
+
+/// Flat 8 h night (HMM-degenerate): HR 60, RMSSD 100, still wrist, with
+/// [override] choosing HR / RMSSD per second.
+({List<GravTs> grav, List<HrTs> hr, List<RrTs> rr}) _flat8h(
+    {(double, double)? Function(int sec)? override}) {
+  const n = 8 * 3600;
+  final grav = <GravTs>[], hr = <HrTs>[], rr = <RrTs>[];
+  for (var i = 0; i < n; i++) {
+    final o = override?.call(i) ?? (60.0, 100.0);
+    grav.add(GravTs(_raw0 + i, 0, 0, 1));
+    hr.add(HrTs(_raw0 + i, o.$1));
+    rr.add(RrTs(_raw0 + i, 1000.0 + (i.isEven ? -1 : 1) * o.$2 / 2));
+  }
+  return (grav: grav, hr: hr, rr: rr);
+}
+
 void main() {
   // n=46: N x20, W x6 (indices 20..25), N x20. Without a gate: L20 W6 L20
   // (hand-derived like C5 in hmm628_baseline_test: six wake epochs repay the
@@ -123,11 +155,43 @@ void main() {
           _rep('L', 30) + _rep('R', 8) + _rep('L', 30));
     });
 
+    test('RED K1: rejected artifact epochs are unobserved and the chain breaks there', () {
+      // why: review K1. The decoder must not publish stages from evidence it
+      // rejects (all 28 rejected epochs of the 10-27 replay came out REM).
+      final l = _p(hmm628Stages(_seq(_rep('A', 20) + body), sessionStartSec: _t0));
+      expect(l.substring(0, 20), _rep('.', 20));
+      expect(l.substring(20), _rep('L', 30) + _rep('R', 8) + _rep('L', 30));
+    });
+
+    test('RED K1: the first epoch after a rejected epoch starts a fresh chain', () {
+      // A fresh chain cannot begin in REM (initial probability 0), so the
+      // epoch right after the artifact is not REM even though a REM run follows.
+      // Without the break it would continue the REM run across the artifact.
+      final s = _rep('N', 20) + _rep('R', 8) + 'A' + _rep('R', 8) + _rep('N', 20);
+      final l = _p(hmm628Stages(_seq(s), sessionStartSec: _t0));
+      expect(l[28], '.', reason: 'the artifact epoch');
+      expect(l[27], 'R', reason: 'positive control: REM before the artifact');
+      expect(l[29], isNot('R'), reason: 'fresh chain: REM cannot start a chain');
+    });
+
     test('CONTROL: the published onset baselines still include the artifact epochs', () {
       final b = computeNightBaselines(_seq(_rep('A', 20) + body), sessionStartSec: _t0);
       expect(b.hrMinNight, 62);
       expect(b.rmssdMeanNight, closeTo(4984 / 88, 1e-9),
           reason: 'published metadata is unchanged for every method');
+    });
+  });
+
+  group('rejected artifact epochs through the cardio fallback (review K1)', () {
+    test('RED K1: a flat night with a 10-minute artifact stretch falls back and keeps it as a gap', () {
+      // 7200-7800 s: HR 140, RMSSD 110 (artifact). Rest: HR 60, RMSSD 100.
+      final n = _flat8h(override: (i) => (i >= 7200 && i < 7800) ? (140.0, 110.0) : null);
+      final s = AdvancedSleepStager.stageWindow(_raw0, _raw0 + 8 * 3600, n.grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+      expect(s.stagingFallback, 'hmm628_degenerate', reason: 'precondition: flat => degenerate');
+      _tile(s.stages, _raw0, _raw0 + 8 * 3600);
+      expect(_gaps(s.stages), [(7200, 7800)],
+          reason: 'only the rejected stretch is a gap (aligned to the 30-s grid)');
     });
   });
 
