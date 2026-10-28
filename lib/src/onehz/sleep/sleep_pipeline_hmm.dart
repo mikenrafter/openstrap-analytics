@@ -54,6 +54,20 @@ const int kMotionGateWindowSec = 300;
 const double kMotionGateDensity = 0.25;
 const double kMotionGateWake = 0.05;
 
+// Baseline artifact rejection (section 12): RMSSD above kArtifactRmssdMs at an
+// HR above kArtifactHrBpm is not physiological (the owner's 06:02-06:31 stretch
+// read RMSSD 100-125 ms at HR 88-144 on a motionless wrist). Such an epoch is
+// left out of the DECODER's baseline statistics, both channels. It is not
+// removed from the labels, and the published onset baselines are unchanged.
+// CLAIM: unvalidated thresholds.
+const double kArtifactRmssdMs = 100;
+const double kArtifactHrBpm = 100;
+bool _isArtifact(HmmEpoch e) =>
+    _validHr(e.hr) &&
+    _validRmssd(e.rmssd) &&
+    e.rmssd! > kArtifactRmssdMs &&
+    e.hr! > kArtifactHrBpm;
+
 bool _validHr(double? v) => v != null && v.isFinite && v > 30 && v < 200;
 bool _validRmssd(double? v) => v != null && v.isFinite && v > 0 && v < 500;
 
@@ -62,10 +76,12 @@ bool _validRmssd(double? v) => v != null && v.isFinite && v > 0 && v < 500;
 /// RMSSD still feeds the HR statistic); contact loss excludes an epoch from
 /// both. No substitution from RHR, readiness, an earlier session or an absent
 /// channel.
-NightBaselines _baselinesOf(Iterable<HmmEpoch> rows) {
+NightBaselines _baselinesOf(Iterable<HmmEpoch> rows,
+    {bool rejectArtifacts = false}) {
   final hr = <double>[], rmssd = <double>[];
   for (final e in rows) {
     if (e.contactLost) continue;
+    if (rejectArtifacts && _isArtifact(e)) continue;
     if (_validHr(e.hr)) hr.add(e.hr!);
     if (_validRmssd(e.rmssd)) rmssd.add(e.rmssd!);
   }
@@ -150,7 +166,7 @@ List<String> hmm628Stages(
   List<HmmEpoch> epochs, {
   required int sessionStartSec,
 }) {
-  final baseline = _baselinesOf(epochs);
+  final baseline = _baselinesOf(epochs, rejectArtifacts: true);
   final gates = _motionGates(epochs);
   final labels = List<String>.filled(epochs.length, 'unobserved');
   if (baseline.hrMinNight == null || baseline.rmssdMeanNight == null)
