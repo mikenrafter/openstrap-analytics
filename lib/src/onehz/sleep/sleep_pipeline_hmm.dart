@@ -2,11 +2,20 @@
 // validated against polysomnography. This is not a medical device or a basis
 // for medical decisions. Mutable decoding state is local to each call/session.
 //
-// PROVENANCE: ported from upstream #628. Local changes, each reviewed against
-// any future upstream change to this file: (1) the decoder's baselines cover the
-// whole session, not the first 120 minutes (onset-bias correction); (2) the
-// degenerate-output predicate [hmm628IsDegenerate] that lets the stager fall
-// back to the default staging. Everything else is upstream's.
+// PROVENANCE: ported from upstream #628. Local deviations, each to be reviewed
+// against any future upstream change to this file (hmm-fix-spec.md):
+//  1. BASELINE: the decoder's HR p10 and mean RMSSD cover the whole session, not
+//     the first 120 minutes (onset-bias correction). The published
+//     [computeNightBaselines] (first 120 minutes) is unchanged.
+//  2. ARTIFACT REJECTION: epochs with RMSSD > 100 ms at HR > 100 bpm leave the
+//     decoder's baselines and are labelled 'unobserved' (chain break).
+//  3. WAKE GATE: the wake emission is multiplied by 0.05 for an epoch whose
+//     +-5 min neighbourhood shows too little wrist movement (diagnosis
+//     section 12). Unknown motion leaves wake allowed.
+//  4. FALLBACK: [hmm628IsDegenerate] lets the stager show the default staging
+//     when one stage covers >= 90% of the classified epochs.
+// Everything else (the other emissions, the .05 sigmoid scales, transitions,
+// initial probabilities, the .01 floor, chain termination at gaps) is upstream's.
 import 'dart:math' as math;
 
 /// A measured 30-second epoch. Null/nonfinite channels remain unobserved.
@@ -167,8 +176,11 @@ double _emission(int state, HmmEpoch e, NightBaselines b, double gate) {
 /// minutes. Upstream's onset-only window reads the normal overnight HR fall and
 /// HRV rise as deep. This corrects onset bias only; it is not a sleep-specific
 /// baseline, and it does NOT correct deep timing (deep stays low and late).
-/// Emissions, the .05 scales, transitions, initials and chain-termination rules
-/// are upstream's, unchanged. [sessionStartSec] is kept for API compatibility.
+/// Also local (see the file header): epochs rejected as artifacts are
+/// 'unobserved', and the wake emission is gated on movement density. The other
+/// emissions, the .05 scales, transitions, initials, the .01 floor and the
+/// chain-termination rules are upstream's. [sessionStartSec] is kept for API
+/// compatibility.
 /// CLAIM: unvalidated. Experimental sleep-stage estimates; not validated
 /// against a clinical sleep study; not for medical decisions.
 List<String> hmm628Stages(
