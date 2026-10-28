@@ -318,13 +318,9 @@ class AdvancedSleepStager {
         continue;
       }
 
-      final stages = switch (method) {
-        StagingMethod.cardio =>
-          _stageSessionCardio(p.start, p.end, grav, hrS, rrS, rowCache),
-        StagingMethod.hmm628 => _stageSessionHmm(p.start, p.end, grav, hrS, rrS, rowCache),
-        StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
-        StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
-      };
+      final staged = _stageByMethod(
+          method, p.start, p.end, grav, hrS, rrS, respS, rowCache);
+      final stages = staged.stages;
       final eff = _efficiency(p.start, p.end, stages);
       final avgHrv = _sessionAvgHRV(p.start, p.end, rrS);
       sessions.add(SleepSession(
@@ -334,6 +330,8 @@ class AdvancedSleepStager {
         stages: stages,
         restingHr: resting,
         avgHrv: avgHrv,
+        stagingFallback: staged.fallback,
+        effectiveMethod: staged.effective,
       ));
 
       if (!continuesChain) {
@@ -374,13 +372,9 @@ class AdvancedSleepStager {
     StagingMethod method = StagingMethod.cardio,
     CardioRowCache? rowCache,
   }) {
-    final stages = switch (method) {
-      StagingMethod.cardio =>
-        _stageSessionCardio(startSec, endSec, gravity, hr, rr, rowCache),
-      StagingMethod.hmm628 => _stageSessionHmm(startSec, endSec, gravity, hr, rr, rowCache),
-      StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
-      StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
-    };
+    final staged = _stageByMethod(
+        method, startSec, endSec, gravity, hr, rr, resp, rowCache);
+    final stages = staged.stages;
     return SleepSession(
       start: startSec,
       end: endSec,
@@ -388,6 +382,8 @@ class AdvancedSleepStager {
       stages: stages,
       restingHr: _sessionRestingHR(startSec, endSec, hr),
       avgHrv: _sessionAvgHRV(startSec, endSec, rr),
+      stagingFallback: staged.fallback,
+      effectiveMethod: staged.effective,
     );
   }
 
@@ -1464,10 +1460,55 @@ class AdvancedSleepStager {
     return out;
   }
 
-  static List<StageSegment> _stageSessionHmm(int start, int end,
-      List<GravTs> grav, List<HrTs> hr, List<RrTs> rr, CardioRowCache? rowCache) {
+  /// One staging dispatch for the detected-session and known-window paths, so
+  /// provenance cannot differ between them. [effective] is the method that
+  /// produced [stages]; [fallback] is set only when the requested HMM output was
+  /// replaced (hmm-fix-spec.md section 4).
+  static ({List<StageSegment> stages, String? fallback, StagingMethod effective})
+      _stageByMethod(StagingMethod method, int start, int end, List<GravTs> grav,
+          List<HrTs> hr, List<RrTs> rr, List<RespTs> resp, CardioRowCache? rowCache) {
+    switch (method) {
+      case StagingMethod.cardio:
+        return (
+          stages: _stageSessionCardio(start, end, grav, hr, rr, rowCache),
+          fallback: null,
+          effective: StagingMethod.cardio,
+        );
+      case StagingMethod.hmm628:
+        return _stageSessionHmm(start, end, grav, hr, rr, rowCache);
+      case StagingMethod.v2:
+        return (
+          stages: _stageSessionV2(start, end, grav, hr, rr),
+          fallback: null,
+          effective: StagingMethod.v2,
+        );
+      case StagingMethod.v1:
+        return (
+          stages: _stageSession(start, end, grav, hr, rr, resp),
+          fallback: null,
+          effective: StagingMethod.v1,
+        );
+    }
+  }
+
+  static ({List<StageSegment> stages, String? fallback, StagingMethod effective})
+      _stageSessionHmm(int start, int end, List<GravTs> grav, List<HrTs> hr,
+          List<RrTs> rr, CardioRowCache? rowCache) {
     final epochs = measuredEpochs(start, end, grav, hr, rr, rowCache: rowCache);
     final labels = hmm628Stages(epochs, sessionStartSec: start);
+    if (hmm628IsDegenerate(labels)) {
+      // One stage covers >= 90% of the classified epochs: the model carried no
+      // stage signal. Show the default staging, flagged. Cardio does not
+      // forward contact loss or unsupported accel, so those seconds are
+      // re-imposed as gaps, epoch-aligned like HMM's own holes. RMSSD-only gaps
+      // are left to cardio's remaining inputs (owner default).
+      final cardio = _stageSessionCardio(start, end, grav, hr, rr, rowCache);
+      return (
+        stages: _imposeSensorGaps(cardio, start, end, grav),
+        fallback: 'hmm628_degenerate',
+        effective: StagingMethod.cardio,
+      );
+    }
     final out = <StageSegment>[];
     var cursor = start;
     void append(int lo, int hi, String label) {
@@ -1484,6 +1525,49 @@ class AdvancedSleepStager {
       cursor = math.max(cursor, hi);
     }
     append(cursor, end, 'unobserved');
+    return (stages: out, fallback: null, effective: StagingMethod.hmm628);
+  }
+
+  /// Marks every 30-s epoch (on the session grid) that contains an explicit
+  /// contact-loss second or an invalid accel vector as 'unobserved', cutting
+  /// [segs] and keeping them a gap-free tiling of [start, end).
+  static List<StageSegment> _imposeSensorGaps(
+      List<StageSegment> segs, int start, int end, List<GravTs> grav) {
+    final holes = <int>{};
+    for (final g in grav) {
+      if (g.ts < start || g.ts >= end) continue;
+      if (!g.valid || g.contactLost) holes.add((g.ts - start) ~/ 30);
+    }
+    if (holes.isEmpty) return segs;
+    final epochs = holes.toList()..sort();
+    final spans = <(int, int)>[];
+    for (final e in epochs) {
+      final lo = start + e * 30, hi = math.min(end, lo + 30);
+      if (spans.isNotEmpty && spans.last.$2 == lo) {
+        spans[spans.length - 1] = (spans.last.$1, hi);
+      } else {
+        spans.add((lo, hi));
+      }
+    }
+    final out = <StageSegment>[];
+    void add(int lo, int hi, String stage) {
+      if (hi <= lo) return;
+      if (out.isNotEmpty && out.last.end == lo && out.last.stage == stage) {
+        out[out.length - 1] = StageSegment(out.last.start, hi, stage);
+      } else {
+        out.add(StageSegment(lo, hi, stage));
+      }
+    }
+    for (final seg in segs) {
+      var cur = seg.start;
+      for (final sp in spans) {
+        if (sp.$2 <= cur || sp.$1 >= seg.end) continue;
+        add(cur, math.max(cur, sp.$1), seg.stage);
+        add(math.max(cur, sp.$1), math.min(seg.end, sp.$2), 'unobserved');
+        cur = math.min(seg.end, sp.$2);
+      }
+      add(cur, seg.end, seg.stage);
+    }
     return out;
   }
 
