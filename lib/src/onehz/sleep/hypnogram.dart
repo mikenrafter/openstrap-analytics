@@ -1,3 +1,5 @@
+import 'advanced_stager.dart' show StagingMethod;
+
 /// A scored stage span. [stage] is normally 'wake', 'light', 'deep', or 'rem'.
 class StageSegment {
   final int start;
@@ -15,6 +17,14 @@ class SleepSession {
   final List<StageSegment> stages;
   final int? restingHr; // lowest 5-min rolling-mean HR (bpm)
   final double? avgHrv; // mean RMSSD over 5-min windows (ms)
+
+  /// Why the requested staging method was replaced for this session, or null.
+  /// Currently only 'hmm628_degenerate' (spec: hmm-fix-spec.md section 4).
+  final String? stagingFallback;
+
+  /// The method that actually produced [stages]; null on sessions built before
+  /// provenance existed (readers treat null as "the requested method").
+  final StagingMethod? effectiveMethod;
   const SleepSession({
     required this.start,
     required this.end,
@@ -22,6 +32,8 @@ class SleepSession {
     required this.stages,
     required this.restingHr,
     required this.avgHrv,
+    this.stagingFallback,
+    this.effectiveMethod,
   });
 }
 

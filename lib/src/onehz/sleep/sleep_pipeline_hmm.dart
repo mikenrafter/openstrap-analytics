@@ -136,3 +136,9 @@ List<String> hmm628Stages(
   }
   return labels;
 }
+
+/// RED-PHASE STUB (hmm-fix-spec.md section 3, H14): replaced in the green
+/// commit. True iff at least 120 CLASSIFIED labels (wake/light/deep/rem;
+/// 'unobserved' counts as neither) and one stage holds at least 90% of them.
+bool hmm628IsDegenerate(List<String> labels) =>
+    throw UnimplementedError('hmm628IsDegenerate: red-phase stub');

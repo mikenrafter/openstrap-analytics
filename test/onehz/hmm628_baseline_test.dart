@@ -21,7 +21,6 @@
 // the production decoder with the independent reference decoder at the bottom
 // of the helpers (upstream #628 formulas, whole-session baselines).
 import 'dart:math' as math;
-import 'dart:mirrors';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
@@ -379,39 +378,43 @@ SleepSession _window(_Raw n, StagingMethod method) => AdvancedSleepStager.stageW
     _raw0, _raw0 + n.hr.length, n.grav, n.hrTs,
     rr: n.rrRows, method: method);
 
-/// Reads a property that the spec adds. Absent (as shipped) reads as null so
-/// the assertion fails, instead of the test dying on NoSuchMethodError.
-dynamic _prop(Object o, String name) {
-  try {
-    final d = o as dynamic;
-    return switch (name) {
-      'stagingFallback' => d.stagingFallback,
-      'effectiveMethod' => d.effectiveMethod,
-      _ => null,
-    };
-  } on NoSuchMethodError {
-    return null;
+/// Segments tile [start,end) exactly: sorted, contiguous, non-overlapping, no
+/// zero-length piece, nothing outside the window.
+void _expectCoverage(List<StageSegment> segs, int start, int end) {
+  expect(segs, isNotEmpty, reason: 'a window must be covered by segments');
+  expect(segs.first.start, start);
+  expect(segs.last.end, end);
+  for (var i = 0; i < segs.length; i++) {
+    expect(segs[i].end, greaterThan(segs[i].start), reason: 'segment $i is empty');
+    if (i > 0) {
+      expect(segs[i].start, segs[i - 1].end, reason: 'gap or overlap before segment $i');
+    }
   }
 }
 
-/// Calls the spec's pure guard `bool hmm628IsDegenerate(List<String> labels)`
-/// in sleep_pipeline_hmm.dart. Mirrors keep this file compiling (and failing on
-/// an assertion) before the function exists.
-bool? _isDegenerate(List<String> labels) {
-  final lib = currentMirrorSystem().libraries[Uri.parse(
-      'package:openstrap_analytics/src/onehz/sleep/sleep_pipeline_hmm.dart')];
-  if (lib == null || !lib.declarations.containsKey(#hmm628IsDegenerate)) {
-    return null;
-  }
-  return lib.invoke(#hmm628IsDegenerate, [labels]).reflectee as bool;
+/// Every segment touching [gapS,gapE) is 'unobserved'; together they cover the
+/// gap and extend at most [slack] seconds beyond it on each side; and the
+/// segment just outside each end is classified (not 'unobserved').
+void _expectExactGap(List<StageSegment> segs, int gapS, int gapE, {required int slack}) {
+  final touching = [for (final x in segs) if (x.start < gapE && x.end > gapS) x];
+  expect(touching, isNotEmpty);
+  expect(touching.every((x) => x.stage == 'unobserved'), isTrue,
+      reason: 'segments touching the gap: ${[for (final x in touching) '${x.start - _raw0}-${x.end - _raw0}:${x.stage}']}');
+  expect(touching.first.start, lessThanOrEqualTo(gapS));
+  expect(touching.last.end, greaterThanOrEqualTo(gapE));
+  expect(gapS - touching.first.start, lessThanOrEqualTo(slack));
+  expect(touching.last.end - gapE, lessThanOrEqualTo(slack));
+  final before = segs.where((x) => x.end == touching.first.start).toList();
+  final after = segs.where((x) => x.start == touching.last.end).toList();
+  expect(before, hasLength(1), reason: 'a classified segment must precede the gap');
+  expect(after, hasLength(1), reason: 'a classified segment must follow the gap');
+  expect(before.single.stage, isNot('unobserved'));
+  expect(after.single.stage, isNot('unobserved'));
 }
 
 void _expectDegenerate(List<String> labels, bool want, String why) {
-  final got = _isDegenerate(labels);
-  expect(got, isNotNull,
-      reason: 'hmm628IsDegenerate(List<String>) must exist in '
-          'sleep_pipeline_hmm.dart (spec H14)');
-  expect(got, want, reason: why);
+  // Red phase: hmm628IsDegenerate is a stub that throws UnimplementedError.
+  expect(hmm628IsDegenerate(labels), want, reason: why);
 }
 
 List<String> _repeat(Map<String, int> counts) =>
@@ -831,12 +834,12 @@ void main() {
 
     test('RED 4c: stageWindow carries the provenance on SleepSession', () {
       final s = _window(differ, StagingMethod.hmm628);
-      expect(_prop(s, 'stagingFallback'), _fallback);
-      expect(_prop(s, 'effectiveMethod'), StagingMethod.cardio);
+      expect(s.stagingFallback, _fallback);
+      expect(s.effectiveMethod, StagingMethod.cardio);
       final cardio = _window(differ, StagingMethod.cardio);
       expect(s.stages.map((x) => x.toJson()).toList(),
           cardio.stages.map((x) => x.toJson()).toList());
-      expect(_prop(cardio, 'stagingFallback'), isNull);
+      expect(cardio.stagingFallback, isNull);
     });
 
     test('RED 4d: detectSleep carries the provenance on every degenerate session', () {
@@ -844,8 +847,8 @@ void main() {
           rr: differ.rrRows, method: StagingMethod.hmm628, tzOffsetSec: 0);
       expect(s, isNotEmpty, reason: 'positive control: a night was detected');
       for (final x in s) {
-        expect(_prop(x, 'stagingFallback'), _fallback);
-        expect(_prop(x, 'effectiveMethod'), StagingMethod.cardio);
+        expect(x.stagingFallback, _fallback);
+        expect(x.effectiveMethod, StagingMethod.cardio);
       }
     });
 
@@ -861,16 +864,16 @@ void main() {
     test('RED 4f: boundary through the real path: 3600 s (120 epochs) falls back, 3570 s (119) does not', () {
       final at = _rawNight(3600, (_) => 60, (_) => 100);
       final below = _rawNight(3570, (_) => 60, (_) => 100);
-      expect(_prop(_window(at, StagingMethod.hmm628), 'stagingFallback'), _fallback);
+      expect(_window(at, StagingMethod.hmm628).stagingFallback, _fallback);
       expect(_window(below, StagingMethod.hmm628).stages, isNotEmpty);
-      expect(_prop(_window(below, StagingMethod.hmm628), 'stagingFallback'), isNull);
+      expect(_window(below, StagingMethod.hmm628).stagingFallback, isNull);
     });
 
     test('CONTROL 4g: cardio staging never carries fallback keys', () {
       final j = _segment(flat8h, StagingMethod.cardio).toJson();
       expect(j, isNot(contains('staging_fallback')));
       expect(j['staging_method'], 'cardio');
-      expect(_prop(_window(flat8h, StagingMethod.cardio), 'stagingFallback'), isNull);
+      expect(_window(flat8h, StagingMethod.cardio).stagingFallback, isNull);
     });
 
     test('RED 4h: a varied night is not flagged, and says hmm628 ran', () {
@@ -891,39 +894,41 @@ void main() {
       expect(j, isNot(contains('staging_fallback')));
     });
 
-    test('RED 6f: fallback keeps explicit contact loss as a gap (H6)', () {
+    test('RED 6f: fallback keeps explicit contact loss as an exact gap (H6, J4)', () {
       // why: cardio does not forward contactLost (advanced_stager.dart ~1399),
       // so a naive fallback would stage right through a contact-loss interval
-      // that HMM had left as a hole. 10 minutes of loss at 2 h.
+      // that HMM had left as a hole. 10 minutes of loss at 2 h, epoch-aligned
+      // (7200 and 7800 are multiples of 30 s from the window start).
       bool lost(int i) => i >= 7200 && i < 7800;
       final n = _rawNight(8 * 3600, (_) => 60, (_) => 100, contactLostAt: lost);
-      final j = _segment(n, StagingMethod.hmm628, contact: true);
-      expect(j.toJson()['staging_fallback'], _fallback,
+      final seg = _segment(n, StagingMethod.hmm628, contact: true);
+      expect(seg.toJson()['staging_fallback'], _fallback,
           reason: 'precondition: flat night with holes is still degenerate');
-      expect(j.stages4.sublist(7200, 7800), everyElement('unobserved'));
-      expect(j.stages4.sublist(0, 7000).where((s) => s == 'unobserved'), isEmpty,
-          reason: 'positive control: other time is staged');
+      expect(seg.stages4.sublist(7200, 7800), everyElement('unobserved'));
+      expect(seg.stages4[7199], isNot('unobserved'));
+      expect(seg.stages4[7800], isNot('unobserved'));
+      expect(seg.stages4.sublist(0, 7200).where((x) => x == 'unobserved'), isEmpty);
+      expect(seg.stages4.sublist(7800).where((x) => x == 'unobserved').length, lessThanOrEqualTo(30),
+          reason: 'at most the trailing partial epoch');
       final w = _window(n, StagingMethod.hmm628);
-      expect(_prop(w, 'stagingFallback'), _fallback);
-      for (final s in w.stages) {
-        if (s.start < _raw0 + 7800 && s.end > _raw0 + 7200) {
-          expect(s.stage, 'unobserved',
-              reason: 'stageWindow segment [${s.start},${s.end}) crosses contact loss');
-        }
-      }
+      expect(w.stagingFallback, _fallback);
+      _expectCoverage(w.stages, _raw0, _raw0 + 8 * 3600);
+      _expectExactGap(w.stages, _raw0 + 7200, _raw0 + 7800, slack: 0);
     });
 
-    test('RED 6g: fallback keeps unsupported-sensor (invalid accel) intervals as gaps (H6)', () {
-      bool bad(int i) => i >= 9000 && i < 9600;
+    test('RED 6g: fallback keeps invalid-accel intervals as gaps, non-aligned, in both paths (H6, J4)', () {
+      // 9007..9607 starts 7 s into an epoch. HMM drops every epoch it touches.
+      bool bad(int i) => i >= 9007 && i < 9607;
       final n = _rawNight(8 * 3600, (_) => 60, (_) => 100, invalidAccelAt: bad);
       final w = _window(n, StagingMethod.hmm628);
-      expect(_prop(w, 'stagingFallback'), _fallback);
-      for (final s in w.stages) {
-        if (s.start < _raw0 + 9600 && s.end > _raw0 + 9000) {
-          expect(s.stage, 'unobserved',
-              reason: 'segment [${s.start},${s.end}) crosses invalid accel');
-        }
-      }
+      expect(w.stagingFallback, _fallback);
+      _expectCoverage(w.stages, _raw0, _raw0 + 8 * 3600);
+      _expectExactGap(w.stages, _raw0 + 9007, _raw0 + 9607, slack: 30);
+      final seg = _segment(n, StagingMethod.hmm628);
+      expect(seg.toJson()['staging_fallback'], _fallback);
+      expect(seg.stages4.sublist(9007, 9607), everyElement('unobserved'));
+      expect(seg.stages4[9007 - 31], isNot('unobserved'));
+      expect(seg.stages4[9607 + 31], isNot('unobserved'));
     });
 
     test('RED 5: notes carry the exact claims (H18) and the low-confidence flag stays', () {
@@ -948,5 +953,213 @@ void main() {
         expect(j['deep_low_confidence'], true);
       }
     });
+  });
+
+  // ===================================================================
+  group('staging_effective_method for every supported method (J1)', () {
+    // why: staging_method keeps the REQUESTED method; staging_effective_method
+    // says what produced the stages, for every supported method, not only HMM.
+    // Present nights always carry it; an ABSENT night omits it (nothing was
+    // staged). Spec section 4.
+    final varied = _night(_core());
+    final night = _rawNight(
+        varied.length * 30, (s) => varied[s ~/ 30].hr!, (s) => varied[s ~/ 30].rmssd!);
+
+    test('PRECONDITION: the supported set is exactly cardio, hmm628, v1, v2', () {
+      expect(StagingMethod.values.map((m) => m.name).toSet(),
+          {'cardio', 'hmm628', 'v1', 'v2'});
+    });
+
+    for (final m in [StagingMethod.cardio, StagingMethod.hmm628, StagingMethod.v1, StagingMethod.v2]) {
+      test('RED J1: ${m.name} on a present night reports requested and effective method', () {
+        final seg = _segment(night, m);
+        expect(seg.present, isTrue, reason: 'positive control: a night was staged');
+        final j = seg.toJson();
+        expect(j['staging_method'], m.name);
+        expect(j['staging_effective_method'], m.name);
+        expect(j, isNot(contains('staging_fallback')));
+      });
+
+      test('CONTROL J1: ${m.name} on an absent night keeps staging_method and omits the effective one', () {
+        final j = segmentSleep(const <AccelSample>[], const <double>[], method: m).toJson();
+        expect(j['staging_method'], m.name);
+        expect(j, isNot(contains('staging_effective_method')));
+        expect(j, isNot(contains('staging_fallback')));
+        expect(j['window'], isNull, reason: 'it really is absent');
+      });
+    }
+  });
+
+  // ===================================================================
+  group('split-night aggregation through segmentSleep (J2, J3)', () {
+    // why: provenance is aggregated over the sessions that remain in the
+    // chosen window after end trimming; staging_fallback_sec is WALL-CLOCK
+    // seconds: sum over fallback sessions of |[session.start, session.end) ∩
+    // [window.start, window.end)|, counting sensor holes inside a session and
+    // NOT counting bridge gaps between sessions or the trimmed tail.
+    // Night: 4 h session A, 25 min of motion (awake), 4 h session B. detectSleep
+    // finds A = [0,14219) and B = [16081,30299) seconds from the start, bridged
+    // into one 30299 s group (gap 1862 s < 3600 s). A and B are each flat
+    // (HMM-degenerate) or varied (cycling).
+    const aEnd = 14219, bStart = 16081, bEnd = 30299;
+    _Raw night(bool aFlat, bool bFlat) {
+      bool awake(int i) => i >= 14400 && i < 14400 + 1500;
+      bool flat(int i) => i < 14400 ? aFlat : bFlat;
+      double minute(int i) => (i < 14400 ? i : i - 14400 - 1500) / 60.0;
+      double hrV(double m) => 58 + (m % 90 < 20 ? 10 : (m % 90 > 60 ? 8 : 0)) + 3 * math.sin(m / 7);
+      double rmV(double m) => 70 + (m % 90 < 20 ? -25 : (m % 90 > 60 ? -15 : 20)) + 6 * math.cos(m / 5);
+      return _rawNight(14400 + 1500 + 14400,
+          (i) => awake(i) ? 85 : (flat(i) ? 60 : hrV(minute(i))),
+          (i) => awake(i) ? 30 : (flat(i) ? 100 : rmV(minute(i))),
+          moving: awake);
+    }
+
+    SleepSegmentation run(_Raw n, StagingMethod m, {int? sleepUntil}) => segmentSleep(
+        n.accel, n.hr,
+        rrMs: n.rr, rrTsMs: n.rrTs, tzOffsetSec: 0, method: m,
+        bandSleepState: sleepUntil == null
+            ? null
+            : [for (var i = 0; i < n.hr.length; i++) i < sleepUntil ? 2 : 3]);
+
+    test('PRECONDITION: sessions are [0,14219) and [16081,30299); flat is degenerate, varied is not', () {
+      final n = night(true, false);
+      final s = AdvancedSleepStager.detectSleep(n.grav, n.hrTs,
+          rr: n.rrRows, method: StagingMethod.cardio, tzOffsetSec: 0);
+      expect([for (final x in s) (x.start - _raw0, x.end - _raw0)],
+          [(0, aEnd), (bStart, bEnd)]);
+      for (final x in s) {
+        final eps = AdvancedSleepStager.measuredEpochs(x.start, x.end, n.grav, n.hrTs, n.rrRows);
+        final flatSession = x.start == _raw0;
+        final shares = _shares(_reference(eps));
+        final light = _share(_reference(eps), 'light');
+        if (flatSession) {
+          expect(light, greaterThanOrEqualTo(0.9), reason: shares);
+        } else {
+          expect(_stages.map((k) => _share(_reference(eps), k)).reduce(math.max), lessThan(0.9),
+              reason: shares);
+        }
+      }
+      // And the untrimmed group really is one 30299 s window.
+      final j = run(night(false, false), StagingMethod.cardio).toJson();
+      expect(j['in_bed_sec'], bEnd);
+    });
+
+    // (A flat?, B flat?, band sleeps until [s] or null, expected effective, expected fallback_sec or null, window seconds)
+    final cases = <({String name, bool a, bool b, int? until, String eff, int? fb, int window})>[
+      (name: 'none fall back', a: false, b: false, until: null, eff: 'hmm628', fb: null, window: bEnd),
+      (name: 'all fall back', a: true, b: true, until: null, eff: 'cardio', fb: aEnd + (bEnd - bStart), window: bEnd),
+      (name: 'A falls back, B varied', a: true, b: false, until: null, eff: 'mixed', fb: aEnd, window: bEnd),
+      (name: 'A varied, B falls back', a: false, b: true, until: null, eff: 'mixed', fb: bEnd - bStart, window: bEnd),
+      (name: 'fallback session B wholly removed by trimming', a: false, b: true, until: 14300, eff: 'hmm628', fb: null, window: 14300),
+      (name: 'A falls back, varied B wholly removed', a: true, b: false, until: 14300, eff: 'cardio', fb: aEnd, window: 14300),
+      (name: 'all flat, B wholly removed', a: true, b: true, until: 14300, eff: 'cardio', fb: aEnd, window: 14300),
+      (name: 'fallback B partly trimmed (clipped to 25000)', a: false, b: true, until: 25000, eff: 'mixed', fb: 25000 - bStart, window: 25000),
+      (name: 'fallback A whole, varied B partly trimmed', a: true, b: false, until: 25000, eff: 'mixed', fb: aEnd, window: 25000),
+      (name: 'all flat, B partly trimmed', a: true, b: true, until: 25000, eff: 'cardio', fb: aEnd + (25000 - bStart), window: 25000),
+    ];
+    for (final c in cases) {
+      test('RED J2/J3: ${c.name}', () {
+        final seg = run(night(c.a, c.b), StagingMethod.hmm628, sleepUntil: c.until);
+        final j = seg.toJson();
+        expect(seg.present, isTrue, reason: 'positive control');
+        expect(j['in_bed_sec'], c.window, reason: 'window after trimming');
+        if (c.until != null) {
+          expect(j['band_offset_trim_sec'], bEnd - c.until!, reason: 'trim recorded');
+        }
+        expect(j['staging_method'], 'hmm628');
+        expect(j['staging_effective_method'], c.eff);
+        if (c.fb == null) {
+          expect(j, isNot(contains('staging_fallback')));
+          expect(j, isNot(contains('staging_fallback_sec')));
+        } else {
+          expect(j['staging_fallback'], _fallback);
+          expect(j['staging_fallback_sec'], c.fb);
+        }
+      });
+    }
+
+    test('RED J3: a forced single session counts its whole window, sensor holes included', () {
+      bool lost(int i) => i >= 7200 && i < 7800;
+      final n = _rawNight(8 * 3600, (_) => 60, (_) => 100, contactLostAt: lost);
+      final j = _segment(n, StagingMethod.hmm628, contact: true).toJson();
+      expect(j['staging_fallback'], _fallback);
+      expect(j['staging_fallback_sec'], 28800, reason: 'holes inside the session still count');
+      expect(j['staging_effective_method'], 'cardio');
+    });
+  });
+
+  // ===================================================================
+  group('hand-derived decoder paths (J6; sessions < 2 h, so shipped == Option A)', () {
+    // why: the reference decoder above is a transcription of the intended
+    // algorithm. These cases are derived on paper from the upstream tables and
+    // chosen so that a single wrong constant changes the path. Mutations were
+    // run against a scratch Viterbi (python) to confirm each case bites:
+    //   C1 floor .01 -> none, REM->REM .85 -> .60, scale .05 -> .10
+    //   C3 REM->deep 0 -> .05          C4 light->deep .10 -> .30
+    //   C5 wake->wake .90 -> .50, scale .10      C6 light->wake .05 -> .20
+    // Types (HR bpm, RMSSD ms): N (62,40) neutral; R (72,48) REM-like;
+    // X (55,30) dip; W (85,22) wake-like; P (46,60) deep-like.
+    // Baselines: hb = HR[floor(n*.1)] of the sorted HR, rb = mean RMSSD.
+    const types = {
+      'N': (62.0, 40.0), 'R': (72.0, 48.0), 'X': (55.0, 30.0),
+      'W': (85.0, 22.0), 'P': (46.0, 60.0),
+    };
+    List<HmmEpoch> seq(String s) => [
+          for (var i = 0; i < s.length; i++)
+            HmmEpoch(_t0 + i * 30, hr: types[s[i]]!.$1, rmssd: types[s[i]]!.$2)
+        ];
+    String path(List<String> l) => l.map((x) => {'wake': 'W', 'light': 'L', 'deep': 'D', 'rem': 'R'}[x]!).join();
+    String rep(String ch, int n) => List.filled(n, ch).join();
+
+    void check(String name, String s, double hb, double rb, String want, String why) {
+      test('CONTROL J6 $name', () {
+        final e = seq(s);
+        final b = computeNightBaselines(e, sessionStartSec: _t0);
+        expect(b.hrMinNight, hb, reason: 'hand-derived p10 order statistic');
+        expect(b.rmssdMeanNight, closeTo(rb, 1e-9), reason: 'hand-derived mean');
+        expect(path(hmm628Stages(e, sessionStartSec: _t0)), want, reason: why);
+        expect(path(_reference(e)), want, reason: 'reference agrees');
+      });
+    }
+
+    // C1. n=37; sorted HR: 55 (X), then 62...; index floor(3.7)=3 => hb=62.
+    // rb=(10*40+8*48+30+8*48+10*40)/37 = 1598/37 = 43.189.
+    // R: h=72/62=1.161, r=48/43.189=1.111: REM=sg(2.22)*sg(2.22)=.902*.902=.814 > light .4.
+    // X inside the run: h=.887, r=.695: REM raw=.0370*.0022=8e-5, floored to .01
+    // (ln=-4.605). Bridging REM->REM costs ln .85 + ln .01 = -4.767. Leaving costs
+    // ln .10 (REM->light) + ln .4 + ln .05 (light->REM) = -6.215. Bridging wins
+    // only because of the floor (without it ln ~ -9.4: -9.6 vs -6.2, it would leave).
+    check('C1 floor: REM bridges a dip epoch', rep('N', 10) + rep('R', 8) + 'X' + rep('R', 8) + rep('N', 10),
+        62, 1598 / 37, rep('L', 10) + rep('R', 17) + rep('L', 10), 'floor .01 keeps REM through the dip');
+
+    // C2. n=60; sorted HR: 46 x6 then 62; index 6 => hb=62; rb=(54*40+6*60)/60=42.
+    // P: h=.742, r=1.429: deep=(1-sg(-5.2))*sg(6.6)=.994*.9986=.99 > .4. Six
+    // epochs repay the 0.10 entry cost (ln .1=-2.30) and 0.15 exit (ln .15=-1.90).
+    check('C2 deep run', rep('N', 24) + rep('P', 6) + rep('N', 30), 62, 42,
+        rep('L', 24) + rep('D', 6) + rep('L', 30), 'deep is labelled where h<1 and r>1.1');
+
+    // C3. REM-like block right before deep: REM->deep is 0, so the six R epochs
+    // cannot be REM and still reach deep; the cheapest path is light through them.
+    // n=60, hb=62, rb=(48*40+6*48+6*60)/60 = 2568/60 = 42.8.
+    check('C3 REM cannot precede deep', rep('N', 20) + rep('R', 6) + rep('P', 6) + rep('N', 28), 62, 42.8,
+        rep('L', 26) + rep('D', 6) + rep('L', 28), 'transition REM->deep is 0');
+
+    // C4. Two 3-epoch deep-like blips: entering deep costs ln .10 + exit ln .15
+    // (-4.2) against 3 epochs of gain ln(.99/.4)=.9 each (2.7): not worth it.
+    check('C4 short deep blips stay light', rep('N', 20) + rep('P', 3) + rep('N', 2) + rep('P', 3) + rep('N', 32),
+        62, 42, rep('L', 60), 'light->deep entry (.10) outweighs three-epoch gains');
+
+    // C5. n=40; hb=62; rb=(32*40+6*22+2*48)/40=1508/40=37.7.
+    // W: h=1.371, r=.584: wake=sg(3.42)*(1-sg(-4.3))=.968*.9866=.955. A 6-epoch
+    // run pays ln .05 (light->wake) once, then ln .9 per stay. The isolated
+    // 2-epoch R pair would pay ln .05 (light->REM) and ln .10 back for two epochs
+    // of gain; not enough, so it stays light.
+    check('C5 wake run, REM pair ignored', rep('N', 12) + rep('W', 6) + rep('N', 12) + rep('R', 2) + rep('N', 8),
+        62, 37.7, rep('L', 12) + rep('W', 6) + rep('L', 22), 'six wake epochs pay for the entry; a two-epoch REM pair does not');
+
+    // C6. Two 4-epoch wake blips separated by 4 light epochs: not worth ln .05 twice.
+    // n=32; hb=62; rb=(24*40+8*22)/32 = 35.5.
+    check('C6 short wake blips stay light', rep('N', 10) + rep('W', 4) + rep('N', 4) + rep('W', 4) + rep('N', 10),
+        62, 35.5, rep('L', 32), 'light->wake (.05) outweighs four-epoch gains');
   });
 }
