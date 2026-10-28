@@ -156,8 +156,20 @@ List<String> hmm628Stages(
   return labels;
 }
 
-/// RED-PHASE STUB (hmm-fix-spec.md section 3, H14): replaced in the green
-/// commit. True iff at least 120 CLASSIFIED labels (wake/light/deep/rem;
-/// 'unobserved' counts as neither) and one stage holds at least 90% of them.
-bool hmm628IsDegenerate(List<String> labels) =>
-    throw UnimplementedError('hmm628IsDegenerate: red-phase stub');
+/// Degenerate-output guard (hmm-fix-spec.md section 3). True iff at least 120
+/// CLASSIFIED labels (wake, light, deep, rem; 'unobserved' counts as neither
+/// numerator nor denominator) and one stage holds at least 90% of them.
+/// Integer arithmetic: exactly 90% triggers, 89.9% does not. 120 epochs is 60
+/// minutes; both numbers are policy choices, not physiology. CLAIM: unvalidated.
+bool hmm628IsDegenerate(List<String> labels) {
+  final count = <String, int>{};
+  var classified = 0;
+  for (final l in labels) {
+    if (!_labels.contains(l)) continue;
+    classified++;
+    count[l] = (count[l] ?? 0) + 1;
+  }
+  if (classified < 120) return false;
+  final top = count.values.fold<int>(0, (m, c) => c > m ? c : m);
+  return top * 10 >= classified * 9;
+}
