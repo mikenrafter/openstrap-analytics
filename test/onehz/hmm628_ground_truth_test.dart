@@ -261,6 +261,82 @@ void main() {
     });
   });
 
+  group('measured movement reaches the gate (review K4)', () {
+    // why: with moved: false hard-coded in measuredEpochs every test used to
+    // stay green. These pin the extraction itself.
+    ({List<GravTs> grav, List<HrTs> hr, List<RrTs> rr}) raw(int secs,
+        double Function(int sec) thetaDeg,
+        {double Function(int)? hrAt, double Function(int)? rmAt, bool Function(int)? lost}) {
+      final grav = <GravTs>[], hr = <HrTs>[], rr = <RrTs>[];
+      for (var i = 0; i < secs; i++) {
+        final th = thetaDeg(i) * math.pi / 180;
+        grav.add(GravTs(_raw0 + i, 0, math.sin(th), math.cos(th), contactLost: lost?.call(i) ?? false));
+        hr.add(HrTs(_raw0 + i, hrAt?.call(i) ?? 62));
+        rr.add(RrTs(_raw0 + i, 1000.0 + (i.isEven ? -1 : 1) * (rmAt?.call(i) ?? 40) / 2));
+      }
+      return (grav: grav, hr: hr, rr: rr);
+    }
+
+    test('literal flags around the 5 degree boundary and across an epoch edge', () {
+      // theta steps: +4.9 at second 10 (epoch 0), +5.1 at second 40 (epoch 1),
+      // +6 at second 60 (the 59 -> 60 pair belongs to the epoch holding second
+      // 60, i.e. epoch 2), none in epoch 3.
+      double theta(int s) => (s >= 10 ? 4.9 : 0) + (s >= 40 ? 5.1 : 0) + (s >= 60 ? 6 : 0);
+      final n = raw(120, theta);
+      final e = AdvancedSleepStager.measuredEpochs(_raw0, _raw0 + 120, n.grav, n.hr, n.rr);
+      expect([for (final x in e) x.startSec - _raw0], [0, 30, 60, 90]);
+      expect([for (final x in e) x.moved], [false, true, true, false]);
+    });
+
+    test('an epoch with no usable gravity has unknown motion (null), not false', () {
+      final n = raw(150, (_) => 0, lost: (s) => s >= 60 && s < 90);
+      final e = AdvancedSleepStager.measuredEpochs(_raw0, _raw0 + 150, n.grav, n.hr, n.rr);
+      final lostEpoch = e.where((x) => x.startSec - _raw0 == 60).single;
+      expect(lostEpoch.contactLost, isTrue);
+      expect(lostEpoch.moved, isNull);
+      expect(e.where((x) => x.startSec - _raw0 == 0).single.moved, false);
+    });
+
+    // 60 epochs neutral, 20 wake-like (HR 85, RMSSD 22), 60 neutral, 40 REM-like
+    // (HR 72, RMSSD 48): not degenerate (light ~67%), so HMM stays in charge.
+    (double, double) vitals(int sec) {
+      final ep = sec ~/ 30;
+      if (ep >= 60 && ep < 80) return (85, 22);
+      if (ep >= 140) return (72, 48);
+      return (62, 40);
+    }
+
+    SleepSession stage(double Function(int) theta) {
+      final n = raw(180 * 30, theta,
+          hrAt: (s) => vitals(s).$1, rmAt: (s) => vitals(s).$2);
+      return AdvancedSleepStager.stageWindow(_raw0, _raw0 + 180 * 30, n.grav, n.hr,
+          rr: n.rr, method: StagingMethod.hmm628);
+    }
+
+    int wakeSecIn(SleepSession s, int lo, int hi) {
+      var t = 0;
+      for (final x in s.stages) {
+        if (x.stage != 'wake') continue;
+        t += math.max(0, math.min(x.end, _raw0 + hi) - math.max(x.start, _raw0 + lo));
+      }
+      return t;
+    }
+
+    test('a moving wrist keeps wake: 20 wake-like epochs while turning 20 degrees a second', () {
+      // 1800..2400 s: the wrist turns +-20 degrees every second.
+      final s = stage((sec) => (sec >= 1800 && sec < 2400) ? (sec.isEven ? 0 : 20) : 0);
+      expect(s.stagingFallback, isNull, reason: 'precondition: not degenerate');
+      expect(wakeSecIn(s, 1800, 2400), greaterThanOrEqualTo(300),
+          reason: 'wake must survive where movement agrees');
+    });
+
+    test('the same vitals on a still wrist are gated to light', () {
+      final s = stage((_) => 0);
+      expect(s.stagingFallback, isNull, reason: 'precondition: not degenerate');
+      expect(wakeSecIn(s, 0, 180 * 30), 0);
+    });
+  });
+
   group('the 10-27 night, synthetic (section 12 recipe)', () {
     // Minutes 0-25 still wrist, HR 90 -> 140 -> 105, RMSSD ~110 (artifact);
     // 25-80 awake in bed (a 30-90 degree turn in ~45% of minutes, HR 82-90);
