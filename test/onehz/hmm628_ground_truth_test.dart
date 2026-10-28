@@ -155,6 +155,33 @@ void main() {
           _rep('L', 30) + _rep('R', 8) + _rep('L', 30));
     });
 
+    test('RED K2: the artifact test ignores the HR validity ceiling (HR 200, RMSSD 110)', () {
+      // why: review K2. HR 200 fails the validity ceiling (hr < 200) but is
+      // still above the artifact threshold; its RMSSD must not feed the baseline.
+      final l = _p(hmm628Stages(_seq(_rep('A', 20) + body, override: {'A': (200.0, 110.0)}),
+          sessionStartSec: _t0));
+      expect(l.substring(0, 20), _rep('.', 20));
+      expect(l.substring(20), _rep('L', 30) + _rep('R', 8) + _rep('L', 30));
+    });
+
+    test('CONTROL K2: RMSSD 500 (above its validity ceiling) at HR 140 stays out of the baseline', () {
+      // RMSSD 500 fails rmssd < 500 but is above the artifact threshold; its HR
+      // must not feed the baseline. (An excluded high-HR epoch cannot move a p10
+      // here, so this pins the boundary without discriminating; HR 200 above does.)
+      final l = _p(hmm628Stages(_seq(_rep('A', 20) + body, override: {'A': (140.0, 500.0)}),
+          sessionStartSec: _t0));
+      expect(l.substring(0, 20), _rep('.', 20));
+      expect(l.substring(20), _rep('L', 30) + _rep('R', 8) + _rep('L', 30));
+    });
+
+    test('CONTROL K2: invalid but not artifact (HR 200, RMSSD 100) still feeds the baseline', () {
+      // RMSSD 100 is valid and not > 100, so it enters the mean; REM is missed.
+      final l = _p(hmm628Stages(_seq(_rep('A', 20) + body, override: {'A': (200.0, 100.0)}),
+          sessionStartSec: _t0));
+      expect(l.substring(0, 20), _rep('.', 20), reason: 'HR 200 is not a valid epoch');
+      expect(l.substring(20), _rep('L', 68));
+    });
+
     test('RED K1: rejected artifact epochs are unobserved and the chain breaks there', () {
       // why: review K1. The decoder must not publish stages from evidence it
       // rejects (all 28 rejected epochs of the 10-27 replay came out REM).
