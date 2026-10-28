@@ -127,10 +127,19 @@ void main() {
       expect(labels[270], 'light');
     });
 
-    test('a later session does not inherit a previous baseline', () {
-      expect(hmm628Stages(_baseline(), sessionStartSec: _start).first, 'light');
-      expect(hmm628Stages([_e(7200)], sessionStartSec: _start), ['unobserved'],
-          reason: 'no valid measurements in this selected session baseline window');
+    test('a session with no valid epoch is all unobserved and leaks nothing to the next', () {
+      // Spec section 8: the old expectation (a lone epoch at +7200 s is
+      // unobserved) pinned the first-120-min decoder window. Under the
+      // whole-session baseline one valid epoch is its own baseline.
+      expect(hmm628Stages([_e(0, hr: null, rmssd: null), _e(30, contactLost: true)],
+          sessionStartSec: _start), ['unobserved', 'unobserved']);
+      final y = [for (var i = 0; i < 60; i++) _e(i * 30, hr: 60 + i % 7, rmssd: 40 + i % 5)];
+      final alone = hmm628Stages(y, sessionStartSec: _start);
+      hmm628Stages(_baseline(), sessionStartSec: _start); // stage another session first
+      expect(hmm628Stages(y, sessionStartSec: _start), alone,
+          reason: 'staging X then Y equals Y alone: no carried baseline');
+      expect(hmm628Stages([_e(7200)], sessionStartSec: _start), ['light'],
+          reason: 'a lone epoch is its own whole-session baseline: h=r=1 => light');
     });
   });
 }

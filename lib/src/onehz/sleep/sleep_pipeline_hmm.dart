@@ -1,6 +1,12 @@
 // Experimental #628 offline model. These engineering weights have not been
 // validated against polysomnography. This is not a medical device or a basis
 // for medical decisions. Mutable decoding state is local to each call/session.
+//
+// PROVENANCE: ported from upstream #628. Local changes, each reviewed against
+// any future upstream change to this file: (1) the decoder's baselines cover the
+// whole session, not the first 120 minutes (onset-bias correction); (2) the
+// degenerate-output predicate [hmm628IsDegenerate] that lets the stager fall
+// back to the default staging. Everything else is upstream's.
 import 'dart:math' as math;
 
 /// A measured 30-second epoch. Null/nonfinite channels remain unobserved.
@@ -29,19 +35,15 @@ class NightBaselines {
 bool _validHr(double? v) => v != null && v.isFinite && v > 30 && v < 200;
 bool _validRmssd(double? v) => v != null && v.isFinite && v > 0 && v < 500;
 
-/// Upstream #628: p10 order statistic HR and mean epoch RMSSD, using the
-/// first 120 elapsed minutes of this session. Channels are independent; no
-/// substitution from RHR, readiness, an earlier session or an absent channel.
-NightBaselines computeNightBaselines(
-  List<HmmEpoch> epochs, {
-  required int sessionStartSec,
-}) {
+/// Upstream #628 statistics over [rows]: p10 order statistic HR and mean epoch
+/// RMSSD. Channels are filtered independently (an epoch with a valid HR and no
+/// RMSSD still feeds the HR statistic); contact loss excludes an epoch from
+/// both. No substitution from RHR, readiness, an earlier session or an absent
+/// channel.
+NightBaselines _baselinesOf(Iterable<HmmEpoch> rows) {
   final hr = <double>[], rmssd = <double>[];
-  for (final e in epochs) {
-    if (e.startSec < sessionStartSec ||
-        e.startSec >= sessionStartSec + 7200 ||
-        e.contactLost)
-      continue;
+  for (final e in rows) {
+    if (e.contactLost) continue;
     if (_validHr(e.hr)) hr.add(e.hr!);
     if (_validRmssd(e.rmssd)) rmssd.add(e.rmssd!);
   }
@@ -53,6 +55,16 @@ NightBaselines computeNightBaselines(
         : rmssd.reduce((a, b) => a + b) / rmssd.length,
   );
 }
+
+/// PUBLISHED onset metadata (`hr_min_night`, `rmssd_mean_night`), unchanged for
+/// every staging method: upstream #628's statistics over the first 120 elapsed
+/// minutes of this session. This is NOT the decoder's baseline any more; see
+/// [hmm628Stages].
+NightBaselines computeNightBaselines(
+  List<HmmEpoch> epochs, {
+  required int sessionStartSec,
+}) => _baselinesOf(epochs.where((e) =>
+    e.startSec >= sessionStartSec && e.startSec < sessionStartSec + 7200));
 
 const _labels = ['wake', 'light', 'deep', 'rem'];
 const _transitions = [
@@ -77,14 +89,21 @@ double _emission(int state, HmmEpoch e, NightBaselines b) {
 
 /// One label per input epoch. Missing measurements and time gaps terminate the
 /// Viterbi chain rather than becoming uniform emissions and invented stages.
+///
+/// LOCAL DEVIATION FROM UPSTREAM #628 (hmm-fix-spec.md, Option A): the decoder's
+/// baselines come from EVERY epoch of [epochs] (the session), not the first 120
+/// minutes. Upstream's onset-only window reads the normal overnight HR fall and
+/// HRV rise as deep. This corrects onset bias only; it is not a sleep-specific
+/// baseline, and it does NOT correct deep timing (deep stays low and late).
+/// Emissions, the .05 scales, transitions, initials and chain-termination rules
+/// are upstream's, unchanged. [sessionStartSec] is kept for API compatibility.
+/// CLAIM: unvalidated. Experimental sleep-stage estimates; not validated
+/// against a clinical sleep study; not for medical decisions.
 List<String> hmm628Stages(
   List<HmmEpoch> epochs, {
   required int sessionStartSec,
 }) {
-  final baseline = computeNightBaselines(
-    epochs,
-    sessionStartSec: sessionStartSec,
-  );
+  final baseline = _baselinesOf(epochs);
   final labels = List<String>.filled(epochs.length, 'unobserved');
   if (baseline.hrMinNight == null || baseline.rmssdMeanNight == null)
     return labels;
