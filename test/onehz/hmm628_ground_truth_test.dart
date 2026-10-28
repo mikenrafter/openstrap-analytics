@@ -434,11 +434,21 @@ void main() {
       return c.toString();
     }
 
-    test('PRECONDITION: the night is staged by HMM (not the degenerate fallback), all observed', () {
+    test('PRECONDITION: staged by HMM, tiled, and observed for exactly the expected seconds', () {
       expect(session.stagingFallback, isNull, reason: report());
       expect(session.effectiveMethod, StagingMethod.hmm628);
-      expect(session.stages.where((s) => s.stage == 'unobserved').length, lessThanOrEqualTo(1),
-          reason: report());
+      _tile(session.stages, _raw0, _raw0 + total);
+      // Unobserved: only the rejected artifact stretch. Scripted as HR > 100
+      // from 144 s and RMSSD ~110 until 1500 s; the epoch edges are quantised by
+      // the epoch RMSSD window, so the measured range is [150, 1410) = 1260 s
+      // (a measured literal, pinned so that a longer or extra gap fails).
+      // Observed = 30600 - 1260 = 29340 s.
+      expect(_gaps(session.stages), [(150, 1410)], reason: report());
+      var unobs = 0;
+      for (final x in session.stages) {
+        if (x.stage == 'unobserved') unobs += x.end - x.start;
+      }
+      expect(total - unobs, 29340, reason: 'observed seconds; ${report()}');
     });
 
     test('RED: no wake run over 5 minutes during scripted sleep (minute 85 to 480)', () {
