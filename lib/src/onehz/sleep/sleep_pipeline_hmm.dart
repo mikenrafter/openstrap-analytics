@@ -15,9 +15,10 @@ class HmmEpoch {
   final double? hr, rmssd;
   final bool contactLost;
 
-  /// RED-PHASE FIELD (spec addendum): per-epoch wrist motion, carried but not
-  /// yet used. true = a >5 degree turn between consecutive seconds, false =
-  /// observed still, null = unknown.
+  /// Wrist motion in this epoch: true when the gravity vector turned by more
+  /// than [kMotionGateDeg] between two consecutive seconds, false when it was
+  /// observed and did not, null when motion is unknown (no usable gravity).
+  /// Null means the wake gate does not apply to this epoch.
   final bool? moved;
   const HmmEpoch(
     this.startSec, {
@@ -37,6 +38,21 @@ class NightBaselines {
     'rmssd_mean_night': rmssdMeanNight,
   };
 }
+
+// Movement-density wake gate (hmm-all-deep-diagnosis.md section 12; Option A
+// alone called 158 min of false wake on the owner's 10-27 night, A + this gate
+// 2 min). An epoch may be wake only if at least kMotionGateDensity of the
+// epochs with known motion within +-kMotionGateWindowSec contain a turn of more
+// than kMotionGateDeg between consecutive seconds. Otherwise the wake emission
+// is scaled by kMotionGateWake (it can still win if HR and HRV agree
+// overwhelmingly). Unknown motion (moved == null): the gate does not apply and
+// wake stays allowed. The constants are engineering choices fitted to one
+// night. CLAIM: unvalidated; a still, awake person is read as asleep (the
+// classic wrist-actigraphy weakness).
+const double kMotionGateDeg = 5;
+const int kMotionGateWindowSec = 300;
+const double kMotionGateDensity = 0.25;
+const double kMotionGateWake = 0.05;
 
 bool _validHr(double? v) => v != null && v.isFinite && v > 30 && v < 200;
 bool _validRmssd(double? v) => v != null && v.isFinite && v > 0 && v < 500;
@@ -72,6 +88,31 @@ NightBaselines computeNightBaselines(
 }) => _baselinesOf(epochs.where((e) =>
     e.startSec >= sessionStartSec && e.startSec < sessionStartSec + 7200));
 
+/// Per-epoch wake multiplier (1 or [kMotionGateWake]); see the gate note above.
+/// [epochs] are in time order.
+List<double> _motionGates(List<HmmEpoch> epochs) {
+  final out = List<double>.filled(epochs.length, 1);
+  var lo = 0, hi = 0, known = 0, moved = 0;
+  void add(HmmEpoch e, int sign) {
+    if (e.moved == null) return;
+    known += sign;
+    if (e.moved!) moved += sign;
+  }
+  for (var i = 0; i < epochs.length; i++) {
+    final t = epochs[i].startSec;
+    while (hi < epochs.length &&
+        epochs[hi].startSec <= t + kMotionGateWindowSec) {
+      add(epochs[hi++], 1);
+    }
+    while (lo < hi && epochs[lo].startSec < t - kMotionGateWindowSec) {
+      add(epochs[lo++], -1);
+    }
+    if (epochs[i].moved == null || known == 0) continue;
+    if (moved < kMotionGateDensity * known) out[i] = kMotionGateWake;
+  }
+  return out;
+}
+
 const _labels = ['wake', 'light', 'deep', 'rem'];
 const _transitions = [
   [.90, .09, .005, .005],
@@ -82,10 +123,10 @@ const _transitions = [
 
 double _sigmoid(double x, double center, double scale) =>
     1 / (1 + math.exp(-(x - center) / scale));
-double _emission(int state, HmmEpoch e, NightBaselines b) {
+double _emission(int state, HmmEpoch e, NightBaselines b, double gate) {
   final h = e.hr! / b.hrMinNight!, r = e.rmssd! / b.rmssdMeanNight!;
   final p = switch (state) {
-    0 => _sigmoid(h, 1.2, .05) * (1 - _sigmoid(r, .8, .05)),
+    0 => _sigmoid(h, 1.2, .05) * (1 - _sigmoid(r, .8, .05)) * gate,
     1 => .4,
     2 => (1 - _sigmoid(h, 1, .05)) * _sigmoid(r, 1.1, .05),
     _ => _sigmoid(h, 1.05, .05) * _sigmoid(r, 1, .05),
@@ -110,6 +151,7 @@ List<String> hmm628Stages(
   required int sessionStartSec,
 }) {
   final baseline = _baselinesOf(epochs);
+  final gates = _motionGates(epochs);
   final labels = List<String>.filled(epochs.length, 'unobserved');
   if (baseline.hrMinNight == null || baseline.rmssdMeanNight == null)
     return labels;
@@ -131,7 +173,7 @@ List<String> hmm628Stages(
     var score = [
       for (var s = 0; s < 4; s++)
         (s < 2 ? math.log(.5) : double.negativeInfinity) +
-            _emission(s, epochs[start], baseline),
+            _emission(s, epochs[start], baseline, gates[start]),
     ];
     for (var t = start + 1; t < end; t++) {
       final next = List<double>.filled(4, double.negativeInfinity);
@@ -140,7 +182,7 @@ List<String> hmm628Stages(
           final v =
               score[prev] +
               math.log(_transitions[prev][s]) +
-              _emission(s, epochs[t], baseline);
+              _emission(s, epochs[t], baseline, gates[t]);
           if (v > next[s]) {
             next[s] = v;
             back[t - start][s] = prev;

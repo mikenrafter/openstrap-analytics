@@ -1402,6 +1402,15 @@ class AdvancedSleepStager {
 
   /// Features shared by experimental staging and nightly metadata. Context
   /// never crosses explicit loss of contact or an unobserved accel interval.
+  /// Angle in degrees between two gravity vectors (0 when either is zero).
+  static double _turnDeg(GravTs a, GravTs b) {
+    final na = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    final nb = math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    if (na == 0 || nb == 0) return 0;
+    final c = (a.x * b.x + a.y * b.y + a.z * b.z) / (na * nb);
+    return math.acos(c.clamp(-1.0, 1.0)) * 180 / math.pi;
+  }
+
   static List<HmmEpoch> measuredEpochs(int start, int end,
       List<GravTs> gravity, List<HrTs> hr, List<RrTs> rr,
       {CardioRowCache? rowCache}) {
@@ -1441,6 +1450,14 @@ class AdvancedSleepStager {
         rrTsMs: [for (final r in beats) r.ts * 1000.0],
         throughMs: hi * 1000 - 1,
       );
+      // Epochs (on this run's 30-s grid) containing a turn of more than
+      // kMotionGateDeg between two consecutive seconds.
+      final movedEpochs = <int>{};
+      for (var k = i + 1; k < j; k++) {
+        if (_turnDeg(g[k - 1], g[k]) > kMotionGateDeg) {
+          movedEpochs.add(lo + ((g[k].ts - lo) ~/ 30) * 30);
+        }
+      }
       for (final row in rows.allRows()) {
         final sec = row.startMs ~/ 1000;
         // Any explicit loss in an epoch disqualifies the complete epoch,
@@ -1452,7 +1469,8 @@ class AdvancedSleepStager {
         // non-aligned dropout. Abstain the entire incomplete epoch instead.
         final complete = sec + 30 <= hi;
         out.add(HmmEpoch(sec, hr: complete ? row.hr : null,
-            rmssd: complete ? row.rmssd : null, contactLost: lost));
+            rmssd: complete ? row.rmssd : null, contactLost: lost,
+            moved: complete ? movedEpochs.contains(sec) : null));
       }
       i = j;
     }
