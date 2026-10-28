@@ -67,8 +67,13 @@ const double kArtifactHrBpm = 100;
 /// is excluded from the baselines AND left unobserved (the Viterbi chain breaks
 /// there), so no stage is published from evidence the decoder rejected.
 bool hmm628IsArtifact(HmmEpoch e) =>
-    _validHr(e.hr) &&
-    _validRmssd(e.rmssd) &&
+    // Finite and over BOTH thresholds; deliberately independent of the channel
+    // validity ceilings (hr < 200, rmssd < 500): an epoch at HR 200 / RMSSD 110
+    // is still not physiological and must not feed the RMSSD mean.
+    e.hr != null &&
+    e.rmssd != null &&
+    e.hr!.isFinite &&
+    e.rmssd!.isFinite &&
     e.rmssd! > kArtifactRmssdMs &&
     e.hr! > kArtifactHrBpm;
 
