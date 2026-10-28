@@ -57,12 +57,16 @@ const double kMotionGateWake = 0.05;
 // Baseline artifact rejection (section 12): RMSSD above kArtifactRmssdMs at an
 // HR above kArtifactHrBpm is not physiological (the owner's 06:02-06:31 stretch
 // read RMSSD 100-125 ms at HR 88-144 on a motionless wrist). Such an epoch is
-// left out of the DECODER's baseline statistics, both channels. It is not
-// removed from the labels, and the published onset baselines are unchanged.
+// left out of the DECODER's baseline statistics, both channels, and is labelled
+// 'unobserved' (the chain breaks there; the cardio fallback keeps the gap).
+// The published onset baselines are unchanged.
 // CLAIM: unvalidated thresholds.
 const double kArtifactRmssdMs = 100;
 const double kArtifactHrBpm = 100;
-bool _isArtifact(HmmEpoch e) =>
+/// True for an epoch the decoder rejects as not physiological (see above). It
+/// is excluded from the baselines AND left unobserved (the Viterbi chain breaks
+/// there), so no stage is published from evidence the decoder rejected.
+bool hmm628IsArtifact(HmmEpoch e) =>
     _validHr(e.hr) &&
     _validRmssd(e.rmssd) &&
     e.rmssd! > kArtifactRmssdMs &&
@@ -81,7 +85,7 @@ NightBaselines _baselinesOf(Iterable<HmmEpoch> rows,
   final hr = <double>[], rmssd = <double>[];
   for (final e in rows) {
     if (e.contactLost) continue;
-    if (rejectArtifacts && _isArtifact(e)) continue;
+    if (rejectArtifacts && hmm628IsArtifact(e)) continue;
     if (_validHr(e.hr)) hr.add(e.hr!);
     if (_validRmssd(e.rmssd)) rmssd.add(e.rmssd!);
   }
@@ -172,7 +176,10 @@ List<String> hmm628Stages(
   if (baseline.hrMinNight == null || baseline.rmssdMeanNight == null)
     return labels;
   bool observed(HmmEpoch e) =>
-      !e.contactLost && _validHr(e.hr) && _validRmssd(e.rmssd);
+      !e.contactLost &&
+      _validHr(e.hr) &&
+      _validRmssd(e.rmssd) &&
+      !hmm628IsArtifact(e);
   var start = 0;
   while (start < epochs.length) {
     if (!observed(epochs[start])) {

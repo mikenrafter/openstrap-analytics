@@ -1522,7 +1522,11 @@ class AdvancedSleepStager {
       // are left to cardio's remaining inputs (owner default).
       final cardio = _stageSessionCardio(start, end, grav, hr, rr, rowCache);
       return (
-        stages: _imposeSensorGaps(cardio, start, end, grav),
+        stages: _imposeSensorGaps(cardio, start, end, grav,
+            extraHoleEpochs: [
+              for (final e in epochs)
+                if (hmm628IsArtifact(e)) e.startSec
+            ]),
         fallback: 'hmm628_degenerate',
         effective: StagingMethod.cardio,
       );
@@ -1551,7 +1555,8 @@ class AdvancedSleepStager {
   /// 'unobserved', cutting
   /// [segs] and keeping them a gap-free tiling of [start, end).
   static List<StageSegment> _imposeSensorGaps(
-      List<StageSegment> segs, int start, int end, List<GravTs> grav) {
+      List<StageSegment> segs, int start, int end, List<GravTs> grav,
+      {Iterable<int> extraHoleEpochs = const []}) {
     // An epoch is a hole when any of its seconds lacks a usable gravity sample:
     // explicit contact loss, an undecoded vector, or no sample at all (HMM's own
     // measuredEpochs breaks its chain at all three).
@@ -1564,6 +1569,9 @@ class AdvancedSleepStager {
     final holes = <int>{};
     for (var t = start; t < end; t++) {
       if (!good.contains(t)) holes.add((t - start) ~/ 30);
+    }
+    for (final sec in extraHoleEpochs) {
+      holes.add((sec - start) ~/ 30);
     }
     if (holes.isEmpty) return segs;
     final epochs = holes.toList()..sort();
