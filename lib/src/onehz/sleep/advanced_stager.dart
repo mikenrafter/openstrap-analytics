@@ -1523,9 +1523,9 @@ class AdvancedSleepStager {
       final cardio = _stageSessionCardio(start, end, grav, hr, rr, rowCache);
       return (
         stages: _imposeSensorGaps(cardio, start, end, grav,
-            extraHoleEpochs: [
+            extraHoleSpans: [
               for (final e in epochs)
-                if (hmm628IsArtifact(e)) e.startSec
+                if (hmm628IsArtifact(e)) (e.startSec, e.startSec + 30)
             ]),
         fallback: 'hmm628_degenerate',
         effective: StagingMethod.cardio,
@@ -1556,7 +1556,7 @@ class AdvancedSleepStager {
   /// [segs] and keeping them a gap-free tiling of [start, end).
   static List<StageSegment> _imposeSensorGaps(
       List<StageSegment> segs, int start, int end, List<GravTs> grav,
-      {Iterable<int> extraHoleEpochs = const []}) {
+      {Iterable<(int, int)> extraHoleSpans = const []}) {
     // An epoch is a hole when any of its seconds lacks a usable gravity sample:
     // explicit contact loss, an undecoded vector, or no sample at all (HMM's own
     // measuredEpochs breaks its chain at all three).
@@ -1575,8 +1575,15 @@ class AdvancedSleepStager {
     for (var t = start; t < end; t++) {
       if (bad.contains(t) || !good.contains(t)) holes.add((t - start) ~/ 30);
     }
-    for (final sec in extraHoleEpochs) {
-      holes.add((sec - start) ~/ 30);
+    // Rejected spans are in absolute seconds and may be off the session grid
+    // (a dropout re-anchors measured epochs): mark EVERY grid epoch they touch,
+    // so no rejected second stays staged.
+    for (final sp in extraHoleSpans) {
+      final lo = math.max(start, sp.$1), hi = math.min(end, sp.$2);
+      if (hi <= lo) continue;
+      for (var e = (lo - start) ~/ 30; e <= (hi - 1 - start) ~/ 30; e++) {
+        holes.add(e);
+      }
     }
     if (holes.isEmpty) return segs;
     final epochs = holes.toList()..sort();
