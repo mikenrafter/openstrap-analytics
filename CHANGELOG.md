@@ -4,6 +4,7 @@
 
 ### Added
 - Experimental closed-window pulse episodes with ten-minute qualification, deterministic joining, raw beat evidence, cleaning masks, and measurable quality refusal reasons. Unknown motion and wear do not block alerts.
+  A record overlap (a beat modelled up to 2 s before the previous record's last beat) is held at the previous beat's time and refuses only the pair across it; a step back of more than 2 s still refuses the whole 15-minute context. `sourceStartMs` is the real start of the source; `evaluateFromMs` / `evaluateToMs` select the window starts to decide when a caller reads part of a source, so a window decides the same in any query range.
 
 - `stageMinuteRanges`: a [lo, hi] range of minutes per sleep stage (wake,
   light, deep, REM, and NREM = light + deep). `lo` counts epochs that can only

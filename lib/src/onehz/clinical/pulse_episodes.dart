@@ -8,6 +8,14 @@ import '../util.dart';
 const pulseWindowMs = 300000;
 const pulseDetectorVersion = 1;
 
+/// How far one record's first beat may sit before the previous record's last
+/// beat before the clock is called wrong. `beat_ts_ms` is a modelled position
+/// (the last beat of a record is put at its stamp, earlier beats walk back by
+/// their intervals), so adjacent records overlap by under one interval; two
+/// real exports show steps back of 1.7-1.8 s at most, 0.2-0.4% of beats. One
+/// maximal plausible interval (2 s) is the bound on that model error.
+const pulseOverlapToleranceMs = 2000;
+
 class PulseBeatInput {
   final String id, source;
   final int index, timeMs, revision;
@@ -173,11 +181,27 @@ class PulseDetection {
 /// certified completeness watermark, not wall time. Fixed +/-5 minute cleaning
 /// context is clipped only at explicit source boundaries. Re-evaluation is pure.
 /// Callers must persist revisions on late replacements behind the watermark.
+///
+/// [sourceStartMs] is where the source REALLY starts: the cleaning context is
+/// clipped there and nowhere else. A query range is not a source boundary, so a
+/// caller that reads only part of a source passes [evaluateFromMs] /
+/// [evaluateToMs] (window starts in `[from, to)`) and supplies every beat from
+/// five minutes before `from` to five minutes after `to`; each window then has
+/// its whole context and decides exactly as it would in any other range.
+///
+/// Time order and detection order are not the same thing at a record overlap:
+/// a beat that lands before its predecessor (by at most
+/// [pulseOverlapToleranceMs]) is HELD at the predecessor's time, so the
+/// interval series keeps the order the band detected it in and only the pair
+/// across the overlap loses adjacency. A step back by more than the tolerance
+/// is a wrong clock, and refuses the whole context.
 PulseDetection detectPulseEpisodes(
   List<PulseBeatInput> input, {
   required int completeThroughMs,
   required int sourceStartMs,
   int? sourceEndMs,
+  int? evaluateFromMs,
+  int? evaluateToMs,
 }) {
   final sources = <String, List<PulseBeatInput>>{};
   for (final b in input) {
@@ -205,25 +229,44 @@ PulseDetection detectPulseEpisodes(
     final ordered = byId.values.toList()
       ..sort((a, b) => a.index.compareTo(b.index));
     final invalid = <String>{...conflicts};
+    final beats = <PulseBeatInput>[];
     for (var i = 0; i < ordered.length; i++) {
-      if (!ordered[i].timestampValid ||
-          !ordered[i].rawMs.isFinite ||
-          (i > 0 && ordered[i].timeMs <= ordered[i - 1].timeMs)) {
-        invalid.add(ordered[i].id);
+      final b = ordered[i];
+      if (!b.timestampValid || !b.rawMs.isFinite) invalid.add(b.id);
+      var time = b.timeMs;
+      if (i > 0 && time <= beats[i - 1].timeMs) {
+        final previous = beats[i - 1].timeMs;
+        if (previous - time > pulseOverlapToleranceMs) {
+          invalid.add(b.id);
+          invalid.add(ordered[i - 1].id);
+        } else {
+          time = previous;
+        }
       }
-      if (i > 0 && ordered[i].timeMs <= ordered[i - 1].timeMs) {
-        invalid.add(ordered[i - 1].id);
-      }
+      beats.add(time == b.timeMs
+          ? b
+          : PulseBeatInput(
+              id: b.id,
+              source: b.source,
+              index: b.index,
+              timeMs: time,
+              rawMs: b.rawMs,
+              revision: b.revision,
+              timestampValid: b.timestampValid));
     }
-    final beats = byId.values.toList()
-      ..sort((a, b) {
-        final t = a.timeMs.compareTo(b.timeMs);
-        return t == 0 ? a.id.compareTo(b.id) : t;
-      });
+    // Held times never decrease along the index, so this is detection order;
+    // only a refused wrong clock can reorder anything.
+    beats.sort((a, b) {
+      final t = a.timeMs.compareTo(b.timeMs);
+      return t == 0 ? a.index.compareTo(b.index) : t;
+    });
     if (beats.isEmpty) continue;
-    final first = math.max(sourceStartMs ~/ pulseWindowMs * pulseWindowMs,
+    final first = math.max(
+        (evaluateFromMs ?? sourceStartMs) ~/ pulseWindowMs * pulseWindowMs,
         beats.first.timeMs ~/ pulseWindowMs * pulseWindowMs);
-    final last = math.min(completeThroughMs, beats.last.timeMs) ~/
+    final last = math.min(
+            math.min(completeThroughMs, beats.last.timeMs),
+            evaluateToMs == null ? beats.last.timeMs : evaluateToMs - 1) ~/
         pulseWindowMs *
         pulseWindowMs;
     final ownWindows = <PulseWindow>[];
