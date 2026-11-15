@@ -29,6 +29,8 @@ void main() {
     final open =
         detectPulseEpisodes(beats, completeThroughMs: 899999, sourceStartMs: 0);
     expect(open.episodes, isEmpty);
+    expect(open.windows.where((w)=>w.pending).every((w)=>!w.qualified), isTrue,
+      reason:'unresolved support cannot produce a qualified window decision');
     final closed = detectPulseEpisodes(beats,
         completeThroughMs: 1200000, sourceStartMs: 0);
     expect(closed.episodes, hasLength(1));
