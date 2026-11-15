@@ -50,3 +50,5 @@ export 'src/onehz/wellness/wellness.dart';
 export 'src/onehz/human/human.dart';
 
 export 'src/onehz/incremental.dart';
+
+export 'src/onehz/clinical/pulse_episodes.dart';
