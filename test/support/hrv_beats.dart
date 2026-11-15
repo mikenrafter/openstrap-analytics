@@ -1,6 +1,7 @@
 // Shared HRV test helpers: Beats builders, beat-series generators and the
 // hrvTime parity check.
 
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
@@ -69,6 +70,13 @@ void expectHrvParity(HrvTime got, HrvTime want, String tag) {
 ///  mode 0: smooth (random walk), mode 1: white noise (jittery, so the
 ///  RMSSD/pNN50 floor nulls them), mode 2: slow beats (spans several 5-minute
 ///  bins in few beats).
+///  Below the jitter floor, where hrvTime reads the difference runs:
+///  mode 3: RSA at a slow heart, ~44 bpm breathing at 0.3 Hz with a drifting
+///  heart rate (ACF1 ~ -0.8, but a respiratory line on a low floor exempts
+///  it once the runs hold 20 Welch segments); mode 4: a heart rate drifting
+///  from ~67 to ~46 bpm under heavy beat-time jitter with a weak breathing
+///  line at 0.25 Hz (refused, then published from the 5-min windows on the
+///  line steady in Hz once there are 12 of them, ~1 h).
 /// [gapP] is the chance a beat is preceded by a hole; [withTimes] false leaves
 /// every time NaN.
 Beats hrvSeries(Rng r, int n, int mode,
@@ -77,7 +85,24 @@ Beats hrvSeries(Rng r, int n, int mode,
   var t = hrvT0;
   var nn = mode == 2 ? 1700.0 : 800.0;
   for (var i = 0; i < n; i++) {
+    final s = (t - hrvT0) / 1000;
     switch (mode) {
+      case 3:
+        nn = (2 *
+                    (1350 +
+                        80 * math.sin(2 * math.pi * s / 3600) +
+                        40 * math.sin(2 * math.pi * .3 * s) +
+                        3 * (r.nextDouble() - .5)))
+                .roundToDouble() /
+            2;
+      case 4:
+        nn = (2 *
+                    (900 +
+                        400 * s / 9000 +
+                        10 * math.sin(2 * math.pi * .25 * s) +
+                        40 * (r.nextDouble() - .5)))
+                .roundToDouble() /
+            2;
       case 1:
         nn = 600 + r.intIn(0, 800) / 1.0;
       case 2:
@@ -85,7 +110,7 @@ Beats hrvSeries(Rng r, int n, int mode,
       default:
         nn = (nn + r.intIn(-40, 40)).clamp(450, 1300).toDouble();
     }
-    if (r.nextBool(.04)) nn += r.intIn(40, 200); // an occasional big step
+    if (mode < 3 && r.nextBool(.04)) nn += r.intIn(40, 200); // an occasional big step
     var extra = 0.0;
     if (i > 0) {
       final p = r.nextDouble();
@@ -94,7 +119,7 @@ Beats hrvSeries(Rng r, int n, int mode,
         extra = r.nextBool(.15)
             ? r.intIn(300000, 700000).toDouble()
             : r.intIn(600, 30000).toDouble();
-      } else if (p < gapP + .04) {
+      } else if (mode < 3 && p < gapP + .04) {
         extra = [0.5, 1.0, 0.0][r.nextInt(3)]; // right at the 0.5 ms tolerance
       }
     }

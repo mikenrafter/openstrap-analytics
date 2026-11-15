@@ -17,6 +17,11 @@ class _MotionBin {
 
 /// Explicit-reference motion updates retain the causal trailing axis queue.
 /// Automatic calibration is retrospective and uses the complete batch path.
+// van Hees 2013 ENMO and Vähä-Ypyä 2015 MAD, as in enmoSeries(); dynAmp remains
+// the internal vector high-pass adaptation. Explicit gravity reference uses the
+// same trailing queue; automatic calibration recomputes batch. Checked numeric
+// field tolerance is max(1e-9 absolute, 1e-8 relative); sample counts and minute
+// timestamps match exactly.
 class IncrementalEnmoSeries {
   List<AccelSample> _valid = [];
   final Map<int, _MotionBin> _bins = {};

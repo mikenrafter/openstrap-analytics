@@ -619,7 +619,8 @@ CardioStagerResult _refAbstain(int epochSec) => CardioStagerResult(
       0,
     );
 
-({List<double> beats, List<double> tsSec}) _refCleanBeatsInWindow(
+({List<double> beats, List<double> tsSec, List<bool> seam})
+    _refCleanBeatsInWindow(
   List<double> rrMs,
   List<double> rrTsMs,
   List<AccelSample> accel,
@@ -627,7 +628,7 @@ CardioStagerResult _refAbstain(int epochSec) => CardioStagerResult(
   int t, {
   int halfWinMs = 150 * 1000,
 }) {
-  const empty = (beats: <double>[], tsSec: <double>[]);
+  const empty = (beats: <double>[], tsSec: <double>[], seam: <bool>[]);
   if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
   final mid = (s + t) ~/ 2;
   if (mid >= accel.length) return empty;
@@ -638,14 +639,19 @@ CardioStagerResult _refAbstain(int epochSec) => CardioStagerResult(
 
 double _refWindowRmssd(List<double> rrMs, List<double> rrTsMs,
     List<AccelSample> accel, int s, int t, int epochSec) {
-  final beats = _refCleanBeatsInWindow(rrMs, rrTsMs, accel, s, t).beats;
+  // Upstream's seam rule (merged 2026-10-18): skip seam pairs, gate on pairs.
+  final win = _refCleanBeatsInWindow(rrMs, rrTsMs, accel, s, t);
+  final beats = win.beats;
   if (beats.length < 5) return double.nan;
   var ss = 0.0;
+  var pairs = 0;
   for (var i = 1; i < beats.length; i++) {
+    if (win.seam[i]) continue;
     final d = beats[i] - beats[i - 1];
     ss += d * d;
+    pairs++;
   }
-  return math.sqrt(ss / (beats.length - 1));
+  return pairs >= 4 ? math.sqrt(ss / pairs) : double.nan;
 }
 
 double _refWindowSdnn(List<double> rrMs, List<double> rrTsMs,
@@ -659,7 +665,7 @@ double _refWindowSdnn(List<double> rrMs, List<double> rrTsMs,
     List<double> rrTsMs, List<AccelSample> accel, int s, int t, int epochSec) {
   final win =
       _refCleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: 90 * 1000);
-  return remFeaturesFromBeats(win.beats, win.tsSec);
+  return remFeaturesFromBeats(win.beats, win.tsSec, win.seam);
 }
 
 // ───────────────────────────── helpers ───────────────────────────────────────

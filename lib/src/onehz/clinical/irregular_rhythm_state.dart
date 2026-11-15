@@ -1,3 +1,11 @@
+// Internal rule for SD1/SD2, pNNx thresholds and sustained-window voting.
+// Task Force 1996 supports successive-difference HRV components, not this
+// classifier or its SD1/SD2 thresholds; see hrv_time.dart.
+// Internal irregular-rhythm screen, ESTIMATE with low confidence. Batch and
+// stream share irregularWindowVerdict(); centered moments reorder floating-point
+// sums, while exact counters preserve window evidence. Shared adjacency excludes
+// timestamp-gap pairs. Diagnostics account for evidence without adding a
+// clinical estimator.
 // CLINICAL — incremental irregular-rhythm screen.
 //
 // [IrregularScreenState] is `irregularBeatScreen` as a fold over the corrected
@@ -19,6 +27,10 @@
 // abstained. The checkpoint (version 2) carries two more counters for it, the
 // NN entries seen and the windows closed; a version 1 checkpoint lacks them and
 // is REFUSED rather than restored with counts it never kept.
+//
+// Version 3 adds the previous kept beat's time: two kept beats are successive
+// only when no time hole lies between them (the batch's seam test), so the
+// fold needs it. Older checkpoints are refused for the same reason.
 
 import 'dart:math' as math;
 
@@ -35,6 +47,9 @@ class IrregularScreenState {
   // ---- running state over the corrected NN list ----
   bool _prevKept = false; // the previous INPUT beat was inside [300, 2000]
   double _prevV = 0;
+  // time of the previous kept beat; NaN when unknown (a NaN time is never
+  // within a seam, exactly as in the batch comparison)
+  double _prevT = double.nan;
   int _nIn = 0; // NN entries folded, usable or not
   int _nKept = 0;
   // successive differences between adjacent kept beats
@@ -84,7 +99,7 @@ class IrregularScreenState {
       throw FormatException(
           'not an IrregularScreenState checkpoint: ${j['type']}');
     }
-    if (j['version'] != 2) {
+    if (j['version'] != 3) {
       throw FormatException(
           'unsupported IrregularScreenState version ${j['version']}');
     }
@@ -99,6 +114,9 @@ class IrregularScreenState {
     );
     s._prevKept = j['prevKept'] as bool;
     s._prevV = d('prevV');
+    // Present in every version 3 checkpoint; null only when unknown (NaN).
+    if (!j.containsKey('prevT')) throw const FormatException('missing prevT');
+    s._prevT = (j['prevT'] as num?)?.toDouble() ?? double.nan;
     s._nIn = j['nIn'] as int;
     s._nKept = j['nKept'] as int;
     s._dN = j['dN'] as int;
@@ -144,10 +162,10 @@ class IrregularScreenState {
     return s;
   }
 
-  /// Checkpoint: `{'version': 2, 'type': 'IrregularScreenState', ...}`, plain
+  /// Checkpoint: `{'version': 3, 'type': 'IrregularScreenState', ...}`, plain
   /// JSON, bounded (running sums plus at most one open 5-minute window).
   Map<String, dynamic> toJson() => {
-        'version': 2,
+        'version': 3,
         'type': 'IrregularScreenState',
         'sd1sd2Flag': sd1sd2Flag,
         'pnnThresholdMs': pnnThresholdMs,
@@ -157,6 +175,7 @@ class IrregularScreenState {
         'sustainedFraction': sustainedFraction,
         'prevKept': _prevKept,
         'prevV': _prevV,
+        'prevT': _prevT.isFinite ? _prevT : null,
         'nIn': _nIn,
         'nKept': _nKept,
         'dN': _dN,
@@ -184,6 +203,7 @@ class IrregularScreenState {
       )
         .._prevKept = _prevKept
         .._prevV = _prevV
+        .._prevT = _prevT
         .._nIn = _nIn
         .._nKept = _nKept
         .._dN = _dN
@@ -220,9 +240,10 @@ class IrregularScreenState {
     _nIn++;
     final kept = v >= 300 && v <= 2000;
     if (kept) {
-      // Adjacent = the previous INPUT beat was kept too: no difference is ever
-      // taken across a skipped beat.
-      final adjacent = _prevKept;
+      // Adjacent = the previous INPUT beat was kept too and no time hole lies
+      // between them: no difference is ever taken across a skipped beat or a
+      // dropout (the batch's `successive`).
+      final adjacent = _prevKept && tm - _prevT <= v + 0.5;
       if (adjacent) {
         final d = v - _prevV;
         _dN++;
@@ -249,7 +270,10 @@ class IrregularScreenState {
     _prevKept = kept;
     // Only read when the next beat is adjacent to a KEPT one; a NaN stored here
     // would make the checkpoint unencodable.
-    if (kept) _prevV = v;
+    if (kept) {
+      _prevV = v;
+      _prevT = tm;
+    }
   }
 
   /// Appends settled NN ([nn], ms) and their beat times ([nnTimesMs], same
@@ -346,7 +370,8 @@ class IrregularScreenState {
           diag(why),
         );
 
-    if (c._nKept < minBeats) {
+    // Gate on contiguous pairs, as the batch does.
+    if (c._dN < minBeats - 1) {
       return abstain(IrregularAbstain.tooFewBeats,
           'too few clean beats for an irregular-rhythm screen');
     }

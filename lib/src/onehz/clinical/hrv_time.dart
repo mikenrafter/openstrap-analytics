@@ -15,8 +15,11 @@
 // makes it behaviour — see that constant for the measurement and the threshold.
 
 import 'dart:math' as math;
+import 'dart:typed_data';
 import '../types.dart';
 import '../util.dart';
+import 'hrv_time_aggregator.dart';
+import 'rmssd_gate.dart';
 
 /// Lag-1 ACF floor for the NN successive-difference series, below which RMSSD
 /// and pNN50 are REFUSED (SDNN / SDANN survive it and are the honest lead).
@@ -72,6 +75,181 @@ double? nnDiffAcf1(List<List<double>> diffRuns) {
   return varSum > 0 ? cov / varSum : null;
 }
 
+/// White-noise share of the mean squared successive difference above which a
+/// night that failed [kNnDiffAcf1Floor] stays refused. Same line as the floor:
+/// with acf-neutral physiology, ACF1 ≈ −0.5 × share, so −0.35 ↔ 0.7.
+const double kNnDiffNoiseShareCeiling = 0.7;
+
+/// Share of the mean squared successive difference that a FLAT (white) RR noise
+/// floor accounts for: 2σ² / mean(d²), with σ² read as the median of the
+/// beat-indexed Welch spectrum (64-beat Hann, 50 % overlap, Welch 1967) over
+/// 0.15–0.5 cycles/beat. ~1 for white or differenced-white timing jitter; well
+/// below 1 when the high band is a respiratory line on a low floor.
+///
+/// Why ACF1 alone is not enough: RSA is a line at (breaths/min ÷ HR) cycles per
+/// beat, and differencing a line at f gives ACF1 = cos 2πf. At a resting HR
+/// in the 40s and 18–20 breaths/min that is ~0.4 cycles/beat, ACF1 ≈ −0.8 —
+/// below the floor on a clean night, so the floor locked out slow hearts.
+/// Ceiling: a line at Nyquist (breathing at half the heart rate) is an
+/// alternation, indistinguishable from detector alternation, and stays refused.
+/// The guard is deliberately the top two bins, so a peak anywhere in
+/// ~0.477–0.5 cycles/beat is refused too (HR ~40 at 20 br/min lands there):
+/// at 64 beats a Hann line that close puts its main lobe on the Nyquist bin.
+/// Alternation that slips phase now and then is not a line but a hump centred
+/// on Nyquist, a few bins wide, and Welch scatter can put its peak lower. A
+/// real line at <= ~0.47 cycles/beat leaves the Nyquist bin on the Hann null,
+/// holding only the floor, so a Nyquist bin above 0.2x the peak is refused too.
+///
+/// Diffs are weighted by the same Hann² coverage the spectrum gives them: a
+/// diff in the first or last few beats of a segment barely reaches the PSD, so
+/// counting it at full weight against the floor hid run-edge artifacts (sensor
+/// holes, dropped runs, window seams are exactly where re-lock residuals sit).
+/// Energy the spectrum never vets (edges, tails, too-short runs) above what the
+/// weighted mean carries counts as noise, so it can only push toward refusal.
+///
+/// A respiratory line has to stand out: the peak bin must reach 4.5x the band
+/// median. With only ~20-30 segments the median is noisy enough that pure
+/// beat-time jitter sometimes reads under the ceiling; its peak stays near
+/// 3.4x the median at worst, while an RSA line that clears the ceiling sits at
+/// 5x or more.
+///
+/// A short loud burst can carry most of the band power, leaving the average
+/// effectively one or two segments wide, and the median of that undershoots
+/// the floor. So the segment count that matters is the power-weighted one,
+/// (Σ P_s)² / Σ P_s², which must reach 15.
+///
+/// Null (no verdict) on fewer than [minSegments] segments (or 3/4 of that
+/// effective; 20/15 for a night, see [_windowClears] for one window), a peak in
+/// that top band, a Nyquist bin that rivals the peak, or no peak standing
+/// clear of the floor, or diffs on a beat-time grid coarse against their size
+/// (see [_onCoarseLattice]).
+double? nnDiffNoiseShare(List<List<double>> diffRuns, {int minSegments = 20}) {
+  final sums = NoiseShareSums();
+  for (final r in diffRuns) {
+    sums.addRun(r);
+  }
+  return noiseShareFrom(sums,
+      lattice: () => _onCoarseLattice(diffRuns, sums.ssd / sums.nd),
+      minSegments: minSegments);
+}
+
+/// True when every successive difference is a whole multiple of one step q and
+/// the mean squared difference is under 2q². Beat times rounded to a grid q
+/// make RR a two-level sequence on a near-constant heart: its differences are
+/// 0 or ±q, a deterministic sawtooth at frac(RR/q) cycles/beat, so it reads as
+/// one clean line and the white-floor test cannot see it. Rounding alone puts
+/// mean(d²) at 2·min(f, 1−f)·q² ≤ q², so under 2q² the grid, not the heart,
+/// sets RMSSD.
+// ponytail: exact lattice only; a grid re-rounded to whole ms (7.8 ms → 7/8)
+// breaks the common step and is not caught.
+bool _onCoarseLattice(List<List<double>> diffRuns, double msd) =>
+    coarseLattice([for (final r in diffRuns) for (final d in r) d.abs()], msd);
+
+/// The one RMSSD jitter verdict every path shares: ACF1 below the floor AND
+/// the spectrum does not show a respiratory line on a low white floor.
+bool _jitterRefused(double? acf1, List<List<double>> runs,
+    {int minSegments = 20}) {
+  if (acf1 == null || acf1 >= kNnDiffAcf1Floor) return false;
+  final share = nnDiffNoiseShare(runs, minSegments: minSegments);
+  return share == null || share >= kNnDiffNoiseShareCeiling;
+}
+
+/// One 5-min window judged on its own: a measured ACF1 at or above the floor,
+/// or its own spectral line (4 segments is what a window at HR ~40 holds).
+bool _windowClears(List<List<double>> runs) {
+  final a = nnDiffAcf1(runs);
+  return a != null && !_jitterRefused(a, runs, minSegments: 4);
+}
+
+/// The window RMSSDs a headline may use. A night that cleared the floor
+/// outright keeps them all. One that only passed through the spectral
+/// exemption proved a line somewhere in the pooled power, not in every window:
+/// quiet jitter-only windows can win the median or dilute the mean while a few
+/// loud breathing windows carry the pooled share. There every window has to
+/// clear the gate itself.
+List<double> _clearedWindows(double? nightAcf1, List<double> rmssds,
+    List<List<List<double>>> winRuns) {
+  if (nightAcf1 == null || nightAcf1 >= kNnDiffAcf1Floor) return rmssds;
+  return [
+    for (var i = 0; i < rmssds.length; i++)
+      if (_windowClears(winRuns[i])) rmssds[i]
+  ];
+}
+
+/// Last resort for a night the jitter gate refused: the windows whose
+/// breathing line holds still in Hz while the heart rate moves.
+///
+/// RSA follows breathing (Hirsch & Bishop 1981), a rate in breaths per
+/// minute, so its line sits at a fixed frequency in Hz; a heart rate that
+/// drifts across the night slides it in cycles per beat. Beat-timing jitter,
+/// alternation and grid artifacts are tied to the beat, not the clock. So each
+/// 5-min window's spectrum is pooled twice, once on a cycles-per-beat axis and
+/// once rescaled by its own mean RR onto a Hz axis, and the night passes only
+/// when the Hz pooling shows a line in 8–30 br/min that is sharper than the
+/// beat pooling. If the heart rate barely moves the two poolings coincide and
+/// the night stays refused: stability in Hz says nothing there.
+///
+/// Ceiling: needs >= 12 windows and a heart rate that wanders; breathing at
+/// half the heart rate is still an alternation and still refused.
+/// Returns the indices of the windows whose own peak sits on the line.
+List<int>? _steadyBreathingWindows(
+    List<List<List<double>>> winRuns, List<double> meanRrMs) {
+  var ssd = 0.0, nd = 0;
+  final all = [for (final w in winRuns) ...w];
+  for (final r in all) {
+    for (final d in r) {
+      ssd += d * d;
+      nd++;
+    }
+  }
+  return steadyBreathingFrom(
+    windows: winRuns.length,
+    meanRrMs: meanRrMs,
+    psdAt: (w, f) => windowPsd(winRuns[w], f),
+    diffs: (w) {
+      var n = 0;
+      for (final r in winRuns[w]) {
+        n += r.length;
+      }
+      return n;
+    },
+    addSquares: (w, acc) {
+      for (final r in winRuns[w]) {
+        for (final d in r) {
+          acc += d * d;
+        }
+      }
+      return acc;
+    },
+    allSsd: ssd,
+    allNd: nd,
+    lattice: (msd) => _onCoarseLattice(all, msd),
+  );
+}
+
+/// The window RMSSDs a windowed headline publishes, or null for none: the
+/// usual gate first, and only when it leaves nothing, the windows on a
+/// breathing line that holds still in Hz ([_steadyBreathingWindows]), which
+/// publish at the confidence floor.
+({List<double> rmssds, bool byBreathing, String note})? _keptWindows(
+    double? acf1,
+    bool refused,
+    List<double> rmssds,
+    List<List<List<double>>> winRuns,
+    List<double> meanRrMs) {
+  final kept = refused ? const <double>[] : _clearedWindows(acf1, rmssds, winRuns);
+  if (kept.isNotEmpty) return (rmssds: kept, byBreathing: false, note: '');
+  if (acf1 == null || acf1 >= kNnDiffAcf1Floor) return null;
+  final idx = _steadyBreathingWindows(winRuns, meanRrMs);
+  if (idx == null) return null;
+  return (
+    rmssds: [for (final i in idx) rmssds[i]],
+    byBreathing: true,
+    note: ' Jitter gate failed; kept the ${idx.length} windows on a breathing '
+        'line steady in Hz while heart rate drifted, at floor confidence.',
+  );
+}
+
 /// Confidence multiplier for a measured [acf1]: 1.0 on a smooth tachogram,
 /// falling linearly to 0 at [kNnDiffAcf1Floor] so confidence bottoms out
 /// exactly where RMSSD is refused. 1.0 when ACF1 could not be measured.
@@ -83,6 +261,113 @@ String _jitterNote(double acf1) =>
     'differences are essentially differenced white noise (−0.5 = pure, floor '
     '$kNnDiffAcf1Floor), so RMSSD/pNN50 would measure beat-timing jitter, not '
     'vagal tone';
+
+/// Σ reported RR ÷ elapsed wall time above which the stream cannot be one
+/// heart's beats (it banks more beat-time than time passed): a double ingest or
+/// two interleaved streams. Contiguous runs measure 0.963 (gen4), 0.999 (W5),
+/// 1.001 (MG) — see rr_correction.dart `_beatTimes` — so 1.10 has margin.
+/// Duplicated beats add zero differences and DEFLATE RMSSD by ~1/√2;
+/// interleaved streams inflate it. Every other gate here passes both.
+const double kRrCoverageCeiling = 1.10;
+
+/// Shortest wall span [rrCoverage] will judge: whole-second stamps make a
+/// shorter one meaningless.
+const double kRrCoverageMinSpanSec = 600;
+
+/// Intervals [rrCoverage] counts as beat-time, ms. Wider than the cleaners'
+/// 2000 ms on purpose: a 2000–2400 ms beat is a slow heart (25–30 bpm), still
+/// real elapsed time; only a glitch (e.g. a 65 535 ms sentinel) must not be
+/// summed, or it would fake an over-count on a short span.
+const double _rrCoverageMinMs = 300;
+const double _rrCoverageMaxMs = 2400;
+
+bool _rrCoverageCounts(double rrMs) =>
+    rrMs >= _rrCoverageMinMs && rrMs <= _rrCoverageMaxMs;
+
+/// How much beat-time an RR stream banks against the wall clock it spans.
+class RrCoverage {
+  /// Σ plausible RR ÷ wall span. Below 1 on any gap; above 1 is impossible
+  /// for one heart.
+  final double coverage;
+  final double sumRrSec;
+  final double spanSec;
+  final int beats;
+
+  /// Intervals outside 300–2400 ms: counted, never summed.
+  final int implausibleBeats;
+
+  /// Exact (ts, rr) repeats of an earlier beat, wherever they sit in the
+  /// input. A DIAGNOSTIC only: on whole-second stamps two equal beats in one
+  /// record repeat legitimately.
+  final int duplicateBeats;
+  const RrCoverage({
+    required this.coverage,
+    required this.sumRrSec,
+    required this.spanSec,
+    required this.beats,
+    required this.implausibleBeats,
+    required this.duplicateBeats,
+  });
+  bool get overCounted => coverage > kRrCoverageCeiling;
+  Map<String, dynamic> toJson() => {
+        'rr_coverage': round6(coverage),
+        'sum_rr_sec': round6(sumRrSec),
+        'span_sec': round6(spanSec),
+        'beats': beats,
+        'implausible_beats': implausibleBeats,
+        'duplicate_beats': duplicateBeats,
+      };
+}
+
+/// [RrCoverage] of raw RR [rrMs] against their beat-END epoch times [rrTsMs]
+/// (same length; order does not matter). The span is `latest − earliest` beat
+/// end plus the earliest beat's own interval (it began before its end stamp) —
+/// but only when that interval is itself plausible. An implausible one is
+/// never summed, so it must not stretch the denominator either (a 65 535 ms
+/// glitch there hid a 12.5 % over-count). Null when fewer than 2 beats, the
+/// lengths differ, or the span is under [kRrCoverageMinSpanSec].
+RrCoverage? rrCoverage(List<double> rrMs, List<double> rrTsMs) {
+  if (rrMs.length < 2 || rrMs.length != rrTsMs.length) return null;
+  var lo = 0, hi = 0;
+  for (var i = 1; i < rrTsMs.length; i++) {
+    if (rrTsMs[i] < rrTsMs[lo]) lo = i;
+    if (rrTsMs[i] > rrTsMs[hi]) hi = i;
+  }
+  final first = rrMs[lo];
+  final spanSec = (rrTsMs[hi] - rrTsMs[lo] +
+          (_rrCoverageCounts(first) ? first : 0)) /
+      1000.0;
+  if (!spanSec.isFinite || spanSec < kRrCoverageMinSpanSec) return null;
+  var sum = 0.0;
+  var implausible = 0;
+  var dup = 0;
+  final seen = <(double, double)>{};
+  for (var i = 0; i < rrMs.length; i++) {
+    final v = rrMs[i];
+    if (_rrCoverageCounts(v)) {
+      sum += v;
+    } else {
+      implausible++;
+    }
+    if (!seen.add((rrTsMs[i], v))) dup++;
+  }
+  final sumSec = sum / 1000.0;
+  return RrCoverage(
+    coverage: sumSec / spanSec,
+    sumRrSec: sumSec,
+    spanSec: spanSec,
+    beats: rrMs.length,
+    implausibleBeats: implausible,
+    duplicateBeats: dup,
+  );
+}
+
+/// The refusal note every RMSSD-family estimator gives an over-counted stream.
+String rrOvercountNote(RrCoverage c) => _overcountNote(c);
+
+String _overcountNote(RrCoverage c) =>
+    'rr_overcount:coverage=${round6(c.coverage)} — more beat-time than '
+    'elapsed time; the RR stream holds duplicated or interleaved beats';
 
 class HrvTime {
   final double? rmssd; // ms
@@ -121,11 +406,14 @@ class HrvTime {
 /// the upstream corrector rejected (0..1), folded into confidence exactly as
 /// `hrvFreq` and `irregularBeatScreen` already do. Returns an absent Metric when
 /// there are too few beats; RMSSD/pNN50 alone go null when the successive
-/// differences fail [kNnDiffAcf1Floor].
+/// differences fail [kNnDiffAcf1Floor], or when [coverage] (of the raw RR this
+/// NN was cleaned from) is [RrCoverage.overCounted] — then the breathing-line
+/// fallback does not run either. Without [coverage] that check is skipped.
 Metric<HrvTime> hrvTime(
   List<double> nnMs, {
   List<double>? nnTimesMs,
   double artifactFraction = 0.0,
+  RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned'];
   if (nnMs.length < 2) {
@@ -136,62 +424,51 @@ Metric<HrvTime> hrvTime(
     );
   }
 
+  // A non-finite beat time has no place on the clock: the 5-min segmenting
+  // threw on it. Same refusal as hrvFreq / rsaRespRate.
+  if (nnTimesMs != null &&
+      nnTimesMs.length == nnMs.length &&
+      nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+
+  // The values come from the same numeric core as [hrvTimeAggregator], run
+  // in one slice; this function adds only the envelope (confidence, note).
+  //
   // RMSSD / pNN50: root mean square of SUCCESSIVE differences — successive in
   // TIME, not merely adjacent in the compacted list. correctRr drops multi-beat
   // artifact runs while advancing its clock across them, so nn[i-1] and nn[i]
   // can sit either side of a seconds-long hole; differencing straight down the
   // list manufactured one large difference per dropped run. Same `keep`-mask
   // treatment irregular_rhythm.dart already applies. A pair is contiguous iff
-  // the elapsed time between the two beat times is the interval itself.
+  // the elapsed time between the two beat times is the interval itself. The
+  // differences are kept as contiguous RUNS (a seam ends a run) so the same
+  // pass feeds the lag-1 ACF without ever forming a pair across a hole.
   //
-  // The differences are kept as contiguous RUNS (a seam ends a run) so the same
-  // pass feeds [nnDiffAcf1] without ever forming a lag-1 pair across a hole.
-  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
-  final runs = <List<double>>[];
-  var run = <double>[];
-  for (var i = 1; i < nnMs.length; i++) {
-    if (gapAware && nnTimesMs[i] - nnTimesMs[i - 1] > nnMs[i] + 0.5) {
-      if (run.isNotEmpty) {
-        runs.add(run);
-        run = <double>[];
-      }
-      continue;
-    }
-    run.add(nnMs[i] - nnMs[i - 1]);
-  }
-  if (run.isNotEmpty) runs.add(run);
-
-  var ssd = 0.0;
-  var nn50 = 0;
-  var pairs = 0;
-  for (final r in runs) {
-    for (final d in r) {
-      ssd += d * d;
-      if (d.abs() > 50) nn50++;
-      pairs++;
-    }
-  }
   // RMSSD and pNN50 are the two outputs made of successive differences, so they
   // are the two the jitter floor refuses. SDNN/SDANN are made of the levels and
   // are far less contaminated (jitter share 1–27 % against RMSSD's 11–100 % on
   // the audit corpus) — they keep publishing, which is what the header has
-  // always advised.
-  final acf1 = nnDiffAcf1(runs);
-  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
-  final rmssd = (pairs > 0 && !jittery) ? math.sqrt(ssd / pairs) : null;
-  final pnn50 = (pairs > 0 && !jittery) ? 100.0 * nn50 / pairs : null;
-  final sdnn = stddev(nnMs);
-
-  double? sdann, sdnnIndex;
-  if (gapAware) {
-    final seg = _fiveMinSegments(nnMs, nnTimesMs);
-    if (seg.length >= 2) {
-      final means = [for (final s in seg) mean(s)!];
-      sdann = stddev(means);
-      final sds = [for (final s in seg) stddev(s)].whereType<double>().toList();
-      sdnnIndex = sds.isEmpty ? null : mean(sds);
-    }
-  }
+  // always advised. Refused: a long record may still show a breathing line
+  // steady in Hz; then RMSSD alone comes from those 5-min windows.
+  final gapAware = nnTimesMs != null && nnTimesMs.length == nnMs.length;
+  final nn = Float64List.fromList(nnMs);
+  final times = gapAware ? Float64List.fromList(nnTimesMs) : Float64List(nn.length);
+  final v = hrvTimeOneSlice(Beats(nn, times),
+      originMs: gapAware ? times[0] : null, gapAware: gapAware);
+  final acf1 = v.diffAcf1;
+  // pNN50 is null with a real ACF1 (>= 30 pairs) only when the floor refused.
+  final jittery = acf1 != null && v.pnn50 == null;
+  // More beat-time than elapsed: the stream itself is wrong, so neither the
+  // differences nor any breathing line in them describe one heart.
+  final overCounted = coverage?.overCounted == true;
+  final rmssd = overCounted ? null : v.rmssd;
+  final pnn50 = overCounted ? null : v.pnn50;
+  final byBreathing = jittery && rmssd != null;
 
   // Confidence scales with beat count (ultra-short reads are less reliable),
   // with the artifact fraction we were handed, and with the measured jitter
@@ -200,17 +477,19 @@ Metric<HrvTime> hrvTime(
   // were ~pure noise. The beat-count term is capped BEFORE the quality terms
   // multiply it; multiplying first let an all-night beat count (n/250 ≈ 100)
   // swallow any penalty and re-clamp to 0.95 regardless.
-  final conf = ((nnMs.length / 250.0).clamp(0.0, 1.0) // ~250 beats ≈ 5 min
-          *
-          _acf1Quality(acf1) *
-          (1 - artifactFraction))
-      .clamp(0.3, 0.95);
+  final conf = byBreathing || overCounted
+      ? 0.3
+      : ((nnMs.length / 250.0).clamp(0.0, 1.0) // ~250 beats ≈ 5 min
+              *
+              _acf1Quality(acf1) *
+              (1 - artifactFraction))
+          .clamp(0.3, 0.95);
   return Metric<HrvTime>(
     value: HrvTime(
       rmssd: rmssd,
-      sdnn: sdnn,
-      sdann: sdann,
-      sdnnIndex: sdnnIndex,
+      sdnn: v.sdnn,
+      sdann: v.sdann,
+      sdnnIndex: v.sdnnIndex,
       pnn50: pnn50,
       nBeats: nnMs.length,
       diffAcf1: acf1,
@@ -218,9 +497,13 @@ Metric<HrvTime> hrvTime(
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: jittery
+    note: overCounted
+        ? '${_overcountNote(coverage!)}. SDNN/SDANN survive it and are the '
+            'lead here. PRV not ECG-HRV.'
+        : jittery
         ? '${_jitterNote(acf1)}. SDNN/SDANN survive it and are the lead here. '
-            'PRV not ECG-HRV.'
+            '${byBreathing ? 'RMSSD only from 5-min windows on a breathing '
+                'line steady in Hz, at floor confidence. ' : ''}PRV not ECG-HRV.'
         : 'PRV not ECG-HRV; RMSSD/pNN50 are quantization-sensitive at 1 Hz '
             '— lead with SDNN/SDANN',
   );
@@ -243,8 +526,9 @@ Metric<HrvTime> hrvTime(
 /// true at the window's MIDPOINT second.
 ///
 /// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
-/// PRV-not-ECG honesty note. Absent when there are too few usable windows, or
-/// when the night's successive differences fail [kNnDiffAcf1Floor]. A window
+/// PRV-not-ECG honesty note. Absent when there are too few usable windows, when
+/// the night's successive differences fail [kNnDiffAcf1Floor], or when
+/// [coverage] (of the raw RR) is [RrCoverage.overCounted]. A window
 /// contributes only if it holds [minBeatsPerWindow] differences between beats
 /// that are ADJACENT IN TIME, not merely adjacent in the compacted NN list.
 Metric<double> nocturnalRmssd(
@@ -253,13 +537,28 @@ Metric<double> nocturnalRmssd(
   double windowMs = 300000.0,
   int minBeatsPerWindow = 5,
   List<bool>? stageMaskPerSec,
+  RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
+  if (coverage != null && coverage.overCounted) {
+    return Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: _overcountNote(coverage),
+    );
+  }
   if (nnMs.length != nnTimesMs.length || nnMs.length < minBeatsPerWindow + 1) {
     return const Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few NN intervals for windowed nocturnal RMSSD',
+    );
+  }
+  if (nnTimesMs.any((t) => !t.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
     );
   }
   final t0 = nnTimesMs.first;
@@ -280,6 +579,8 @@ Metric<double> nocturnalRmssd(
   // passed by luck — measured, that let WHOOP 5 publish 109-116 ms from its
   // calmest-looking windows while the night pooled to −0.43/−0.51.
   final runs = <List<double>>[];
+  final perWindow = <List<List<double>>>[];
+  final meanRr = <double>[];
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     if (stageMaskPerSec != null) {
@@ -318,40 +619,91 @@ Metric<double> nocturnalRmssd(
     }
     if (nd < minBeatsPerWindow) continue;
     runs.addAll(winRuns);
+    perWindow.add(winRuns);
+    meanRr.add(mean([for (final i in seg) nnMs[i]])!);
     rmssds.add(math.sqrt(ssd / nd));
   }
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
-    return Metric<double>.absent(
-      tier: Tier.high,
-      inputs_used: inputs,
-      note: _jitterNote(acf1),
-    );
-  }
-  if (rmssds.isEmpty) {
+  final refused = _jitterRefused(acf1, runs);
+  if (rmssds.isEmpty && !refused) {
     return const Metric<double>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no usable 5-min windows for nocturnal RMSSD',
     );
   }
-  final robust = median(rmssds)!;
+  final kept = _keptWindows(acf1, refused, rmssds, perWindow, meanRr);
+  if (kept == null) {
+    return Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: refused
+          ? _jitterNote(acf1!)
+          : '${_jitterNote(acf1!)}; no 5-min window clears it on its own',
+    );
+  }
+  final robust = median(kept.rmssds)!;
   // Confidence scales with how many windows we could median over, and with the
   // measured jitter level (see [kNnDiffAcf1Floor]).
-  final conf =
-      ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1)).clamp(
-          // 12 ≈ 1 h
-          0.3,
-          0.95);
+  final conf = kept.byBreathing
+      ? 0.3
+      : ((kept.rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
+          .clamp(
+              // 12 ≈ 1 h
+              0.3,
+              0.95);
   return Metric<double>(
     value: robust,
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'robust nocturnal RMSSD = MEDIAN of ${rmssds.length} consecutive '
+    note: 'robust nocturnal RMSSD = MEDIAN of ${kept.rmssds.length} consecutive '
         '5-min-window RMSSDs (REM/arousal-robust). PRV not ECG-HRV; '
-        'RMSSD is quantization-sensitive at 1 Hz.',
+        'RMSSD is quantization-sensitive at 1 Hz.${kept.note}',
   );
+}
+
+/// Fewest successive differences a 5-min window needs before its RMSSD joins
+/// the nightly mean. RMSSD's relative sampling error is ~1/√(2n): 71 % at n = 1,
+/// 32 % at n = 5, 16 % at n = 20 (cf. night_hrv_shape.dart). The
+/// ultra-short-RMSSD literature (Munoz et al. 2015; Baek et al. 2015) puts the
+/// shortest usable recording at roughly 10–30 s — 20 differences is 20–25 s at
+/// a sleeping 48–60 bpm. The windows this drops sit where the signal is
+/// disturbed (session edges, dropouts, ectopy), and those of ≤ 2 beats are the
+/// ones `_cleanWindowRuns` cannot Malik-filter. `nocturnalRmssd`, a secondary
+/// median estimator published under its own key, keeps its own floor of 5.
+/// A floor, not a weight: weighting by n would weight by HEART RATE, letting
+/// high-HR, low-RMSSD REM/arousal windows pull the mean down.
+const int kMinDiffsPerRmssdWindow = 20;
+
+/// The nightly headline RMSSD plus the diagnostics a `Metric<double>` cannot
+/// carry. Present only when the headline is.
+class SessionRmssd {
+  final double rmssd; // ms — the headline
+  final int windows; // 5-min windows that contributed
+  final int overCountedWindows; // windows dropped for more beat-time than time
+  final int thinWindows; // windows dropped for 0..floor−1 differences
+  final int minDiffsPerWindow; // the floor, which travels with the number
+  final double? diffAcf1; // pooled over the session's windows
+  final double? rrCoverage; // [RrCoverage.coverage] of the session's beats
+  const SessionRmssd({
+    required this.rmssd,
+    required this.windows,
+    this.overCountedWindows = 0,
+    this.thinWindows = 0,
+    this.minDiffsPerWindow = kMinDiffsPerRmssdWindow,
+    this.diffAcf1,
+    this.rrCoverage,
+  });
+  Map<String, dynamic> toJson() => {
+        'rmssd_ms': round6(rmssd),
+        'windows': windows,
+        'overcounted_windows': overCountedWindows,
+        'thin_windows': thinWindows,
+        'min_diffs_per_window': minDiffsPerWindow,
+        if (diffAcf1 != null) 'diff_acf1': round6(diffAcf1!),
+        if (rrCoverage != null) 'rr_coverage': round6(rrCoverage!),
+      };
 }
 
 /// Sleep-session nightly RMSSD (ms) as the arithmetic mean of cleaned
@@ -360,13 +712,22 @@ Metric<double> nocturnalRmssd(
 /// Split the detected sleep session into consecutive 5-minute windows, apply a
 /// simple RR cleaner (range-filter [300, 2000] ms + Malik-style ectopic
 /// rejection against a local median), compute RMSSD inside each valid window,
-/// then return the ARITHMETIC MEAN across windows. This is intentionally
+/// then return the ARITHMETIC MEAN across windows. A window joins the mean only
+/// with at least [minDiffsPerWindow] clean successive differences
+/// ([kMinDiffsPerRmssdWindow]): an unweighted mean let a window of a handful of
+/// differences across an arousal or a dropout edge count as much as a full
+/// window of ~300, and those thin windows cluster where the signal is
+/// disturbed, so the bias was upward. Thin windows — 0 to
+/// [minDiffsPerWindow] − 1 differences, including one the cleaner left with
+/// none — are counted ([SessionRmssd.thinWindows]), not silently lost, and
+/// contribute nothing to the jitter verdict either. This is intentionally
 /// distinct from [nocturnalRmssd], which uses cleaned NN +
 /// median-of-windows robustness.
 ///
 /// This is the nightly HEADLINE (→ `ln_rmssd` → readiness), so it refuses
 /// rather than approximates: absent when the successive differences fail
-/// [kNnDiffAcf1Floor].
+/// [kNnDiffAcf1Floor], and absent when the session's beats bank more time than
+/// elapsed ([kRrCoverageCeiling]).
 ///
 /// [rrMs]/[rrTsMs] are the raw RR intervals and their beat-end epoch times in
 /// milliseconds. [startSec]/[endSec] bound the chosen sleep session in epoch
@@ -378,6 +739,34 @@ Metric<double> sleepSessionWindowedRmssd(
   required int startSec,
   required int endSec,
   int windowSec = 300,
+  int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
+}) {
+  final m = sleepSessionRmssdDetail(rrMs, rrTsMs,
+      startSec: startSec,
+      endSec: endSec,
+      windowSec: windowSec,
+      minDiffsPerWindow: minDiffsPerWindow);
+  return m.present
+      ? Metric<double>(
+          value: m.value!.rmssd,
+          confidence: m.confidence,
+          tier: m.tier,
+          inputs_used: m.inputs_used,
+          note: m.note,
+        )
+      : Metric<double>.absent(
+          tier: m.tier, inputs_used: m.inputs_used, note: m.note);
+}
+
+/// [sleepSessionWindowedRmssd] with its diagnostics ([SessionRmssd]). The two
+/// are one computation; this is the one that does it.
+Metric<SessionRmssd> sleepSessionRmssdDetail(
+  List<double> rrMs,
+  List<double> rrTsMs, {
+  required int startSec,
+  required int endSec,
+  int windowSec = 300,
+  int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
 }) {
   const inputs = ['rr_sleep_window'];
   if (startSec <= 0 ||
@@ -385,38 +774,85 @@ Metric<double> sleepSessionWindowedRmssd(
       rrMs.isEmpty ||
       rrTsMs.isEmpty ||
       rrMs.length != rrTsMs.length) {
-    return const Metric<double>.absent(
+    return const Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'invalid or empty RR session window',
     );
   }
 
+  if (rrTsMs.any((t) => !t.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite beat time',
+    );
+  }
+
   final buckets = <int, List<double>>{};
   final bucketsTs = <int, List<double>>{};
+  final inRr = <double>[];
+  final inTs = <double>[];
   for (var i = 0; i < rrMs.length; i++) {
     final tsSec = (rrTsMs[i] / 1000.0).round();
     if (tsSec < startSec || tsSec >= endSec) continue;
     final idx = ((tsSec - startSec) ~/ windowSec);
     (buckets[idx] ??= <double>[]).add(rrMs[i]);
     (bucketsTs[idx] ??= <double>[]).add(rrTsMs[i]);
+    inRr.add(rrMs[i]);
+    inTs.add(rrTsMs[i]);
   }
 
   if (buckets.isEmpty) {
-    return const Metric<double>.absent(
+    return const Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'no RR beats inside the session window',
     );
   }
+  final cov = rrCoverage(inRr, inTs);
+  if (cov != null && cov.overCounted) {
+    return Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: _overcountNote(cov),
+    );
+  }
 
   final rmssds = <double>[];
   final runs = <List<double>>[]; // pooled jitter floor — see [nocturnalRmssd]
+  final perWindow = <List<List<double>>>[];
+  final meanRr = <double>[];
+  var overCountedWindows = 0;
+  var thinWindows = 0;
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
-    final diffRuns = [
+    // The session-wide ratio above can be diluted below the ceiling by a gap
+    // elsewhere in the night while one stretch holds every beat twice. Each
+    // window is judged on its own too: its beats cannot bank more beat-time
+    // than the window has seconds — the session's last window may be cut
+    // short by [endSec] — plus its earliest beat's own interval, which began
+    // before its end stamp (as in [rrCoverage]). Dropped, not averaged in.
+    final winRr = buckets[idx]!, winTs = bucketsTs[idx]!;
+    final winStart = startSec + idx * windowSec;
+    final winSec = math.min(winStart + windowSec, endSec) - winStart;
+    var bankedMs = 0.0;
+    var lo = 0;
+    for (var i = 0; i < winRr.length; i++) {
+      if (winTs[i] < winTs[lo]) lo = i;
+      if (_rrCoverageCounts(winRr[i])) bankedMs += winRr[i];
+    }
+    final overhangMs = _rrCoverageCounts(winRr[lo]) ? winRr[lo] : 0.0;
+    if (bankedMs > kRrCoverageCeiling * (winSec * 1000 + overhangMs)) {
+      overCountedWindows++;
+      continue;
+    }
+    final rrRuns = [
       for (final r in _cleanWindowRuns(buckets[idx]!, bucketsTs[idx]!))
-        if (r.length >= 2) [for (var i = 1; i < r.length; i++) r[i] - r[i - 1]]
+        if (r.length >= 2) r
+    ];
+    final diffRuns = [
+      for (final r in rrRuns) [for (var i = 1; i < r.length; i++) r[i] - r[i - 1]]
     ];
     var ssd = 0.0;
     var nd = 0;
@@ -426,62 +862,76 @@ Metric<double> sleepSessionWindowedRmssd(
         nd++;
       }
     }
-    if (nd == 0) continue;
+    // A window with a handful of differences would otherwise weigh as much as
+    // a full one in the mean. Counted, not silently lost — the detail and the
+    // note both say how many. A window whose beats the cleaner reduced to no
+    // difference at all is the thinnest of them, and counts too.
+    if (nd < minDiffsPerWindow) {
+      thinWindows++;
+      continue;
+    }
     runs.addAll(diffRuns);
+    perWindow.add(diffRuns);
+    meanRr.add(mean([for (final r in rrRuns) ...r])!);
     rmssds.add(math.sqrt(ssd / nd));
   }
+
+  // Every note says what was dropped before the estimate, so a blank or a
+  // thin headline can be told apart from a jitter refusal.
+  final droppedWhy = [
+    if (thinWindows > 0)
+      '$thinWindows window(s) had fewer than $minDiffsPerWindow clean '
+          'successive differences',
+    if (overCountedWindows > 0)
+      '$overCountedWindows window(s) held more beat-time than elapsed time',
+  ];
+  final dropped = droppedWhy.isEmpty ? '' : ' (${droppedWhy.join('; ')})';
 
   // THE HEADLINE nightly RMSSD (→ ln_rmssd → readiness). When the differences
   // are noise, the honest output is no headline, not a plausible one — the
   // readiness composite already treats a null HRV driver as absent.
   final acf1 = nnDiffAcf1(runs);
-  if (acf1 != null && acf1 < kNnDiffAcf1Floor) {
-    return Metric<double>.absent(
+  final refused = _jitterRefused(acf1, runs);
+  if (rmssds.isEmpty && !refused) {
+    return Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: _jitterNote(acf1),
+      note: 'no valid 5-min windows for sleep-session RMSSD$dropped',
     );
   }
-  if (rmssds.isEmpty) {
-    return const Metric<double>.absent(
+  final kept = _keptWindows(acf1, refused, rmssds, perWindow, meanRr);
+  if (kept == null) {
+    return Metric<SessionRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: 'no valid 5-min windows for sleep-session RMSSD',
+      note: refused
+          ? '${_jitterNote(acf1!)}$dropped'
+          : '${_jitterNote(acf1!)}; no 5-min window clears it on its own'
+              '$dropped',
     );
   }
 
-  final meanRmssd = mean(rmssds)!;
-  final conf = ((rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
-      .clamp(0.3, 0.95);
-  return Metric<double>(
-    value: meanRmssd,
+  final meanRmssd = mean(kept.rmssds)!;
+  final conf = kept.byBreathing
+      ? 0.3
+      : ((kept.rmssds.length / 12.0).clamp(0.0, 1.0) * _acf1Quality(acf1))
+          .clamp(0.3, 0.95);
+  return Metric<SessionRmssd>(
+    value: SessionRmssd(
+      rmssd: meanRmssd,
+      windows: kept.rmssds.length,
+      overCountedWindows: overCountedWindows,
+      thinWindows: thinWindows,
+      minDiffsPerWindow: minDiffsPerWindow,
+      diffAcf1: acf1,
+      rrCoverage: cov?.coverage,
+    ),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows.',
+    note: 'sleep-session HRV: mean RMSSD over cleaned 5-min windows'
+        '$dropped.${kept.note}',
   );
-}
-
-/// Group NN intervals into consecutive 5-minute (300 000 ms) segments by beat
-/// time. Segments with <2 beats are dropped.
-List<List<double>> _fiveMinSegments(List<double> nn, List<double> times) {
-  const segMs = 300000.0;
-  final out = <List<double>>[];
-  if (nn.isEmpty) return out;
-  final t0 = times.first;
-  var curIdx = 0;
-  var cur = <double>[];
-  for (var i = 0; i < nn.length; i++) {
-    final idx = ((times[i] - t0) / segMs).floor();
-    if (idx != curIdx) {
-      if (cur.length >= 2) out.add(cur);
-      cur = <double>[];
-      curIdx = idx;
-    }
-    cur.add(nn[i]);
-  }
-  if (cur.length >= 2) out.add(cur);
-  return out;
 }
 
 /// Range-filter [300, 2000] ms + Malik-style ectopic rejection against a local

@@ -4,6 +4,10 @@ import '../../aggregate/primitives.dart';
 import '../types.dart';
 import 'readiness_lnrmssd.dart';
 
+// Plews et al. 2013, as implemented by readinessLnRmssd(). Retains the history
+// count and relevant prior-night suffix, then calls identical scoring
+// arithmetic. The aggregator uses positional history; calendar-date filtering
+// remains in the batch wrapper.
 /// Builds a mergeable lnRMSSD readiness summary over a nightly history column
 /// (oldest first, tonight last), matching [readinessLnRmssd] exactly.
 ///

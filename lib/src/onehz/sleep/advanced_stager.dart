@@ -36,13 +36,14 @@
 // Pure Dart, dart:math only.
 
 import 'dart:math' as math;
+import 'sleep_pipeline_hmm.dart';
 import '../../aggregate/aggregator.dart';
 import '../types.dart';
 import '../util.dart';
 import '../clinical/hrv_time.dart';
-import 'cardio_stager.dart' show cardioStager;
+import 'epoch_rows.dart';
 import 'cardio_row_cache.dart';
-import 'accounting.dart' show SleepStage;
+import 'band_offset.dart';
 import 'hypnogram.dart';
 export 'hypnogram.dart';
 import 'hypnogram_aggregator.dart';
@@ -54,6 +55,9 @@ import 'hypnogram_aggregator.dart';
 enum StagingMethod {
   /// DEFAULT. `cardioStager` — see cardio_stager.dart.
   cardio,
+
+  /// Experimental offline #628 model; not a medical device or PSG validation.
+  hmm628,
 
   /// Percentile-band classifier. Regression coverage only, not recommended.
   v1,
@@ -86,7 +90,10 @@ class GravTs {
   final double y;
   final double z;
   final bool valid;
-  const GravTs(this.ts, this.x, this.y, this.z, {this.valid = true});
+  /// Explicit sensor contact loss; unknown contact is not asserted as loss.
+  final bool contactLost;
+  const GravTs(this.ts, this.x, this.y, this.z,
+      {this.valid = true, this.contactLost = false});
 }
 
 /// RR interval: [ts] unix seconds, [rrMs].
@@ -139,7 +146,7 @@ class AdvancedSleepStager {
   // Morning-stillness (#531)
   static const int morningStillnessWindowMin = 180;
   static const double morningReonsetRestingHRMult = 0.90;
-  static const int bandStateAsleep = 2;
+  static const int bandStateAsleep = kBandStateSleep;
   static const double morningReonsetBandAsleepFrac = 0.6;
 
   // Off-wrist (#500)
@@ -311,12 +318,9 @@ class AdvancedSleepStager {
         continue;
       }
 
-      final stages = switch (method) {
-        StagingMethod.cardio =>
-          _stageSessionCardio(p.start, p.end, grav, hrS, rrS, rowCache),
-        StagingMethod.v2 => _stageSessionV2(p.start, p.end, grav, hrS, rrS),
-        StagingMethod.v1 => _stageSession(p.start, p.end, grav, hrS, rrS, respS),
-      };
+      final staged = _stageByMethod(
+          method, p.start, p.end, grav, hrS, rrS, respS, rowCache);
+      final stages = staged.stages;
       final eff = _efficiency(p.start, p.end, stages);
       final avgHrv = _sessionAvgHRV(p.start, p.end, rrS);
       sessions.add(SleepSession(
@@ -326,6 +330,8 @@ class AdvancedSleepStager {
         stages: stages,
         restingHr: resting,
         avgHrv: avgHrv,
+        stagingFallback: staged.fallback,
+        effectiveMethod: staged.effective,
       ));
 
       if (!continuesChain) {
@@ -351,9 +357,11 @@ class AdvancedSleepStager {
   /// whether it is sleep — we only label the stages within it. Staging itself
   /// runs through the SAME per-[method] code the auto path uses (see
   /// [StagingMethod]), so the single-source invariant holds (only the WINDOW
-  /// boundary is forced, never the staging math). Seconds with no data inside
-  /// [startSec, endSec) simply stay unstaged (wake) — honest about gaps,
-  /// never fabricated.
+  /// boundary is forced, never the staging math). With [StagingMethod.cardio]
+  /// (the default), seconds with no data inside [startSec, endSec) simply stay
+  /// unstaged ('unobserved') — honest about gaps, never fabricated. The legacy
+  /// v1/v2 methods do not make that guarantee (a no-data window comes back as
+  /// 'light').
   static SleepSession stageWindow(
     int startSec,
     int endSec,
@@ -364,12 +372,9 @@ class AdvancedSleepStager {
     StagingMethod method = StagingMethod.cardio,
     CardioRowCache? rowCache,
   }) {
-    final stages = switch (method) {
-      StagingMethod.cardio =>
-        _stageSessionCardio(startSec, endSec, gravity, hr, rr, rowCache),
-      StagingMethod.v2 => _stageSessionV2(startSec, endSec, gravity, hr, rr),
-      StagingMethod.v1 => _stageSession(startSec, endSec, gravity, hr, rr, resp),
-    };
+    final staged = _stageByMethod(
+        method, startSec, endSec, gravity, hr, rr, resp, rowCache);
+    final stages = staged.stages;
     return SleepSession(
       start: startSec,
       end: endSec,
@@ -377,6 +382,8 @@ class AdvancedSleepStager {
       stages: stages,
       restingHr: _sessionRestingHR(startSec, endSec, hr),
       avgHrv: _sessionAvgHRV(startSec, endSec, rr),
+      stagingFallback: staged.fallback,
+      effectiveMethod: staged.effective,
     );
   }
 
@@ -481,8 +488,13 @@ class AdvancedSleepStager {
   }
 
   static bool _hrSleepBandAcross(int a, int b, List<HrTs> hr, double? baseline) {
-    if (baseline == null) return false;
-    final seg = [for (final h in hr) if (h.ts > a && h.ts <= b) h.bpm];
+    if (baseline == null || b <= a || b - a > sparseBridgeGapMin * 60) {
+      return false;
+    }
+    // No interior-coverage requirement: segmentSleep only has HR on accel rows,
+    // so a real hole has HR at its two edges and nothing inside. segmentSleep
+    // stamps those seconds 'unobserved'; the 90-min cap above bounds the bridge.
+    final seg = [for (final h in hr) if (h.ts >= a && h.ts <= b) h.bpm];
     if (seg.isEmpty) return false;
     final meanHr = seg.reduce((x, y) => x + y) / seg.length;
     return meanHr <= baseline * hrSleepBandMult;
@@ -557,6 +569,7 @@ class AdvancedSleepStager {
 
   static List<_Period> _mergePeriods(List<_Period> periods, int mergeMinutes) {
     final thresholdS = mergeMinutes * 60;
+    const maxObservedGapS = maxGapMin * 60;
     final pending = [...periods];
     final merged = <_Period>[];
     var i = 0;
@@ -568,10 +581,13 @@ class AdvancedSleepStager {
         i += 1;
         continue;
       }
-      final hasPrev = i > 0 && merged.isNotEmpty;
-      final hasNext = i + 1 < pending.length;
+      // never smooth across a recording gap _buildRuns split on.
+      final hasPrev = merged.isNotEmpty &&
+          current.start - merged.last.end <= maxObservedGapS;
+      final hasNext = i + 1 < pending.length &&
+          pending[i + 1].start - current.end <= maxObservedGapS;
       final bridgesSame =
-          hasPrev && hasNext && pending[i - 1].stage == pending[i + 1].stage;
+          hasPrev && hasNext && merged.last.stage == pending[i + 1].stage;
       if (bridgesSame) {
         final prev = merged.removeLast();
         merged.add(_Period(prev.stage, prev.start, pending[i + 1].end));
@@ -585,6 +601,7 @@ class AdvancedSleepStager {
         merged.add(_Period(prev.stage, prev.start, current.end));
         i += 1;
       } else {
+        merged.add(current);
         i += 1;
       }
     }
@@ -723,7 +740,8 @@ class AdvancedSleepStager {
     if (inBed <= 0) return 0;
     var wake = 0;
     for (final s in stages) {
-      if (s.stage == 'wake') wake += s.end - s.start;
+      // Unstaged seconds are not sleep either; they stay in the denominator.
+      if (s.stage == 'wake' || s.stage == 'unobserved') wake += s.end - s.start;
     }
     final asleep = math.max(0, inBed - wake);
     return math.min(1.0, asleep / inBed);
@@ -1336,128 +1354,268 @@ class AdvancedSleepStager {
   /// claims to separate sleep from wake. A carry-forward bounded by it can
   /// therefore never manufacture a scorable sleep bout on its own. Seconds past
   /// the bound are UNSTAGED: they are left out of staging entirely and reported
-  /// as wake.
+  /// as unobserved.
   static const int maxAccelCarryForwardSec = 60;
 
-  /// DEFAULT staging path — delegates to `cardioStager` (cardio_stager.dart).
-  /// See the file header for why this is the default. `cardioStager` expects
-  /// per-SECOND-indexed [AccelSample]/HR arrays (index i == second i from
-  /// [start]), not the sparse timestamped [GravTs]/[HrTs] lists this file
-  /// otherwise uses — so this builds that dense array explicitly: accel gaps
-  /// carry the last-known vector forward for at most
-  /// [maxAccelCarryForwardSec]; HR gaps fill with 0, which `cardioStager`
-  /// already documents as its own "off-skin" contract — no fabrication either
-  /// way.
-  ///
-  /// HONESTY: seconds with no usable accelerometer are NOT staged. The window
-  /// is split at those gaps and each contiguous usable RUN is staged on its own
-  /// (so a dropout cannot pollute the neighbouring run's night baselines
-  /// either); the gap seconds, runs too short to stage, and a window where
-  /// `cardioStager` itself abstains all come back as WAKE — the "stay unstaged"
-  /// contract [stageWindow] documents. They must NEVER come back as 'light',
-  /// which is what a zero-data window used to report for its entire length.
+  // Dart's List.sort is not stable; index breaks ties so equal timestamps keep
+  // list order.
+  static List<T> _stableByTs<T>(List<T> xs, int Function(T) ts) {
+    final idx = List<int>.generate(xs.length, (i) => i)
+      ..sort((a, b) {
+        final c = ts(xs[a]).compareTo(ts(xs[b]));
+        return c != 0 ? c : a.compareTo(b);
+      });
+    return [for (final i in idx) xs[i]];
+  }
+
+  /// Default staging path: 30 s epochs anchored at the session onset (the first
+  /// valid accelerometer sample at or after [start], phase 0), as before the
+  /// combined bump. Samples outside [start, end) are not read, so features are
+  /// clipped at the session edges. A usable run that follows a dropout the 60 s
+  /// carry-forward cannot bridge re-anchors at its own first sample. Other gaps
+  /// and abstained runs remain unobserved.
   static List<StageSegment> _stageSessionCardio(int start, int end,
       List<GravTs> grav, List<HrTs> hr, List<RrTs> rr,
       [CardioRowCache? rowCache]) {
-    final span = end - start;
-    if (span <= 0) return const <StageSegment>[];
-    final epSec = epochS.round();
-    final minStageableSec = 3 * epSec;
-    if (span < minStageableSec) return [StageSegment(start, end, 'wake')];
-
-    // Invalid samples are NOT samples: they must not seed `usable`, and they
-    // must not become the source of a carry-forward. A second with only an
-    // undecoded vector falls through to the same unstaged→WAKE path as a
-    // second with no row at all (cardioStager itself never reads
-    // [AccelSample.valid], so it can only be protected here).
-    final gByTs = <int, GravTs>{
-      for (final g in grav)
-        if (g.valid && g.ts >= start && g.ts < end) g.ts: g
-    };
-    final hByTs = <int, HrTs>{for (final h in hr) if (h.ts >= start && h.ts < end) h.ts: h};
-    final accel = List<AccelSample>.filled(
-        span, AccelSample(start * 1000.0, 0, 0, 1.0));
-    final hr1hz = List<double>.filled(span, 0.0);
-    // usable[i] — second i has a real accel sample or a BOUNDED carry-forward.
-    final usable = List<bool>.filled(span, false);
-    var lastRealIdx = -1;
-    for (var i = 0; i < span; i++) {
-      final ts = start + i;
-      final g = gByTs[ts];
-      if (g != null) {
-        accel[i] = AccelSample(ts * 1000.0, g.x, g.y, g.z);
-        lastRealIdx = i;
-        usable[i] = true;
-      } else if (lastRealIdx >= 0 && (i - lastRealIdx) <= maxAccelCarryForwardSec) {
-        // Bounded carry-forward — see [maxAccelCarryForwardSec]. The TIMESTAMP
-        // is this second's, not the stale sample's: cardioStager centres its RR
-        // windows on `accel[mid].tsMs`, so copying the old sample wholesale
-        // mis-centred every RMSSD/LF-HF window inside a gap.
-        final p = accel[i - 1];
-        accel[i] = AccelSample(ts * 1000.0, p.x, p.y, p.z);
-        usable[i] = true;
-      }
-      hr1hz[i] = hByTs[ts]?.bpm ?? 0.0; // 0 = off-skin, cardioStager's own contract.
+    if (end <= start) return const [];
+    final g = [for (final g in grav) if (g.ts >= start && g.ts < end) g];
+    int? onset;
+    for (final x in g) {
+      if (x.valid && (onset == null || x.ts < onset)) onset = x.ts;
     }
+    final rows = EpochRows(
+        rowCache: rowCache, anchorMs: onset == null ? null : onset * 1000);
+    final beats = _stableByTs(
+        [for (final r in rr) if (r.ts >= start && r.ts < end) r], (r) => r.ts);
+    rows.fold(
+      // Stable by time: equal timestamps keep list order (the oracle's last-wins).
+      hr: [for (final h in _stableByTs([
+        for (final h in hr) if (h.ts >= start && h.ts < end) h
+      ], (h) => h.ts)) HrSample(h.ts * 1000.0, h.bpm)],
+      accel: [for (final x in _stableByTs(g, (x) => x.ts)) AccelSample(x.ts * 1000.0, x.x, x.y, x.z, valid: x.valid)],
+      rrMs: [for (final r in beats) r.rrMs],
+      rrTsMs: [for (final r in beats) r.ts * 1000.0],
+      throughMs: end * 1000 - 1, // the session end closes the data, as a clip
+    );
+    return rows.stageWindow(start, end);
+  }
 
-    final rSeg = [for (final r in rr) if (r.ts >= start && r.ts < end) r];
-    final rrMs = [for (final r in rSeg) r.rrMs];
-    final rrTsMs = [for (final r in rSeg) r.ts * 1000.0];
+  /// Features shared by experimental staging and nightly metadata. Context
+  /// never crosses explicit loss of contact or an unobserved accel interval.
+  /// Angle in degrees between two gravity vectors (0 when either is zero).
+  static double _turnDeg(GravTs a, GravTs b) {
+    final na = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    final nb = math.sqrt(b.x * b.x + b.y * b.y + b.z * b.z);
+    if (na == 0 || nb == 0) return 0;
+    final c = (a.x * b.x + a.y * b.y + a.z * b.z) / (na * nb);
+    return math.acos(c.clamp(-1.0, 1.0)) * 180 / math.pi;
+  }
 
-    // Everything not staged below stays 'wake' — the honest default.
-    final perSec = List<String>.filled(span, 'wake');
+  static List<HmmEpoch> measuredEpochs(int start, int end,
+      List<GravTs> gravity, List<HrTs> hr, List<RrTs> rr,
+      {CardioRowCache? rowCache}) {
+    if (end <= start) return const [];
+    final g = _stableByTs([
+      for (final x in gravity) if (x.ts >= start && x.ts < end) x
+    ], (x) => x.ts);
+    final out = <HmmEpoch>[];
+    final contactSeconds = {for (final x in g) if (x.contactLost) x.ts};
     var i = 0;
-    while (i < span) {
-      if (!usable[i]) {
+    while (i < g.length) {
+      if (!g[i].valid || g[i].contactLost) {
+        // Preserve the whole contact-loss epoch as a hole. The following run
+        // starts on the session grid, so later contact loss is also forwarded.
+        final epoch = start + ((g[i].ts - start) ~/ 30) * 30;
+        if (out.isEmpty || out.last.startSec != epoch) {
+          out.add(HmmEpoch(epoch, contactLost: g[i].contactLost));
+        }
         i++;
         continue;
       }
-      var j = i;
-      while (j < span && usable[j]) {
-        j++;
-      }
-      if ((j - i) >= minStageableSec) {
-        final result = cardioStager(
-          hr1hz.sublist(i, j),
-          accel.sublist(i, j),
-          rrMs: rrMs,
-          rrTsMs: rrTsMs,
-          rowCache: rowCache,
-        );
-        final nEpoch = result.base.stages.length;
-        for (var e = 0; e < nEpoch; e++) {
-          final label = switch (result.base.stages[e]) {
-            SleepStage.wake => 'wake',
-            SleepStage.rem => 'rem',
-            SleepStage.nrem => (e < result.deepFlag.length && result.deepFlag[e])
-                ? 'deep'
-                : 'light',
-          };
-          final lo = i + e * epSec;
-          // The last epoch absorbs the run's sub-epoch remainder, exactly as
-          // [_buildSegments] extends the final segment to the window end.
-          final hi = e == nEpoch - 1 ? j : math.min(j, lo + epSec);
-          for (var k = lo; k < hi; k++) {
-            perSec[k] = label;
-          }
+      var j = i + 1;
+      while (j < g.length && g[j].valid && !g[j].contactLost &&
+          g[j].ts - g[j - 1].ts == 1) { j++; }
+      final lo = g[i].ts, hi = g[j - 1].ts + 1;
+      final rows = EpochRows(anchorMs: lo * 1000, rowCache: rowCache);
+      final beats = _stableByTs([
+        for (final r in rr) if (r.ts >= lo && r.ts < hi && r.rrMs.isFinite) r
+      ], (r) => r.ts);
+      rows.fold(
+        hr: [for (final h in _stableByTs([
+          for (final h in hr) if (h.ts >= lo && h.ts < hi && h.bpm.isFinite) h
+        ], (h) => h.ts)) HrSample(h.ts * 1000.0, h.bpm)],
+        accel: [for (var k = i; k < j; k++)
+          AccelSample(g[k].ts * 1000.0, g[k].x, g[k].y, g[k].z)],
+        rrMs: [for (final r in beats) r.rrMs],
+        rrTsMs: [for (final r in beats) r.ts * 1000.0],
+        throughMs: hi * 1000 - 1,
+      );
+      // Epochs (on this run's 30-s grid) containing a turn of more than
+      // kMotionGateDeg between two consecutive seconds.
+      final movedEpochs = <int>{};
+      for (var k = i + 1; k < j; k++) {
+        if (_turnDeg(g[k - 1], g[k]) > kMotionGateDeg) {
+          movedEpochs.add(lo + ((g[k].ts - lo) ~/ 30) * 30);
         }
+      }
+      for (final row in rows.allRows()) {
+        final sec = row.startMs ~/ 1000;
+        // Any explicit loss in an epoch disqualifies the complete epoch,
+        // including a loss that starts after its first measured second.
+        final lost = Iterable<int>.generate(30, (k) => sec + k)
+            .any(contactSeconds.contains);
+        // A provisional row can end before its 30-second interval. Scoring
+        // it would stage missing seconds and preserve continuity across a
+        // non-aligned dropout. Abstain the entire incomplete epoch instead.
+        final complete = sec + 30 <= hi;
+        out.add(HmmEpoch(sec, hr: complete ? row.hr : null,
+            rmssd: complete ? row.rmssd : null, contactLost: lost,
+            moved: complete ? movedEpochs.contains(sec) : null));
       }
       i = j;
     }
+    out.sort((a, b) => a.startSec.compareTo(b.startSec));
+    return out;
+  }
 
-    // Coalesce the per-second labels into contiguous [StageSegment]s tiling
-    // [start, end) — same segment semantics [_buildSegments] produces.
-    final segments = <StageSegment>[];
-    var k = 0;
-    while (k < span) {
-      var m = k;
-      while (m < span && perSec[m] == perSec[k]) {
-        m++;
-      }
-      segments.add(StageSegment(start + k, start + m, perSec[k]));
-      k = m;
+  /// One staging dispatch for the detected-session and known-window paths, so
+  /// provenance cannot differ between them. [effective] is the method that
+  /// produced [stages]; [fallback] is set only when the requested HMM output was
+  /// replaced (hmm-fix-spec.md section 4).
+  static ({List<StageSegment> stages, String? fallback, StagingMethod effective})
+      _stageByMethod(StagingMethod method, int start, int end, List<GravTs> grav,
+          List<HrTs> hr, List<RrTs> rr, List<RespTs> resp, CardioRowCache? rowCache) {
+    switch (method) {
+      case StagingMethod.cardio:
+        return (
+          stages: _stageSessionCardio(start, end, grav, hr, rr, rowCache),
+          fallback: null,
+          effective: StagingMethod.cardio,
+        );
+      case StagingMethod.hmm628:
+        return _stageSessionHmm(start, end, grav, hr, rr, rowCache);
+      case StagingMethod.v2:
+        return (
+          stages: _stageSessionV2(start, end, grav, hr, rr),
+          fallback: null,
+          effective: StagingMethod.v2,
+        );
+      case StagingMethod.v1:
+        return (
+          stages: _stageSession(start, end, grav, hr, rr, resp),
+          fallback: null,
+          effective: StagingMethod.v1,
+        );
     }
-    return segments;
+  }
+
+  static ({List<StageSegment> stages, String? fallback, StagingMethod effective})
+      _stageSessionHmm(int start, int end, List<GravTs> grav, List<HrTs> hr,
+          List<RrTs> rr, CardioRowCache? rowCache) {
+    final epochs = measuredEpochs(start, end, grav, hr, rr, rowCache: rowCache);
+    final labels = hmm628Stages(epochs, sessionStartSec: start);
+    if (hmm628IsDegenerate(labels)) {
+      // One stage covers >= 90% of the classified epochs: the model carried no
+      // stage signal. Show the default staging, flagged. Cardio does not
+      // forward contact loss or unsupported accel, so those seconds are
+      // re-imposed as gaps, epoch-aligned like HMM's own holes. RMSSD-only gaps
+      // are left to cardio's remaining inputs (owner default).
+      final cardio = _stageSessionCardio(start, end, grav, hr, rr, rowCache);
+      return (
+        stages: _imposeSensorGaps(cardio, start, end, grav,
+            extraHoleSpans: [
+              for (final e in epochs)
+                if (hmm628IsArtifact(e)) (e.startSec, e.startSec + 30)
+            ]),
+        fallback: 'hmm628_degenerate',
+        effective: StagingMethod.cardio,
+      );
+    }
+    final out = <StageSegment>[];
+    var cursor = start;
+    void append(int lo, int hi, String label) {
+      if (hi <= lo) return;
+      if (out.isNotEmpty && out.last.end == lo && out.last.stage == label) {
+        out[out.length - 1] = StageSegment(out.last.start, hi, label);
+      } else { out.add(StageSegment(lo, hi, label)); }
+    }
+    for (var i = 0; i < epochs.length; i++) {
+      final lo = math.max(cursor, epochs[i].startSec);
+      if (lo > cursor) append(cursor, lo, 'unobserved');
+      final hi = math.min(end, epochs[i].startSec + 30);
+      append(lo, hi, labels[i]);
+      cursor = math.max(cursor, hi);
+    }
+    append(cursor, end, 'unobserved');
+    return (stages: out, fallback: null, effective: StagingMethod.hmm628);
+  }
+
+  /// Marks every 30-s epoch (on the session grid) that contains an explicit
+  /// contact-loss second, an invalid accel vector or a missing second as
+  /// 'unobserved', cutting
+  /// [segs] and keeping them a gap-free tiling of [start, end).
+  static List<StageSegment> _imposeSensorGaps(
+      List<StageSegment> segs, int start, int end, List<GravTs> grav,
+      {Iterable<(int, int)> extraHoleSpans = const []}) {
+    // An epoch is a hole when any of its seconds lacks a usable gravity sample:
+    // explicit contact loss, an undecoded vector, or no sample at all (HMM's own
+    // measuredEpochs breaks its chain at all three).
+    // Explicit loss and undecoded vectors take precedence over a valid sample
+    // at the same timestamp (measuredEpochs rejects such an epoch too).
+    final good = <int>{}, bad = <int>{};
+    for (final g in grav) {
+      if (g.ts < start || g.ts >= end) continue;
+      if (g.valid && !g.contactLost) {
+        good.add(g.ts);
+      } else {
+        bad.add(g.ts);
+      }
+    }
+    final holes = <int>{};
+    for (var t = start; t < end; t++) {
+      if (bad.contains(t) || !good.contains(t)) holes.add((t - start) ~/ 30);
+    }
+    // Rejected spans are in absolute seconds and may be off the session grid
+    // (a dropout re-anchors measured epochs): mark EVERY grid epoch they touch,
+    // so no rejected second stays staged.
+    for (final sp in extraHoleSpans) {
+      final lo = math.max(start, sp.$1), hi = math.min(end, sp.$2);
+      if (hi <= lo) continue;
+      for (var e = (lo - start) ~/ 30; e <= (hi - 1 - start) ~/ 30; e++) {
+        holes.add(e);
+      }
+    }
+    if (holes.isEmpty) return segs;
+    final epochs = holes.toList()..sort();
+    final spans = <(int, int)>[];
+    for (final e in epochs) {
+      final lo = start + e * 30, hi = math.min(end, lo + 30);
+      if (spans.isNotEmpty && spans.last.$2 == lo) {
+        spans[spans.length - 1] = (spans.last.$1, hi);
+      } else {
+        spans.add((lo, hi));
+      }
+    }
+    final out = <StageSegment>[];
+    void add(int lo, int hi, String stage) {
+      if (hi <= lo) return;
+      if (out.isNotEmpty && out.last.end == lo && out.last.stage == stage) {
+        out[out.length - 1] = StageSegment(out.last.start, hi, stage);
+      } else {
+        out.add(StageSegment(lo, hi, stage));
+      }
+    }
+    for (final seg in segs) {
+      var cur = seg.start;
+      for (final sp in spans) {
+        if (sp.$2 <= cur || sp.$1 >= seg.end) continue;
+        add(cur, math.max(cur, sp.$1), seg.stage);
+        add(math.max(cur, sp.$1), math.min(seg.end, sp.$2), 'unobserved');
+        cur = math.min(seg.end, sp.$2);
+      }
+      add(cur, seg.end, seg.stage);
+    }
+    return out;
   }
 
   static List<StageSegment> _stageSession(int start, int end, List<GravTs> grav,

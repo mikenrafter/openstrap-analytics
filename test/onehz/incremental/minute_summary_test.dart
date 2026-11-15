@@ -21,6 +21,7 @@ void _summaryClose(
   final strain = strainScoreMetric(trimp.value,
       wakeMinutes: hr.length.toDouble(),
       quietHrr: quietHrr,
+      quietSettled: false,
       female: sex == Sex.female);
   metricEnvelope(actual.trimp, trimp);
   numberClose(actual.trimp.value, trimp.value);

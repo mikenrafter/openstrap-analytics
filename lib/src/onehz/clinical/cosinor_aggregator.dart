@@ -180,6 +180,12 @@ class _CosinorStats
   }
 }
 
+// Halberg & Nelson 1979 single-component cosinor. Centered co-moments solve the
+// same least-squares model. cosinor() now runs this aggregator in one slice.
+// Floating-point order differs from the former batch solver; the relative
+// determinant gate replaces its absolute 1e-12 pivot gate. See
+// test/aggregate/cosinor_aggregator_test.dart for numerical tolerances and phase
+// degeneracies.
 /// Builds a mergeable single-component cosinor fit over [TimedValues].
 Aggregator<_CosinorState, TimedValues, Metric<CosinorFit>> cosinorAggregator({
   double periodHours = 24,

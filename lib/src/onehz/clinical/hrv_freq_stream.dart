@@ -53,6 +53,9 @@ List<double> _welchGrid(double lo, double hi, double seg, double oversample) {
   return freqGrid(lo, hi, ((hi - lo) / df).ceil() + 1);
 }
 
+// Laguna, Moody & Mark 1998 / Bigger 1992 HRV with Welch 1967 segmentation, as
+// in hrvFreq(). Closed segments use the exact shared segment function; open data
+// is evaluated provisionally with the same origin, grid and segment order.
 /// Exact, append-only Welch state for [hrvFreq].
 class HrvFreqStream {
   final double oversample;
@@ -142,6 +145,11 @@ class HrvFreqStream {
     }
     if (nnMs.isEmpty) return;
     final incoming = [for (final t in nnTimesMs) t / 1000.0];
+    // Checked before any state changes: an infinite time would make the band
+    // settle endless, and a fold cannot be undone.
+    if (incoming.any((t) => !t.isFinite)) {
+      throw ArgumentError('beat times must be finite');
+    }
     if (!_nondecreasing(incoming) ||
         (_last != null && incoming.first < _last!)) {
       throw StateError('beat times must be non-decreasing');
@@ -171,7 +179,10 @@ class HrvFreqStream {
     if (tailNnMs.length != tailNnTimesMs.length) {
       throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
     }
-    if (_n + tailNnMs.length < 16 || _first == null) {
+    // A non-finite tail time: the batch's own answer (it abstains).
+    if (_n + tailNnMs.length < 16 ||
+        _first == null ||
+        tailNnTimesMs.any((t) => !(t / 1000.0).isFinite)) {
       return hrvFreq([..._nn, ...tailNnMs],
           [..._times.map((x) => x * 1000.0), ...tailNnTimesMs],
           artifactFraction: artifactFraction,

@@ -328,7 +328,7 @@ void main() {
   });
 
   group('settle horizon and state size', () {
-    test('settled edge lags the input by <= 110 beats outside artefact runs',
+    test('capped settled edge includes the cap decision and its left influence',
         () {
       // Dirty series: only check the bound where the oracle's FINAL classes of
       // the 5 beats just before the 90-beat look-ahead are all normal. Then no
@@ -366,7 +366,7 @@ void main() {
         if (quiet) {
           checked++;
           maxLag = math.max(maxLag, to - settled);
-          expect(to - settled, lessThanOrEqualTo(110),
+          expect(to - settled, lessThanOrEqualTo(280),
               reason: 'to=$to settled=$settled');
         }
       }
@@ -391,7 +391,7 @@ void main() {
         final to = math.min(rr.length, at + 37);
         run.fold(rr.sublist(at, to), ts.sublist(at, to));
         if (to >= 91) {
-          expect(to - run.c.settledBeats, lessThanOrEqualTo(92),
+          expect(to - run.c.settledBeats, lessThanOrEqualTo(248),
               reason: 'to=$to');
         }
       }
@@ -451,9 +451,9 @@ void main() {
 
     test('checkpoint is versioned and typed like the other states', () {
       final json = RrCorrector().toJson();
-      expect(json['version'], 1);
+      expect(json['version'], 2);
       expect(json['type'], 'RrCorrector');
-      expect(() => RrCorrector.fromJson({...json, 'version': 2}),
+      expect(() => RrCorrector.fromJson({...json, 'version': 1}),
           throwsFormatException);
       expect(() => RrCorrector.fromJson({...json, 'type': 'Other'}),
           throwsFormatException);

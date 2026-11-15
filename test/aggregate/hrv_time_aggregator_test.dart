@@ -73,6 +73,11 @@ void main() {
       'slow beats spanning many bins': hrvSeries(Rng(7), 380, 2, gapP: .02),
       'many holes': hrvSeries(Rng(8), 200, 0, gapP: .3),
       'alternating runs': _alternatingRuns(4),
+      'RSA at a slow heart, exempt from the jitter floor':
+          hrvSeries(Rng(61), 900, 3, gapP: 0),
+      'RSA at a slow heart with holes': hrvSeries(Rng(62), 1500, 3, gapP: .004),
+      'refused, published from a breathing line steady in Hz':
+          hrvSeries(Rng(63), 4000, 4, gapP: 0),
       'a hole of several bins': hrvBeats([
         for (var i = 0; i < 40; i++)
           (nnMs: 800.0, timeMs: hrvT0 + (i + 1) * 800.0),
@@ -127,6 +132,41 @@ void main() {
       expect(v.diffAcf1, isNull); // fewer than 30 diffs
       expect(v.sdann, isNull); // a single 5-minute segment
       expect(v.sdnnIndex, isNull);
+    });
+  });
+
+  group('below the jitter floor (the batch reads the difference runs)', () {
+    test('the series reach the paths they name', () {
+      final exempt = hrvTime(
+          hrvSeries(Rng(61), 900, 3, gapP: 0).nnMs.toList(),
+          nnTimesMs: hrvSeries(Rng(61), 900, 3, gapP: 0).timeMs.toList());
+      expect(exempt.value!.diffAcf1, lessThan(kNnDiffAcf1Floor));
+      expect(exempt.value!.rmssd, isNotNull);
+      expect(exempt.note, startsWith('PRV not ECG-HRV'));
+      final b = hrvSeries(Rng(63), 4000, 4, gapP: 0);
+      final fallback = hrvTime(b.nnMs.toList(), nnTimesMs: b.timeMs.toList());
+      expect(fallback.value!.diffAcf1, lessThan(kNnDiffAcf1Floor));
+      expect(fallback.value!.rmssd, isNotNull);
+      expect(fallback.note, contains('breathing line steady in Hz'));
+      // Without times the same series is refused (no windows to fall back on).
+      expect(hrvTime(b.nnMs.toList()).value!.rmssd, isNull);
+    });
+
+    test('random slow-heart and breathing-line series: whole, chunked, sliced',
+        () {
+      final r = Rng(0x5C14);
+      for (var t = 0; t < 16; t++) {
+        final mode = 3 + t % 2;
+        final n = mode == 3 ? r.intIn(600, 1600) : r.intIn(3800, 4400);
+        final beats = hrvSeries(r, n, mode, gapP: r.nextBool() ? 0 : .003);
+        for (final ga in [true, false]) {
+          final want = hrvExpected(beats, gapAware: ga);
+          final a = _agg(beats, gapAware: ga);
+          expectHrvParity(a.run(beats), want, 'case $t n=$n ga=$ga whole');
+          _expectAllPaths(
+              a, beats, randomBounds(r, n), want, 'case $t n=$n ga=$ga');
+        }
+      }
     });
   });
 
@@ -329,6 +369,28 @@ void main() {
       ];
     }
 
+    test('below the jitter floor, gap aware and not, is lawful', () {
+      final r = Rng(0x5D05);
+      final group = [
+        hrvSeries(Rng(61), 900, 3, gapP: 0),
+        hrvSeries(r, 1200, 3, gapP: .004),
+        hrvSeries(Rng(63), 4000, 4, gapP: 0),
+      ];
+      // These series are thousands of beats long (the exemption needs 20 Welch
+      // segments in a run, the fallback 12 five-minute windows), so the split
+      // and associativity laws are checked at 10 split points, not 64.
+      for (final c in group) {
+        for (final agg in [
+          hrvTimeAggregator(originMs: hrvOrigin(c)),
+          hrvTimeAggregator(gapAware: false),
+        ]) {
+          final v = checkLaws(agg, [c], equals: hrvEqAll, maxSplits: 10);
+          expect(v, isEmpty,
+              reason: v.map((x) => '${x.law}: ${x.detail}').join('\n'));
+        }
+      }
+    });
+
     test('gap aware is lawful (cases grouped by origin)', () {
       final byOrigin = <double?, List<Beats>>{};
       for (final c in cases(0x5D01)) {
@@ -398,13 +460,16 @@ void main() {
   group('checkpoint relationships (beat counts across the children)', () {
     final beats = hrvSeries(Rng(0x4A7), 60, 1, gapP: .08);
     final agg = hrvTimeAggregator(originMs: hrvOrigin(beats));
-    // State: [[diffs, lags], [levels, bins]]; diffs and lags are Lookback
-    // states ({length, first, last, inner}); levels is a Moments map and bins
-    // is {fiveMinuteBin: Moments}.
-    Map diffs(Object? s) => ((s as List)[0] as List)[0] as Map;
-    Map lags(Object? s) => ((s as List)[0] as List)[1] as Map;
-    Map levels(Object? s) => ((s as List)[1] as List)[0] as Map;
-    Map bins(Object? s) => ((s as List)[1] as List)[1] as Map;
+    // State (version 2): [core, evidence]; core is [[diffs, lags], [levels,
+    // bins]]; diffs and lags are Lookback states ({length, first, last,
+    // inner}); levels is a Moments map and bins is {fiveMinuteBin: Moments};
+    // evidence is the jitter-gate evidence map.
+    List core(Object? s) => (s as List)[0] as List;
+    Map diffs(Object? s) => (core(s)[0] as List)[0] as Map;
+    Map lags(Object? s) => (core(s)[0] as List)[1] as Map;
+    Map levels(Object? s) => (core(s)[1] as List)[0] as Map;
+    Map bins(Object? s) => (core(s)[1] as List)[1] as Map;
+    Map evidence(Object? s) => (s as List)[1] as Map;
 
     test('both lookbacks must have seen the same number of beats', () {
       expectDamagedCheckpointRefused(agg, beats, (s) {
@@ -438,6 +503,45 @@ void main() {
         (lags(s)['inner'] as Map)['pairs'] = 59;
         return s;
       });
+    });
+    test('a version 1 checkpoint (no jitter evidence) is refused whole', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) => core(s));
+    });
+    test('evidence of another type or version is refused', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['version'] = 2;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['type'] = 'Other';
+        return s;
+      });
+    });
+    test('evidence counting other beats or differences than the core', () {
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['n'] = (evidence(s)['n'] as int) - 1;
+        return s;
+      });
+      expectDamagedCheckpointRefused(agg, beats, (s) {
+        evidence(s)['nd'] = (evidence(s)['nd'] as int) - 1;
+        return s;
+      });
+    });
+    test('evidence whose parts disagree is refused', () {
+      for (final damage in <void Function(Map)>[
+        (e) => (e['head'] as Map)['len'] = ((e['head'] as Map)['len'] as int) + 1,
+        (e) => (e['head'] as Map)['anchored'] = true,
+        (e) => (e['head'] as Map)['phases'] = <Object?>[],
+        (e) => ((e['head'] as Map)['cnt'] as List)[0] = 9999,
+        (e) => (e['wins'] as List).removeLast(),
+        (e) => e['headRun'] = null,
+        (e) => e['winNd'] = (e['nd'] as int) + 1,
+      ]) {
+        expectDamagedCheckpointRefused(agg, beats, (s) {
+          damage(evidence(s));
+          return s;
+        });
+      }
     });
     test('a consistent checkpoint restores', () {
       expect(

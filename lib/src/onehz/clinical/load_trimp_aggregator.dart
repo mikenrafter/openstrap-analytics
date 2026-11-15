@@ -10,6 +10,13 @@ const _trimpInputs = ['hr_per_min', 'resting_hr', 'max_hr'];
 const _trimpNote =
     'Banister TRIMP needs finite measured RHR and HRmax (HRmax>RHR)';
 
+// Morton, R. H., Fitz-Clarke, J. R., Banister, E. W. (1990). Modeling human
+// performance in running. Journal of Applied Physiology 69(3):1171-1177.
+// Supports HR-reserve exponential TRIMP weighting and the impulse-response
+// model; the sex-specific coefficients are retained from Banister 1991.
+// banisterTrimp() runs this per-minute HR-
+// reserve sum in one slice. Merge order changes rounding; checked relative
+// tolerance is 1e-12. Retains ESTIMATE tier and confidence 0.6.
 /// Builds a mergeable Banister TRIMP summary over per-minute mean HR values.
 ///
 /// The resulting metric has the same missing-input and empty-input behaviour as
@@ -19,6 +26,10 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
   required double? maxHr,
   required Sex sex,
 }) {
+  // `maxHr <= restingHr` is FALSE when either is NaN, so the finiteness checks
+  // are load-bearing: a NaN anchor otherwise makes a NaN reserve, and every
+  // clamp below (`hrr < 0`, `hrr > 1`) is false for NaN too, so the sum comes
+  // out NaN inside a PRESENT metric.
   final anchorsValid = restingHr != null &&
       maxHr != null &&
       restingHr.isFinite &&
@@ -29,6 +40,8 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
     Count<DoubleColumn>(),
     SumOf<DoubleColumn>((batch) => batch.values, (hr) {
       if (!anchorsValid || !hr.isFinite || hr <= 0) return double.nan;
+      // ONE Banister implementation for the whole package: the sex-specific
+      // weighting factor y lives in [StrainScorer.banisterY]. 1 minute each.
       var hrr = (hr - restingHr) / reserve;
       if (hrr < 0) hrr = 0.0;
       if (hrr > 1) hrr = 1.0;
@@ -53,6 +66,17 @@ Aggregator<dynamic, DoubleColumn, Metric<double>> banisterTrimpAggregator({
   });
 }
 
+// Banister, E. W., Calvert, T. W., Savage, M. V., Bach, T. (1975). A systems
+// model of training for athletic performance. Australian Journal of Sports
+// Medicine 7:57-61. See also Morton, Fitz-Clarke & Banister 1990 above.
+// CTL/ATL are a discrete EWMA fitness/fatigue adaptation, TSB = CTL - ATL;
+// 42/7-day defaults and bounded-prefix priming are implementation choices.
+// With a=1-lambda, f_y(f_x(c))=a*a*c+a*lambda*x+lambda*y, algebraically
+// equal to two EWMA recurrence steps.
+// Banister impulse-response model, now also the ctlAtlTsb() one-slice path. The
+// identical bounded-prefix prime seeds affine compositions of the same EWMA
+// recurrence. Composition is algebraically equal; checked absolute and relative
+// tolerances are 1e-9.
 /// Builds a mergeable CTL/ATL/TSB summary over a daily-TRIMP column (oldest
 /// first), matching [ctlAtlTsb].
 ///

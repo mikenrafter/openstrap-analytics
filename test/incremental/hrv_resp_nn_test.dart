@@ -27,6 +27,15 @@ RrData _realFirstHours(double hours) {
   return RrData(r.rr.sublist(0, n), r.ts.sublist(0, n));
 }
 
+/// Equal null-ness and within 1e-9 relative (the aggregator's stated
+/// tolerance; hrvTime now runs hrvTimeAggregator).
+void _near9(double? got, double? want, String reason) {
+  expect(got == null, want == null, reason: reason);
+  if (got != null && want != null) {
+    expect(got, closeTo(want, 1e-9 * want.abs()), reason: reason);
+  }
+}
+
 void main() {
   final errSdnn = Err(), errAcf = Err(), errConf = Err();
   var hrvChecks = 0;
@@ -66,11 +75,12 @@ void main() {
             if (!want.present) return;
             final a = got.value!, b = want.value!;
             expect(a.nBeats, b.nBeats);
-            // bit-identical
+            // rmssd / pnn50 bit-identical; sdann / sdnnIndex 1e-9 relative
+            // (hrvTime now runs hrvTimeAggregator; was exact).
             expect(a.rmssd, b.rmssd, reason: 'rmssd');
             expect(a.pnn50, b.pnn50, reason: 'pnn50');
-            expect(a.sdann, b.sdann, reason: 'sdann');
-            expect(a.sdnnIndex, b.sdnnIndex, reason: 'sdnnIndex');
+            _near9(a.sdann, b.sdann, 'sdann');
+            _near9(a.sdnnIndex, b.sdnnIndex, 'sdnnIndex');
             // bounded error
             errSdnn.add(a.sdnn, b.sdnn);
             errAcf.add(a.diffAcf1, b.diffAcf1);

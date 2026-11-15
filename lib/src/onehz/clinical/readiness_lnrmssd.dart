@@ -15,14 +15,17 @@ import '../util.dart';
 class ReadinessLnRmssd {
   final double lnRmssdToday;
   final double rolling7Mean;
+  /// The window's MEDIAN — the centre z/SWC/band are taken against.
+  final double rolling7Median;
   final double cvPct; // CV of lnRMSSD over the window
-  final double? z; // (today - rollingMean)/rollingSD
-  final double? swc; // smallest worthwhile change (0.5×SD, Plews-style)
+  final double? z; // (today - rollingMedian)/robustSD
+  final double? swc; // smallest worthwhile change (0.5×robust SD, Plews-style)
   final String band; // 'suppressed' | 'normal' | 'elevated'
   final bool saturationFlag;
   const ReadinessLnRmssd({
     required this.lnRmssdToday,
     required this.rolling7Mean,
+    required this.rolling7Median,
     required this.cvPct,
     required this.z,
     required this.swc,
@@ -32,6 +35,7 @@ class ReadinessLnRmssd {
   Map<String, dynamic> toJson() => {
         'ln_rmssd_today': round6(lnRmssdToday),
         'rolling7_mean': round6(rolling7Mean),
+        'rolling7_median': round6(rolling7Median),
         'cv_pct': round6(cvPct),
         if (z != null) 'z': round6(z!),
         if (swc != null) 'swc': round6(swc!),
@@ -48,8 +52,12 @@ const int readinessLnRmssdMinNights = 4;
 /// [historyLnRmssd] trailing nightly ln(RMSSD), OLDEST→NEWEST, INCLUDING tonight
 /// as the last element. [meanNnTodayMs] tonight's mean NN (for the saturation
 /// guard; optional). [windowDays] rolling window (default 7).
+/// [dates] optional `yyyy-MM-dd` labels parallel to [historyLnRmssd]. Pass
+/// them: without them the window is the last [windowDays] ROWS, which after a
+/// wear gap are nights from weeks ago (see [calendarDays]).
 Metric<ReadinessLnRmssd> readinessLnRmssd(
   List<double> historyLnRmssd, {
+  List<String>? dates,
   double? meanNnTodayMs,
   int windowDays = 7,
   int minNights = readinessLnRmssdMinNights,
@@ -59,6 +67,25 @@ Metric<ReadinessLnRmssd> readinessLnRmssd(
   }
   final n = historyLnRmssd.length;
   final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
+  // all-or-nothing: calendarDays falls back to the row index for a label it
+  // can't parse, and an index compared against epoch days is meaningless.
+  if (dates != null &&
+      dates.length == n &&
+      dates.every((d) => DateTime.tryParse(d) != null)) {
+    final day = calendarDays(dates);
+    return readinessLnRmssdFromSuffix(
+      n,
+      [
+        for (var i = 0; i < n - 1; i++)
+          if (day[i] < day[n - 1] && day[n - 1] - day[i] <= windowDays)
+            historyLnRmssd[i],
+        historyLnRmssd.last,
+      ],
+      meanNnTodayMs: meanNnTodayMs,
+      windowDays: windowDays,
+      minNights: minNights,
+    );
+  }
   if (windowDays >= 0) {
     return readinessLnRmssdFromSuffix(
       n,
@@ -94,6 +121,10 @@ Metric<ReadinessLnRmssd> _tooShort(int n, int minNights) =>
 /// Shared by [readinessLnRmssd] and the aggregator (not public API): the
 /// arithmetic after the length check, given the history length [n] and its
 /// last min(windowDays + 1, n) values [suffix] (tonight last).
+// Plews et al. 2013, as implemented by readinessLnRmssd(). Retains the history
+// count and relevant prior-night suffix, then calls identical scoring
+// arithmetic. The aggregator uses positional history; calendar-date filtering
+// remains in the batch wrapper.
 Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
   int n,
   List<double> suffix, {
@@ -109,13 +140,15 @@ Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
   // suppressed/elevated night actually is, worst right when the window is
   // smallest (minNights). the baseline has to be strictly prior nights.
   final priorWindow = suffix.sublist(0, suffix.length - 1);
-  if (priorWindow.isEmpty) {
-    // only happens if minNights got set to 1 somewhere - there's no prior
-    // night to build a baseline from yet, so same as not enough history.
+  if (priorWindow.isEmpty || priorWindow.length < minNights - 1) {
+    // empty only if minNights got set to 1 somewhere; short when a wear gap
+    // left too few nights inside the calendar window. either way there's no
+    // baseline yet, same as not enough history.
     return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: needBaselineNote(have: n, need: minNights + 1),
+      note: needBaselineNote(
+          have: priorWindow.length + 1, need: minNights < 2 ? 2 : minNights),
     );
   }
   final m = mean(priorWindow)!;
@@ -135,14 +168,25 @@ Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
     );
   }
   final cv = (sd / m).abs() * 100;
-  final z = sd > 0 ? (today - m) / sd : null;
+  // ROBUST CENTRE AND SPREAD for the decision band. One illness night in a
+  // seven-night window both drags the mean down and inflates the SD, so a
+  // genuinely low night reads "normal": on a real window holding a 35.5 ms
+  // night, mean 4.465 / SD 0.405 put a 4.478 night (88 ms) inside the band,
+  // while the other six nights sat at 4.40–4.79. Median + MAD (×1.4826) are
+  // what the window looks like without that one night. MAD collapses only when
+  // more than half the window is identical; the SD stands in then. The CV
+  // above stays the classic SD/mean (Plews' published CV).
+  final centre = median(priorWindow)!;
+  final robustSd = mad(priorWindow)!;
+  final spread = robustSd > 0 ? robustSd : sd;
+  final z = spread > 0 ? (today - centre) / spread : null;
   // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
-  final swc = 0.5 * sd;
+  final swc = 0.5 * spread;
 
   final String band;
-  if (today < m - swc) {
+  if (today < centre - swc) {
     band = 'suppressed';
-  } else if (today > m + swc) {
+  } else if (today > centre + swc) {
     band = 'elevated';
   } else {
     band = 'normal';
@@ -158,6 +202,7 @@ Metric<ReadinessLnRmssd> readinessLnRmssdFromSuffix(
     value: ReadinessLnRmssd(
       lnRmssdToday: today,
       rolling7Mean: m,
+      rolling7Median: centre,
       cvPct: cv,
       z: z,
       swc: swc,

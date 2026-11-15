@@ -57,7 +57,7 @@ void main() {
     final input = hr.sublist(0, n), walking = cadence.sublist(0, n);
     final load = banisterTrimp(input, restingHr: 55, maxHr: 185, sex: Sex.male);
     final strain = strainScoreMetric(load.value,
-        wakeMinutes: n.toDouble(), quietHrr: .12, female: false);
+        wakeMinutes: n.toDouble(), quietHrr: .12, quietSettled: false, female: false);
     final energy = Calories.dailyEnergy(input,
         profile: profile, hrmax: 185, restingHr: 55, cadenceSpmPerMin: walking);
     final series = Calories.minuteEnergy(input,
@@ -81,7 +81,7 @@ void main() {
     final input = hr.sublist(0, n), walking = cadence.sublist(0, n);
     final load = banisterTrimp(input, restingHr: 55, maxHr: 185, sex: Sex.male);
     final strain = strainScoreMetric(load.value,
-        wakeMinutes: n.toDouble(), quietHrr: .12, female: false);
+        wakeMinutes: n.toDouble(), quietHrr: .12, quietSettled: false, female: false);
     final energy = Calories.dailyEnergy(input,
         profile: profile, hrmax: 185, restingHr: 55, cadenceSpmPerMin: walking);
     return MinuteMetrics(trimp: load, strain: strain, energy: energy);

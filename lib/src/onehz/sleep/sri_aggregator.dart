@@ -199,6 +199,9 @@ class _GroupedPairWindows
 ///
 /// The Lookback window has one row from each of two adjacent clock days. Its
 /// last row determines the later-day key used by GroupBy.
+// Phillips et al. 2017 SRI, as in phillipsSri(). Lookback pairs epochs exactly
+// one day apart; integer agreement/case counts preserve the formula, validity
+// mask, pair eligibility and complete-day truncation.
 Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
   int epochsPerDay, {
   int? minPairCases,

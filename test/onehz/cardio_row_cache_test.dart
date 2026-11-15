@@ -521,8 +521,16 @@ void main() {
       final midS = winA0 + 1800;
       final ra = staged(base, a, onset: winA0, offset: midS);
       final rb = staged(base, b, onset: midS, offset: winA1);
+      // Wall-clock rows whose context is shared by both windows have the
+      // same key, including a row at the seam. Union must deduplicate them.
+      final unionKeys = {
+        for (final cache in [a, b])
+          for (final row in cache.toJson()['rows'] as List)
+            '${row['startSec']}:${row['epochSec']}:${row['fingerprint']}',
+      };
       a.merge(b);
-      expect(a.length, ra.misses + rb.misses);
+      expect(a.length, unionKeys.length);
+      expect(a.length, lessThanOrEqualTo(ra.misses + rb.misses));
       final w1 = staged(base, a, onset: winA0, offset: midS);
       final w2 = staged(base, a, onset: midS, offset: winA1);
       expect(w1.misses, 0);

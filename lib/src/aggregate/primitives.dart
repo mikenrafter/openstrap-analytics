@@ -1,3 +1,8 @@
+// Mergeable sums, centered moments and affine EWMA composition reformulate
+// the corresponding batch arithmetic. Composition is algebraically equal;
+// floating-point evaluation order can differ. Count/min/max and structural
+// wrappers are definitional operations, not additional physiological estimators.
+
 import 'dart:typed_data';
 
 import '../onehz/incremental_core.dart' show RunningMoments;
@@ -287,6 +292,8 @@ class Max<B extends Batch<B>> extends Aggregator<double?, B, double?> {
   double? decodeState(Object? json) => decodeDoubleOrNull(json);
 }
 
+// Delegates updates/removal to Welford 1962 and partition merging to Chan,
+// Golub & LeVeque 1983; full references and clamp details: RunningMoments.
 /// Centered moments of non-missing double column values.
 class Moments<B extends Batch<B>>
     extends Aggregator<RunningMoments, B, RunningMoments> {
@@ -700,6 +707,8 @@ class _AffineState {
   double offset = 0;
 }
 
+// Algebraically equal to the EWMA recurrence: f_x(c)=a*c+lambda*x, a=1-lambda;
+// f_y(f_x(c))=a*a*c+a*lambda*x+lambda*y. Floating-point order may differ.
 /// An exponentially weighted moving average, as the composed affine map of the
 /// running value: each row x applies c -> (1 - lambda) * c + lambda * x.
 ///

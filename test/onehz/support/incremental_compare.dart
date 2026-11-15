@@ -81,11 +81,13 @@ void minuteClose(MinuteMetrics actual, List<int> keys, List<double> hr,
     Sex sex = Sex.male,
     WorkoutUserProfile? profile,
     int dayMinutes = 1440,
-    double? quietHrr = .12}) {
+    double? quietHrr = .12,
+    bool quietSettled = false}) {
   final trimp = banisterTrimp(hr, restingHr: rhr, maxHr: maxHr, sex: sex);
   final strain = strainScoreMetric(trimp.value,
       wakeMinutes: hr.length.toDouble(),
       quietHrr: quietHrr,
+      quietSettled: quietSettled,
       female: sex == Sex.female);
   metricEnvelope(actual.trimp, trimp);
   numberClose(actual.trimp.value, trimp.value);

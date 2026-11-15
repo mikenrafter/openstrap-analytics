@@ -43,7 +43,9 @@ double _powerAt(LombScargle ls, double fHz) {
 // ===========================================================================
 class _SegCounts {
   final List<double> peaks = [], peakHz = [], peakPwr = [];
-  int atCeiling = 0, belowBand = 0, thin = 0;
+  int atCeiling = 0, belowBand = 0, thin = 0, gappy = 0;
+  // The at-ceiling sub-windows' own ceilings, br/min (min and max).
+  double ceilingLo = double.infinity, ceilingHi = 0.0;
   _SegCounts copy() {
     final c = _SegCounts();
     c.peaks.addAll(peaks);
@@ -52,14 +54,44 @@ class _SegCounts {
     c.atCeiling = atCeiling;
     c.belowBand = belowBand;
     c.thin = thin;
+    c.gappy = gappy;
+    c.ceilingLo = ceilingLo;
+    c.ceilingHi = ceilingHi;
     return c;
   }
 }
+
+/// [a] and [b] sorted by [double.compareTo] (as `median` sorts), merged.
+List<double> _mergeSorted(List<double> a, List<double> b) {
+  if (b.isEmpty) return a;
+  if (a.isEmpty) return b;
+  final out = List<double>.filled(a.length + b.length, 0);
+  var i = 0, j = 0, k = 0;
+  while (i < a.length && j < b.length) {
+    out[k++] = a[i].compareTo(b[j]) <= 0 ? a[i++] : b[j++];
+  }
+  while (i < a.length) {
+    out[k++] = a[i++];
+  }
+  while (j < b.length) {
+    out[k++] = b[j++];
+  }
+  return out;
+}
+
+/// Usable sub-windows at which the batch's confidence reaches full weight
+/// (resp_rate.dart `_rsaFullWeightSubwindows`).
+const double _rsaFullWeightSubwindows = 23;
 
 class RsaWelchState {
   static const double segSec = rsaSegmentSec; // 300
   // buffer of settled beats (ms and s), from the next unfinished sub-window
   List<double> _tMs = [], _ts = [], _nn = [];
+  // Every NN folded, sorted: the whole-input ceiling is the MEDIAN beat
+  // interval, which needs all of them (upstream's gap-free ceiling).
+  List<double> _sorted = [];
+  // A non-finite beat time was folded: the batch abstains on it.
+  bool _nonFinite = false;
   double? _first;
   int _count = 0;
   double _lastT = 0;
@@ -70,9 +102,23 @@ class RsaWelchState {
   RsaWelchState();
 
   int get bufferedBeats => _nn.length;
-  int get foldedSegments => _sc.peaks.length + _sc.atCeiling + _sc.belowBand + _sc.thin;
+  int get foldedSegments =>
+      _sc.peaks.length + _sc.atCeiling + _sc.belowBand + _sc.thin + _sc.gappy;
 
   void fold(List<double> nn, List<double> tMs) {
+    _sorted = _mergeSorted(_sorted, [...nn]..sort());
+    for (final t in tMs) {
+      if (!(t / 1000.0).isFinite) _nonFinite = true;
+    }
+    if (_nonFinite) {
+      // Nothing settles after a non-finite time (the walk below would never
+      // end); the batch abstains, and so does [evaluate].
+      _nn.addAll(nn);
+      _tMs.addAll(tMs);
+      _ts.addAll([for (final t in tMs) t / 1000.0]);
+      _count += nn.length;
+      return;
+    }
     for (var i = 0; i < nn.length; i++) {
       _nn.add(nn[i]);
       _tMs.add(tMs[i]);
@@ -105,14 +151,22 @@ class RsaWelchState {
     final lo = _lowerBound(tSec, s);
     final hi = _lowerBound(tSec, s + segSec);
     final k = hi - lo;
-    if (k < 30 || tSec[hi - 1] - tSec[lo] < segSec * 0.8) {
+    final segT = tSec.sublist(lo, hi);
+    final segNn = nnMs.sublist(lo, hi);
+    // Time-complete = the kept beats COVER >= 80 % of the sub-window (sum of
+    // NN, not first-to-last span), judged before the beat count.
+    final coveredSec = segNn.fold<double>(0, (a, b) => a + b) / 1000.0;
+    if (coveredSec < segSec * 0.8) {
+      c.gappy++;
+      return;
+    }
+    if (k < 30) {
       c.thin++;
       return;
     }
-    final segT = tSec.sublist(lo, hi);
-    final segNn = nnMs.sublist(lo, hi);
     final segSpan = segT.last - segT.first;
-    final segHi = rsaCeilingHz(segSpan / (k - 1));
+    // The sub-window's ceiling from its median beat interval, gap-free.
+    final segHi = rsaCeilingHz(median(segNn)! / 1000.0);
     if (segHi < rsaHiHz) {
       c.belowBand++;
       return;
@@ -130,6 +184,8 @@ class RsaWelchState {
     }
     if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
       c.atCeiling++;
+      c.ceilingLo = math.min(c.ceilingLo, segHi * 60);
+      c.ceilingHi = math.max(c.ceilingHi, segHi * 60);
       return;
     }
     c.peaks.add(pk * 60.0);
@@ -161,7 +217,8 @@ class RsaWelchState {
     if (!_folding) {
       // short record (< 2 sub-windows): the oracle's segSec = span/2 rule
       // makes every window length depend on the total. Buffer holds all
-      // beats here (no folding yet), so just call the oracle.
+      // beats here (no folding yet, and a non-finite time never starts it),
+      // so just call the oracle.
       return rsaRespRate(allNn, allTMs, artifactFraction: artifactFraction);
     }
     if (artifactFraction > maxArtifact) {
@@ -172,6 +229,13 @@ class RsaWelchState {
             '— RSA peak unreliable',
       );
     }
+    if (_nonFinite || allTs.any((t) => !t.isFinite)) {
+      return const Metric<RespEstimate>.absent(
+        tier: Tier.high,
+        inputs_used: inputs,
+        note: 'non-finite beat time',
+      );
+    }
     if (spanSec <= 0) {
       return const Metric<RespEstimate>.absent(
         tier: Tier.high,
@@ -179,15 +243,19 @@ class RsaWelchState {
         note: 'degenerate beat times',
       );
     }
-    final meanNnSec = spanSec / (n - 1);
-    final hiHz = rsaCeilingHz(meanNnSec);
+    // The beat interval is the median NN over settled ++ tail (gap-free).
+    final beatSec =
+        percentile(_mergeSorted(_sorted, [...tailNn]..sort()), 50)! / 1000.0;
+    final hiHz = rsaCeilingHz(beatSec);
     if (hiHz < rsaHiHz) {
       return Metric<RespEstimate>.absent(
         tier: Tier.high,
         inputs_used: inputs,
-        note: 'beat rate ${round6(60 / meanNnSec)} bpm resolves only to '
-            '${round6(hiHz * 60)} br/min — below the HF band, any peak could be '
-            'an alias; rate withheld',
+        note: 'sleeping heart rate ${round6(60 / beatSec)} bpm (median beat '
+            'interval ${round6(beatSec)} s) can resolve breathing from beat '
+            'timing only up to ${round6(hiHz * 60)} br/min, below the top of the '
+            'normal 9–24 br/min band, so any peak could be an alias; rate '
+            'withheld',
       );
     }
     // provisional sub-windows on a copy: those that end after the settled edge
@@ -204,19 +272,43 @@ class RsaWelchState {
       double artifactFraction, double tolBrpm, double minConsensus) {
     const inputs = ['rr_cleaned', 'beat_times'];
     final peaks = c.peaks, peakHz = c.peakHz, peakPwr = c.peakPwr;
+    final dropped = c.atCeiling + c.belowBand + c.thin + c.gappy;
+    final total = peaks.length + dropped;
     if (peaks.length < 3) {
-      final dropped = c.atCeiling + c.belowBand + c.thin;
-      final why = dropped == 0
-          ? 'only ${peaks.length} usable sub-windows'
-          : (c.belowBand >= c.atCeiling && c.belowBand >= c.thin
-              ? '${c.belowBand} of ${peaks.length + dropped} sub-windows had a beat '
-                  'rate too low to cover the HF band (any peak could be an alias)'
-              : (c.atCeiling >= c.thin
-                  ? '${c.atCeiling} of ${peaks.length + dropped} sub-windows peaked '
-                      'at/above the resolvable ceiling '
-                      '(${round6(hiHz * 60)} br/min)'
-                  : '${c.thin} of ${peaks.length + dropped} sub-windows were too '
-                      'sparse or gappy to spectrum'));
+      // The largest counter is the reason; ties go to the earlier entry.
+      final reasons = <(int, String)>[
+        (
+          c.belowBand,
+          '${c.belowBand} of $total sub-windows had a beat rate too low to '
+              'cover the HF band (any peak could be an alias)'
+        ),
+        (
+          c.atCeiling,
+          c.atCeiling == 0
+              ? ''
+              : '${c.atCeiling} of $total sub-windows peaked at/above their '
+                  'resolvable ceiling (${round6(c.ceilingLo)}'
+                  '${c.ceilingHi > c.ceilingLo ? '–${round6(c.ceilingHi)}' : ''} '
+                  'br/min)'
+        ),
+        (
+          c.gappy,
+          '${c.gappy} of $total ${round6(segSec)}s sub-windows had less than '
+              '80 % of their time covered by clean beats (sensor gaps or '
+              'rejected beats)'
+        ),
+        (
+          c.thin,
+          '${c.thin} of $total sub-windows had fewer than 30 beats or no '
+              'spectral peak'
+        ),
+      ];
+      var top = reasons.first;
+      for (final r in reasons.skip(1)) {
+        if (r.$1 > top.$1) top = r;
+      }
+      final why =
+          dropped == 0 ? 'only ${peaks.length} usable sub-windows' : top.$2;
       return Metric<RespEstimate>.absent(
         tier: Tier.high,
         inputs_used: inputs,
@@ -243,9 +335,13 @@ class RsaWelchState {
       if ((peaks[i] - medBrpm0).abs() < (peaks[best] - medBrpm0).abs()) best = i;
     }
     final brpm = peaks[best];
-    final conf = ((1 - artifactFraction) * consensus).clamp(0.2, 0.9);
+    final conf = ((1 - artifactFraction) *
+            consensus *
+            (peaks.length / _rsaFullWeightSubwindows).clamp(0.0, 1.0))
+        .clamp(0.2, 0.9);
     return Metric<RespEstimate>(
-      value: RespEstimate(brpm, peakHz[best], peakPwr[best], 'rsa'),
+      value: RespEstimate(brpm, peakHz[best], peakPwr[best], 'rsa',
+          usableSubwindows: peaks.length, subwindows: total),
       confidence: conf,
       tier: Tier.high,
       inputs_used: inputs,
@@ -260,6 +356,8 @@ class RsaWelchState {
   Map<String, dynamic> toJson() => {
         'tMs': _tMs,
         'nn': _nn,
+        'sorted': _sorted,
+        'nonFinite': _nonFinite,
         'first': _first,
         'count': _count,
         'lastT': _lastT,
@@ -271,6 +369,9 @@ class RsaWelchState {
         'atCeiling': _sc.atCeiling,
         'belowBand': _sc.belowBand,
         'thin': _sc.thin,
+        'gappy': _sc.gappy,
+        'ceilingLo': _sc.ceilingLo.isFinite ? _sc.ceilingLo : null,
+        'ceilingHi': _sc.ceilingHi,
       };
 
   factory RsaWelchState.fromJson(Map<String, dynamic> j) {
@@ -279,6 +380,8 @@ class RsaWelchState {
     s._tMs = dl(j['tMs']);
     s._ts = [for (final t in s._tMs) t / 1000.0];
     s._nn = dl(j['nn']);
+    s._sorted = dl(j['sorted']);
+    s._nonFinite = j['nonFinite'] as bool;
     s._first = (j['first'] as num?)?.toDouble();
     s._count = j['count'] as int;
     s._lastT = (j['lastT'] as num).toDouble();
@@ -290,6 +393,9 @@ class RsaWelchState {
     s._sc.atCeiling = j['atCeiling'] as int;
     s._sc.belowBand = j['belowBand'] as int;
     s._sc.thin = j['thin'] as int;
+    s._sc.gappy = j['gappy'] as int;
+    s._sc.ceilingLo = (j['ceilingLo'] as num?)?.toDouble() ?? double.infinity;
+    s._sc.ceilingHi = (j['ceilingHi'] as num).toDouble();
     return s;
   }
 }

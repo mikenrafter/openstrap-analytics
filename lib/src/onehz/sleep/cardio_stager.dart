@@ -90,7 +90,26 @@ class CardioStagerResult {
   final StagerResult base;
   final List<bool> deepFlag;
   final double confidence;
-  const CardioStagerResult(this.base, this.deepFlag, this.confidence);
+
+  /// Per-epoch REM / deep scores as the classify loop computed them, BEFORE
+  /// the mode filter, Webster rescore and consolidation. Null where the epoch
+  /// was decided wake first (no score taken) or no axis was measurable. Same
+  /// length as `base.stages`, or empty when the stager abstained or the result
+  /// was built without them. Read through `epochEvidence` (stage_ranges.dart).
+  final List<double?> remScores;
+  final List<double?> deepScores;
+
+  /// Per-epoch: the epoch carried at least one valid HR sample.
+  final List<bool> hrCovered;
+
+  const CardioStagerResult(
+    this.base,
+    this.deepFlag,
+    this.confidence, {
+    this.remScores = const [],
+    this.deepScores = const [],
+    this.hrCovered = const [],
+  });
 }
 
 const int _epochSec = 30;
@@ -424,6 +443,13 @@ CardioStagerResult cardioStager(
 ///
 /// [rrTsMs] must be non-decreasing when it is paired with [rrMs]. Invalid grid
 /// inputs return zero rows, as does a session with fewer than three epochs.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 CardioEpochFeatures cardioEpochFeatures(
   List<double> hr1hz,
   List<AccelSample> accel, {
@@ -898,6 +924,13 @@ void _removeEpochSorted(List<double> sorted, double value) {
 /// [remScoreCut] / [deepScoreCut] default to the shipped constants and exist so
 /// a calibration harness can sweep them on a DEVELOPMENT split and report the
 /// held-out result. Production callers should not pass them.
+// Reformulates cardioStager() feature extraction and classification: van Hees
+// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
+// Internal fitted weights and rules remain ESTIMATE with low confidence.
+// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
+// shared arithmetic preserves labels except for separately documented
+// RR/spectral changes. Cached rows require matching dependencies; missing phases
+// are recomputed.
 CardioStagerResult classifyCardioEpochs(
   CardioEpochFeatures f, {
   int epochSec = _epochSec,
@@ -1102,6 +1135,10 @@ CardioStagerResult classifyCardioEpochs(
   // ── classify ───────────────────────────────────────────────────────────────
   final stages = List<SleepStage>.filled(nEpoch, SleepStage.wake);
   final deepFlag = List<bool>.filled(nEpoch, false);
+  // Evidence only: recorded for stageMinuteRanges, never read back here, so
+  // the labels below are unchanged by keeping them.
+  final remScores = List<double?>.filled(nEpoch, null);
+  final deepScores = List<double?>.filled(nEpoch, null);
   for (var e = 0; e < nEpoch; e++) {
     final hrMed = hrMedLocal[e];
     final hrArousal = hrArousalLocal[e];
@@ -1189,6 +1226,8 @@ CardioStagerResult classifyCardioEpochs(
       (sdnnZ, -_wDeepSdnn),
       (lfhfZ, -_wDeepLfhf),
     ]);
+    remScores[e] = remScore;
+    deepScores[e] = deepScore;
 
     // Atonia and the HR floor are RETAINED as gates, not folded into the score:
     // they are not weak evidence for REM, they are preconditions. A large
@@ -1282,6 +1321,9 @@ CardioStagerResult classifyCardioEpochs(
     ),
     deepFlag,
     conf,
+    remScores: remScores,
+    deepScores: deepScores,
+    hrCovered: [for (var e = 0; e < nEpoch; e++) !hr[e].isNaN],
   );
 }
 
@@ -1318,14 +1360,21 @@ CardioStagerResult _abstain(int epochSec) => CardioStagerResult(
 /// window centred on epoch [s,t). Returns NaN when too few clean beats.
 double _windowRmssd(List<double> rrMs, List<double> rrTsMs,
     List<AccelSample> accel, int s, int t, int epochSec) {
-  final beats = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t).beats;
+  final win = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t);
+  final beats = win.beats;
   if (beats.length < 5) return double.nan;
   var ss = 0.0;
+  var pairs = 0;
   for (var i = 1; i < beats.length; i++) {
+    if (win.seam[i]) continue;
     final d = beats[i] - beats[i - 1];
     ss += d * d;
+    pairs++;
   }
-  return math.sqrt(ss / (beats.length - 1));
+  // Gate on the successive pairs actually averaged, not the beat count: a
+  // window fragmented by holes/rejected beats can hold 5+ beats yet only one
+  // contiguous pair. 4 pairs = what the 5-beat gate meant before seams.
+  return pairs >= 4 ? math.sqrt(ss / pairs) : double.nan;
 }
 
 /// SDNN (ms) of cleaned RR beats over the SAME ±2.5-min window as
@@ -1356,7 +1405,13 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
 /// [_windowRemFeatures] passes a DIFFERENT [halfWinMs] on purpose (±90 s, not
 /// ±2.5 min): its LF/HF grid and its `beats.length` abstain gate are specified
 /// against that shorter window. Do not hand it the default list.
-({List<double> beats, List<double> tsSec}) _cleanBeatsInWindow(
+///
+/// `seam[k]` is true when beat k is NOT the true successor of beat k-1: a beat
+/// was rejected between them, or the RR stream has a hole there. Anything that
+/// differences successive beats must skip seam pairs, or each rejected beat and
+/// each dropout manufactures one big jump (same defect hrv_time.dart's runs
+/// fix). Tolerance is `v + 1000` because [rrTsMs] is whole-second quantized.
+({List<double> beats, List<double> tsSec, List<bool> seam}) _cleanBeatsInWindow(
   List<double> rrMs,
   List<double> rrTsMs,
   List<AccelSample> accel,
@@ -1364,7 +1419,7 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   int t, {
   int halfWinMs = 150 * 1000,
 }) {
-  const empty = (beats: <double>[], tsSec: <double>[]);
+  const empty = (beats: <double>[], tsSec: <double>[], seam: <bool>[]);
   if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
   final mid = (s + t) ~/ 2;
   if (mid >= accel.length) return empty;
@@ -1380,13 +1435,13 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
 /// trailing windows through the SAME gate (300-2000 ms, successive jump
 /// <= 200 ms) instead of a second copy. [rrTsMs] must be non-decreasing and the
 /// same length as [rrMs]; an empty or mismatched pair yields no beats.
-({List<double> beats, List<double> tsSec}) cleanRrBeatsBetween(
+({List<double> beats, List<double> tsSec, List<bool> seam}) cleanRrBeatsBetween(
   List<double> rrMs,
   List<double> rrTsMs,
   double loMs,
   double hiMs,
 ) {
-  const empty = (beats: <double>[], tsSec: <double>[]);
+  const empty = (beats: <double>[], tsSec: <double>[], seam: <bool>[]);
   if (rrMs.isEmpty || rrTsMs.length != rrMs.length) return empty;
   final lo = loMs, hi = hiMs;
   // [rrTsMs] is ascending, so lower-bound into it and stop at the far edge
@@ -1407,20 +1462,27 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
   }
   final beats = <double>[];
   final tsSec = <double>[];
+  final seam = <bool>[];
   double? prev;
+  var broken = true;
   for (var i = a; i < rrMs.length; i++) {
     final ts = rrTsMs[i];
     if (ts > hi) break;
     final v = rrMs[i];
+    if (i > a && ts - rrTsMs[i - 1] > v + 1000) broken = true;
     if (v < _rrMin || v > _rrMax) {
       prev = null;
+      broken = true;
       continue;
     }
     if (prev != null && (v - prev).abs() > _rrMaxStep) {
       prev = v;
+      broken = true;
       continue;
     }
     beats.add(v);
+    seam.add(broken);
+    broken = false;
     // Rebase to the window start (lo), NOT absolute epoch ms. Lomb–Scargle is
     // time-shift invariant (the τ phase reference cancels any offset), so the
     // LF/HF output is unchanged — but this keeps beat times in [0, 180] s
@@ -1432,7 +1494,7 @@ double _windowSdnn(List<double> rrMs, List<double> rrTsMs,
     tsSec.add((ts - lo) / 1000.0);
     prev = v;
   }
-  return (beats: beats, tsSec: tsSec);
+  return (beats: beats, tsSec: tsSec, seam: seam);
 }
 
 /// [_cleanBeatsInWindow]'s beats, exposed so the window-edge regression test
@@ -1447,6 +1509,31 @@ List<double> cleanBeatsInWindowForTest(
   int halfWinMs = 150 * 1000,
 }) =>
     _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: halfWinMs).beats;
+
+/// The successive differences (ms) [_windowRmssd] and R(k) actually take over
+/// [_cleanBeatsInWindow]'s beats, seams skipped. Test hook only.
+List<double> cleanBeatDiffsInWindowForTest(
+  List<double> rrMs,
+  List<double> rrTsMs,
+  List<AccelSample> accel,
+  int s,
+  int t, {
+  int halfWinMs = 150 * 1000,
+}) {
+  final w = _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: halfWinMs);
+  return [
+    for (var k = 1; k < w.beats.length; k++)
+      if (!w.seam[k]) w.beats[k] - w.beats[k - 1]
+  ];
+}
+
+/// [_windowRmssd] and the R(k) half of [_windowRemFeatures]. Test hook only.
+({double rmssd, double? rk}) windowRmssdRkForTest(List<double> rrMs,
+        List<double> rrTsMs, List<AccelSample> accel, int s, int t) =>
+    (
+      rmssd: _windowRmssd(rrMs, rrTsMs, accel, s, t, _epochSec),
+      rk: _windowRemFeatures(rrMs, rrTsMs, accel, s, t, _epochSec).rk,
+    );
 
 /// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
 /// are re-labelled sleep (NREM). This is the published actigraphy step that
@@ -1551,30 +1638,31 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
   // one; see [_cleanBeatsInWindow].
   final win =
       _cleanBeatsInWindow(rrMs, rrTsMs, accel, s, t, halfWinMs: 90 * 1000);
-  return remFeaturesFromBeats(win.beats, win.tsSec);
+  return remFeaturesFromBeats(win.beats, win.tsSec, win.seam);
 }
 
 /// LF/HF and R(k) from already-gated beats ([beats] in ms, [beatTsSec] their
-/// times in seconds, any common origin). The numeric half of
-/// [_windowRemFeatures], shared with [CausalStager]; nulls when fewer than 16
-/// beats (the spectral stability gate).
+/// times in seconds, any common origin, [seam] as [cleanRrBeatsBetween] marks
+/// it). The numeric half of [_windowRemFeatures], shared with [CausalStager];
+/// nulls when fewer than 16 beats (the spectral stability gate).
 ({double? lfhf, double? rk}) remFeaturesFromBeats(
-    List<double> beats, List<double> beatTsSec) {
+    List<double> beats, List<double> beatTsSec, List<bool> seam) {
   if (beats.length < 16)
     return (lfhf: null, rk: null); // spectral stability gate
   // R(k): mean absolute successive difference of instantaneous HR (bpm).
   var rkSum = 0.0;
   var rkCnt = 0;
   double? prevIhr;
-  for (final v in beats) {
-    final ihr = 60000.0 / v;
-    if (prevIhr != null) {
+  for (var k = 0; k < beats.length; k++) {
+    final ihr = 60000.0 / beats[k];
+    if (prevIhr != null && !seam[k]) {
       rkSum += (ihr - prevIhr).abs();
       rkCnt++;
     }
     prevIhr = ihr;
   }
-  final rk = rkCnt > 0 ? rkSum / rkCnt : null;
+  // Same floor the 16-beat gate implied before seams were skipped: 15 pairs.
+  final rk = rkCnt >= 15 ? rkSum / rkCnt : null;
   // LF/HF via Lomb–Scargle on native beat times.
   double? lfhf;
   final spanSec = beatTsSec.last - beatTsSec.first;

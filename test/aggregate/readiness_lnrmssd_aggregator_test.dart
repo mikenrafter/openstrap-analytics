@@ -1,7 +1,8 @@
 // readinessLnRmssdAggregator (Count + LastRows(windowDays + 1)) must reproduce
 // the reference EXACTLY (every field, bit for bit), and the public
 // readinessLnRmssd, which delegates to it, must too. `_reference` is a frozen
-// copy of readinessLnRmssd as it was before the rewire.
+// copy of upstream's readinessLnRmssd at 77fe373 (median/MAD centre, the
+// minNights - 1 prior-night gate), rows only (no dates).
 //
 // windowDays <= 0 decision. The reference with windowDays 0 keeps an empty
 // prior window, so it returns the absent metric (need minNights + 1) and
@@ -38,17 +39,33 @@ Metric<ReadinessLnRmssd> _reference(
   final today = historyLnRmssd.last;
   final n = historyLnRmssd.length;
   final start = n - 1 - windowDays < 0 ? 0 : n - 1 - windowDays;
-  final priorWindow = historyLnRmssd.sublist(start, n - 1);
-  if (priorWindow.isEmpty) {
+  // this used to be historyLnRmssd.sublist(start), which runs to the END of
+  // the list - including tonight's own value in its own baseline. that
+  // pulls the mean/sd toward tonight, understating how far off a genuinely
+  // suppressed/elevated night actually is, worst right when the window is
+  // smallest (minNights). the baseline has to be strictly prior nights.
+  final List<double> priorWindow;
+  priorWindow = historyLnRmssd.sublist(start, n - 1);
+  if (priorWindow.isEmpty || priorWindow.length < minNights - 1) {
+    // empty only if minNights got set to 1 somewhere; short when a wear gap
+    // left too few nights inside the calendar window. either way there's no
+    // baseline yet, same as not enough history.
     return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
-      note: needBaselineNote(have: historyLnRmssd.length, need: minNights + 1),
+      note: needBaselineNote(
+          have: priorWindow.length + 1, need: minNights < 2 ? 2 : minNights),
     );
   }
   final m = mean(priorWindow)!;
   final sd = stddev(priorWindow);
   if (sd == null || m == 0) {
+    // The published outputs of this stack (CV, SWC, band) are all defined
+    // RELATIVE to the baseline's dispersion. With a single prior night the SD
+    // is UNDEFINED — and the metric used to fill in cvPct 0.0 and band
+    // 'normal', asserting "tonight is typical" on the strength of nothing at
+    // all. Abstain instead (a zero-but-DEFINED SD is a different case: CV is
+    // genuinely 0 and SWC is genuinely 0, so that still computes below).
     return Metric<ReadinessLnRmssd>.absent(
       tier: Tier.high,
       inputs_used: inputs,
@@ -57,23 +74,41 @@ Metric<ReadinessLnRmssd> _reference(
     );
   }
   final cv = (sd / m).abs() * 100;
-  final z = sd > 0 ? (today - m) / sd : null;
-  final swc = 0.5 * sd;
+  // ROBUST CENTRE AND SPREAD for the decision band. One illness night in a
+  // seven-night window both drags the mean down and inflates the SD, so a
+  // genuinely low night reads "normal": on a real window holding a 35.5 ms
+  // night, mean 4.465 / SD 0.405 put a 4.478 night (88 ms) inside the band,
+  // while the other six nights sat at 4.40–4.79. Median + MAD (×1.4826) are
+  // what the window looks like without that one night. MAD collapses only when
+  // more than half the window is identical; the SD stands in then. The CV
+  // above stays the classic SD/mean (Plews' published CV).
+  final centre = median(priorWindow)!;
+  final robustSd = mad(priorWindow)!;
+  final spread = robustSd > 0 ? robustSd : sd;
+  final z = spread > 0 ? (today - centre) / spread : null;
+  // Plews SWC ≈ 0.5 × within-window SD (a small worthwhile change in lnRMSSD).
+  final swc = 0.5 * spread;
+
   final String band;
-  if (today < m - swc) {
+  if (today < centre - swc) {
     band = 'suppressed';
-  } else if (today > m + swc) {
+  } else if (today > centre + swc) {
     band = 'elevated';
   } else {
     band = 'normal';
   }
+
+  // LnRMSSD:RR saturation guard: when mean NN is long (low HR, high vagal tone)
+  // and lnRMSSD is at the top of the personal range, the metric saturates.
   final saturation =
       meanNnTodayMs != null && meanNnTodayMs > 1100 && z != null && z > 1.0;
+
   final conf = (priorWindow.length / windowDays.toDouble()).clamp(0.3, 0.9);
   return Metric<ReadinessLnRmssd>(
     value: ReadinessLnRmssd(
       lnRmssdToday: today,
       rolling7Mean: m,
+      rolling7Median: centre,
       cvPct: cv,
       z: z,
       swc: swc,
@@ -94,7 +129,7 @@ List<Object?> _fields(Metric<ReadinessLnRmssd> m) {
   final v = m.value;
   return [
         m.present, m.confidence, m.tier, m.inputs_used.join(','), m.note,
-        m.drivers, v?.lnRmssdToday, v?.rolling7Mean, v?.cvPct, v?.z, v?.swc,
+        m.drivers, v?.lnRmssdToday, v?.rolling7Mean, v?.rolling7Median, v?.cvPct, v?.z, v?.swc,
         v?.band, v?.saturationFlag,
       ];
 }

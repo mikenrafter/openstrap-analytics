@@ -336,11 +336,16 @@ void main() {
       expect(d.corrected, 100);
     });
 
+    // The gate counts successive pairs (upstream, merged 2026-10-18), so with
+    // any minBeats >= 2 an all-isolated series is "too few"; minBeats 1 is the
+    // one setting that still reaches the no-pairs abstention.
     test('no successive clean pairs (every kept beat is isolated)', () {
       final rr = <double>[
         for (var i = 0; i < 1000; i++) i % 2 == 0 ? 900.0 + i % 50 : 250.0
       ];
-      final res = irregularBeatScreenDetailed(rr, minBeats: 100);
+      expect(irregularBeatScreenDetailed(rr, minBeats: 100).diagnostics.abstain,
+          IrregularAbstain.tooFewBeats);
+      final res = irregularBeatScreenDetailed(rr, minBeats: 1);
       expect(res.metric.present, isFalse);
       expect(res.diagnostics.abstain, IrregularAbstain.noSuccessivePairs);
       expect(res.diagnostics.nnIn, 1000);
@@ -493,7 +498,7 @@ void main() {
       expect(
           irregularBeatScreenDetailed([
             for (var i = 0; i < 1000; i++) i % 2 == 0 ? 900.0 + i % 50 : 250.0
-          ], minBeats: 100).diagnostics.toJson()['abstain'],
+          ], minBeats: 1).diagnostics.toJson()['abstain'],
           'no_successive_pairs');
     });
 

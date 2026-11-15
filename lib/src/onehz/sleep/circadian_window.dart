@@ -8,6 +8,9 @@ class CircularWindow {
 }
 
 /// Best (max or min) mean over a contiguous circular window of length [w].
+// Unchanged extraction of circadianNonparametric() circular L5/M10 search,
+// Witting 1990 / van Someren 1999. Traversal, arithmetic and first-winner tie
+// handling are unchanged.
 CircularWindow bestCircularWindow(List<double> profile, int w,
     {required bool maximize}) {
   final p = profile.length;

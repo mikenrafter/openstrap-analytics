@@ -91,6 +91,11 @@ import 'cardio_stager.dart'
         weightedAxisScore;
 import 'segment.dart' show kMaxSleepConfidence;
 
+// Published staging basis inherited from cardioStager(): Long 2016; Fonseca
+// 2015/2018. This unpublished past-only adaptation is an internal rule,
+// ESTIMATE with low
+// confidence; trailing windows and baselines intentionally differ from
+// retrospective staging.
 /// Epoch length (s). Fixed: every cutoff inherited from [cardioStager] is
 /// specified at 30 s.
 const int kCausalEpochSec = 30;
@@ -940,7 +945,7 @@ CausalEpochRow? _buildRow(int k, Map<int, double> hrBy,
     final w300 = cleanRrBeatsBetween(rrV, rrTs, endMs - _sdnnWinSec * 1000.0, endMs);
     if (w300.beats.length >= 5) sdnn = stddev(w300.beats);
     final w180 = cleanRrBeatsBetween(rrV, rrTs, endMs - _remWinSec * 1000.0, endMs);
-    final rem = remFeaturesFromBeats(w180.beats, w180.tsSec);
+    final rem = remFeaturesFromBeats(w180.beats, w180.tsSec, w180.seam);
     rk = rem.rk;
     lfhf = rem.lfhf;
   }

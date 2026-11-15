@@ -344,7 +344,7 @@ void main() {
       final now = IrregularScreenState.fromJson(
           jsonDecode(jsonEncode(st.toJson())) as Map<String, dynamic>);
       expect(now.evaluateDetailed(const [], const []).diagnostics.nnIn, 80);
-      expect(st.toJson()['version'], 2);
+      expect(st.toJson()['version'], 3);
     });
 
     test('a version 2 checkpoint missing a counter is refused too', () {

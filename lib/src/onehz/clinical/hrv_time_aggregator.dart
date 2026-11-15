@@ -5,6 +5,7 @@ import '../../aggregate/aggregator.dart';
 import '../../aggregate/json_support.dart';
 import '../../aggregate/primitives.dart';
 import '../incremental_core.dart';
+import 'hrv_jitter_evidence.dart';
 import 'hrv_time.dart';
 
 const double _fiveMinutesMs = 300000.0;
@@ -55,9 +56,55 @@ class Beats extends Batch<Beats> {
 /// Builds the composed time-domain HRV summary for a columnar beat batch.
 ///
 /// With [gapAware] false, times and five-minute bins are deliberately ignored.
+// The jitter rejection/exemption thresholds are an internal rule, ESTIMATE
+// with low confidence; Welch 1967 and Hirsch & Bishop 1981 support spectral
+// and respiratory components only. See rmssd_gate.dart.
+// Task Force 1996 time-domain HRV, now also the hrvTime() one-slice path.
+// Moments, two-beat differences, three-beat lag products and five-minute bins
+// retain the same sufficient statistics. gapAware:false omits timestamp-
+// dependent bins and gap tests. Floating-point order can change rounding and
+// jitter-threshold decisions. Checked field tolerances are 1e-9 absolute plus
+// 1e-9 relative; near-constant differences and jitter gates have the
+// qualifications in test/aggregate/hrv_time_aggregator_test.dart.
 Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
   double? originMs,
   bool gapAware = true,
+}) {
+  final core = _numericCore(originMs: originMs, gapAware: gapAware);
+  // Streaming finish uses the evidence already collected and merged by fold.
+  final evidence = JitterEvidenceAggregator(originMs: originMs, gapAware: gapAware);
+  final combined = validateCheckpoint(both(core, evidence),
+      (json) => _validateVersioned(json, gapAware));
+  final checked = gapAware ? _FiniteTimes(combined) : combined;
+  return checked.map((result) => _finish(
+      result.$1.$1, result.$1.$2, result.$1.$3, result.$1.$4,
+      () => result.$2, gapAware: gapAware));
+}
+
+/// Runs the same numeric core over one slice, building jitter evidence only
+/// when the ACF floor requires it. This helper is not exported by the public libraries.
+HrvTime hrvTimeOneSlice(Beats beats, {
+  double? originMs,
+  bool gapAware = true,
+}) {
+  final core = _numericCore(originMs: originMs, gapAware: gapAware);
+  final result = (gapAware ? _FiniteTimes(core) : core).run(beats);
+  JitterEvidence? cached;
+  JitterEvidence evidence() => cached ??= JitterEvidenceAggregator(
+      originMs: originMs, gapAware: gapAware).run(beats);
+  return _finish(result.$1, result.$2, result.$3, result.$4, evidence,
+      gapAware: gapAware);
+}
+
+typedef _CoreSummary = (
+  _DiffSummary, _LagSummary, RunningMoments, Map<int, RunningMoments>
+);
+
+// Mapping only the finished summaries leaves both the accumulation order and
+// checkpoint state shape unchanged, including the gap-unaware branch.
+Aggregator<dynamic, Beats, _CoreSummary> _numericCore({
+  double? originMs,
+  required bool gapAware,
 }) {
   final diffs = both(
     Lookback<Beats, _DiffState, _DiffSummary>(
@@ -68,13 +115,10 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
         batchFromJson: Beats.fromJson),
   );
   final levels = Moments<Beats>((batch) => batch.nnMs);
-
   if (!gapAware) {
-    final core = both(diffs, levels);
-    return validateCheckpoint(core, (json) => _validateCheckpoint(json, false))
-        .map((result) => _finish(
-        result.$1.$1, result.$1.$2, result.$2, const <int, RunningMoments>{},
-        gapAware: false));
+    return both(diffs, levels).map((result) => (
+        result.$1.$1, result.$1.$2, result.$2,
+        const <int, RunningMoments>{}));
   }
 
   final bins = GroupBy<Beats, RunningMoments, RunningMoments>(
@@ -85,11 +129,60 @@ Aggregator<dynamic, Beats, HrvTime> hrvTimeAggregator({
     },
     Moments<Beats>((batch) => batch.nnMs),
   );
-  final core = both(diffs, both(levels, bins));
-  return validateCheckpoint(core, (json) => _validateCheckpoint(json, true))
-      .map((result) => _finish(
-      result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2,
-      gapAware: true));
+  return both(diffs, both(levels, bins)).map((result) => (
+      result.$1.$1, result.$1.$2, result.$2.$1, result.$2.$2));
+}
+
+/// Refuses a slice holding a non-finite beat time before any state changes
+/// (a fold cannot be undone), as the other night streams do. Gap-aware only:
+/// without gap awareness times are never read.
+class _FiniteTimes<S, R> extends Aggregator<S, Beats, R> {
+  const _FiniteTimes(this.inner);
+  final Aggregator<S, Beats, R> inner;
+
+  @override
+  S empty() => inner.empty();
+
+  @override
+  S addSlice(S state, Beats batch, int start, int end) {
+    for (var i = start; i < end; i++) {
+      if (!batch.timeMs[i].isFinite) {
+        throw ArgumentError('beat times must be finite');
+      }
+    }
+    return inner.addSlice(state, batch, start, end);
+  }
+
+  @override
+  S combine(S left, S right) => inner.combine(left, right);
+
+  @override
+  R finish(S state) => inner.finish(state);
+
+  @override
+  bool get persistable => inner.persistable;
+
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+
+  @override
+  S decodeState(Object? json) => inner.decodeState(json);
+}
+
+/// Version 2: `[core, evidence]`, the evidence counting what the core counts.
+void _validateVersioned(Object? json, bool gapAware) {
+  final state = decodeList(json);
+  if (state.length != 2) throw const FormatException('Expected core and evidence');
+  _validateCheckpoint(state[0], gapAware);
+  final core = decodeList(state[0]);
+  final evidence = decodeMap(state[1]);
+  final diffs = decodeMap(field(decodeMap(decodeList(core[0])[0]), 'inner'));
+  final rawLevels = gapAware ? decodeList(core[1])[0] : core[1];
+  if (decodeCount(field(evidence, 'n')) !=
+          decodeCount(field(decodeMap(rawLevels), 'count')) ||
+      decodeCount(field(evidence, 'nd')) != decodeCount(field(diffs, 'pairs'))) {
+    throw const FormatException('Evidence disagrees with the core');
+  }
 }
 
 void _validateCheckpoint(Object? json, bool gapAware) {
@@ -359,7 +452,8 @@ class _LagStats extends Aggregator<_LagState, Beats, _LagSummary> {
 }
 
 HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
-    Map<int, RunningMoments> bins, {required bool gapAware}) {
+    Map<int, RunningMoments> bins, JitterEvidence Function() evidence,
+    {required bool gapAware}) {
   if (levels.count < 2) return HrvTime(nBeats: levels.count);
 
   double? acf1;
@@ -372,7 +466,12 @@ HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
           diffs.m2;
     }
   }
-  final jittery = acf1 != null && acf1 < kNnDiffAcf1Floor;
+  // Under the floor hrvTime refuses only when the runs show no respiratory
+  // line on a low floor, and then a timed night may still publish RMSSD from
+  // the windows on a breathing line steady in Hz: both read from [evidence].
+  final jittery =
+      acf1 != null && acf1 < kNnDiffAcf1Floor && evidence().refused();
+  final breathing = jittery && gapAware ? evidence().breathingRmssd() : null;
 
   double? sdann;
   double? sdnnIndex;
@@ -396,7 +495,7 @@ HrvTime _finish(_DiffSummary diffs, _LagSummary lags, RunningMoments levels,
     nBeats: levels.count,
     rmssd: diffs.pairs > 0 && !jittery
         ? math.sqrt(diffs.squares / diffs.pairs)
-        : null,
+        : breathing,
     pnn50: diffs.pairs > 0 && !jittery
         ? 100.0 * diffs.over50 / diffs.pairs
         : null,
