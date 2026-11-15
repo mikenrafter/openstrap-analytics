@@ -339,21 +339,8 @@ List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
   final classes = correction.classes;
   final artifacts = [for (final c in classes) c != BeatClass.normal];
   final corrected = List<double?>.filled(raw.length, null);
-  for (var i = 0; i < raw.length; i++) {
-    if (!artifacts[i]) {
-      corrected[i] = raw[i];
-      continue;
-    }
-    if ((i > 0 && artifacts[i - 1]) || (i + 1 < raw.length && artifacts[i + 1]))
-      continue;
-    final left = <double>[], right = <double>[];
-    for (var j = i - 1; j >= 0 && left.length < 2; j--) {
-      if (!artifacts[j]) left.insert(0, raw[j]);
-    }
-    for (var j = i + 1; j < raw.length && right.length < 2; j++) {
-      if (!artifacts[j]) right.add(raw[j]);
-    }
-    corrected[i] = splineMid(left, right);
+  for (var j = 0; j < correction.nnSourceIndex.length; j++) {
+    corrected[correction.nnSourceIndex[j]] = correction.nn[j];
   }
   final differences = [
     0.0,

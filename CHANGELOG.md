@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Experimental closed-window pulse episodes with ten-minute qualification, deterministic joining, raw beat evidence, cleaning masks, and measurable quality refusal reasons. Unknown motion and wear do not block alerts.
+
 - `stageMinuteRanges`: a [lo, hi] range of minutes per sleep stage (wake,
   light, deep, REM, and NREM = light + deep). `lo` counts epochs that can only
   be that stage: HR-covered, labelled so, and every deciding score at least
