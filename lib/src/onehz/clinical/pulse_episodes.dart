@@ -241,6 +241,7 @@ PulseDetection detectPulseEpisodes(
       final pending = end > completeThroughMs || supportEnd > completeThroughMs;
       final context = beats.sublist(cut(supportStart), cut(supportEnd));
       final evidence = _evidence(context);
+      final evidenceById = {for (final b in evidence) b.id: b};
       final own = [
         for (final b in evidence)
           if (b.timeMs >= start && b.timeMs < end) b
@@ -248,7 +249,7 @@ PulseDetection detectPulseEpisodes(
       final diffs = <double>[];
       for (final b in own) {
         if (b.validAdjacent && b.correctedMs != null) {
-          final prev = evidence.firstWhere((x) => x.id == b.predecessorId);
+          final prev = evidenceById[b.predecessorId]!;
           diffs.add(b.correctedMs! - prev.correctedMs!);
         }
       }
