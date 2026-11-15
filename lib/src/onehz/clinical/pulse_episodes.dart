@@ -187,24 +187,33 @@ PulseDetection detectPulseEpisodes(
   final episodes = <PulseEpisode>[];
   for (final source in sources.keys.toList()..sort()) {
     final byId = <String, PulseBeatInput>{};
-    var conflict = false;
+    final conflicts = <String>{};
     for (final b in sources[source]!) {
       final prior = byId[b.id];
       if (prior == null || b.revision > prior.revision) {
         byId[b.id] = b;
       } else if (b.revision == prior.revision &&
           (b.timeMs != prior.timeMs || b.rawMs != prior.rawMs)) {
-        conflict = true;
+        conflicts.add(b.id);
+        // A refused conflicting revision still has deterministic evidence.
+        if (b.timeMs < prior.timeMs ||
+            (b.timeMs == prior.timeMs && b.rawMs.compareTo(prior.rawMs) < 0)) {
+          byId[b.id] = b;
+        }
       }
     }
     final ordered = byId.values.toList()
       ..sort((a, b) => a.index.compareTo(b.index));
-    var integrity = !conflict;
+    final invalid = <String>{...conflicts};
     for (var i = 0; i < ordered.length; i++) {
       if (!ordered[i].timestampValid ||
           !ordered[i].rawMs.isFinite ||
-          (i > 0 && ordered[i].timeMs <= ordered[i - 1].timeMs))
-        integrity = false;
+          (i > 0 && ordered[i].timeMs <= ordered[i - 1].timeMs)) {
+        invalid.add(ordered[i].id);
+      }
+      if (i > 0 && ordered[i].timeMs <= ordered[i - 1].timeMs) {
+        invalid.add(ordered[i - 1].id);
+      }
     }
     final beats = byId.values.toList()
       ..sort((a, b) {
@@ -281,7 +290,7 @@ PulseDetection detectPulseEpisodes(
       gap = math.max(gap, end - cursor);
       final cleaned = own.where((b) => b.corrected || b.dropped).length;
       final reasons = <String>[
-        if (!integrity) 'timestamps',
+        if (context.any((b) => invalid.contains(b.id))) 'timestamps',
         if (start < sourceStartMs) 'incompleteSupport',
         if (diffs.length < 200) 'pairs',
         if (coverage / pulseWindowMs < 0.8) 'coverage',

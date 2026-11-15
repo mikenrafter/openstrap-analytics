@@ -124,4 +124,33 @@ void main() {
         completeThroughMs: 900000, sourceStartMs: 0);
     expect(result.episodes, isEmpty);
   });
+  // WHY/CLAIM(pulse-deterministic): conflicting duplicates refuse without arrival-order evidence drift.
+  test('conflicting revisions and checkpoint prefixes are deterministic', () {
+    final beats = trace(30);
+    final b = beats[100];
+    final conflict = PulseBeatInput(
+        id: b.id,
+        source: b.source,
+        index: b.index,
+        timeMs: b.timeMs + 1,
+        rawMs: b.rawMs + 100);
+    final input = [...beats, conflict];
+    final reversed = input.reversed.toList();
+    expect(
+        detectPulseEpisodes(input, completeThroughMs: 1200000, sourceStartMs: 0)
+            .toJson(),
+        detectPulseEpisodes(reversed,
+                completeThroughMs: 1200000, sourceStartMs: 0)
+            .toJson());
+    for (final watermark in [900000, 1200000, 1500000]) {
+      final batch = detectPulseEpisodes(beats,
+          completeThroughMs: watermark, sourceStartMs: 0);
+      final prefix = detectPulseEpisodes(
+          beats.where((b) => b.timeMs < watermark).toList(),
+          completeThroughMs: watermark,
+          sourceStartMs: 0);
+      expect([for (final e in prefix.episodes) e.toJson()],
+          [for (final e in batch.episodes) e.toJson()]);
+    }
+  });
 }
