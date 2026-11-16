@@ -6,7 +6,22 @@ import '../foundations/rr_correction_kernel.dart';
 import '../util.dart';
 
 const pulseWindowMs = 300000;
-const pulseDetectorVersion = 1;
+// v2: contextual breathing veto and personal baseline with fixed-floor safety
+// bound. Existing stored v1 decisions remain owned by their original version.
+const pulseDetectorVersion = 2;
+const pulseBaselineLookbackMs = 14 * 24 * 3600000;
+const pulseSleepMaxBpm = 65.0;
+const pulseBreathingCorrelation = 0.20;
+const pulseBaselineMinWindows = 24;
+const pulseBaselineMinDays = 3;
+const pulseBaselineRatioMargin = 0.05;
+const pulseBaselinePnnMargin = 5.0;
+const pulseBaselineMadMultiplier = 3.0;
+const pulseBaselineRatioCeiling = 0.95;
+const pulseBaselinePnnCeiling = 60.0;
+const pulseMotionThresholdG = 0.05;
+const pulseContextMinSamples = 240;
+const pulseMovingMinSamples = 30;
 
 /// How far one record's first beat may sit before the previous record's last
 /// beat before the clock is called wrong. `beat_ts_ms` is a modelled position
@@ -96,6 +111,11 @@ class PulseWindow {
   final double? sd1, sd2, ratio, pnnPct;
   final bool pending, qualified;
   final bool? motion, wear;
+  final PulseWindowContext context;
+  final double? lag3, lag4, heartRate;
+  final double ratioThreshold, pnnThreshold, personalRatio, personalPnn;
+  final int baselineWindows, baselineDays;
+  final bool normalForBaseline;
   final List<String> reasons;
   final List<PulseBeatEvidence> beats;
   const PulseWindow(
@@ -116,7 +136,13 @@ class PulseWindow {
       required this.reasons,
       required this.beats,
       this.motion,
-      this.wear});
+      this.wear,
+      this.context = const PulseWindowContext(),
+      this.lag3, this.lag4, this.heartRate,
+      this.ratioThreshold = 0.7, this.pnnThreshold = 30,
+      this.personalRatio = 0.7, this.personalPnn = 30,
+      this.baselineWindows = 0, this.baselineDays = 0,
+      this.normalForBaseline = false});
   Map<String, dynamic> toJson({bool evidence = true}) => {
         'source': source,
         'start': startMs,
@@ -136,9 +162,30 @@ class PulseWindow {
         'reasons': reasons,
         'motion': motion,
         'wear': wear,
+        'context': {
+          'status': motion == null || wear == null ? 'unknown' : 'known',
+          'asleep': context.asleep, 'motion': motion, 'wear': wear,
+          'charging': context.charging, 'day': context.day,
+          'motionThresholdG': pulseMotionThresholdG,
+          'minContextSamples': pulseContextMinSamples,
+          'minMovingSamples': pulseMovingMinSamples,
+        },
+        'breathing': {'lag3': lag3, 'lag4': lag4, 'heartRate': heartRate,
+          'correlationThreshold': pulseBreathingCorrelation,
+          'maxSleepBpm': pulseSleepMaxBpm},
+        'baseline': {
+          'status': baselineWindows >= pulseBaselineMinWindows &&
+              baselineDays >= pulseBaselineMinDays ? 'ready' : 'calibrating',
+          'windows': baselineWindows, 'days': baselineDays,
+          'ratioThreshold': personalRatio, 'pnnThreshold': personalPnn,
+          'lookbackMs': pulseBaselineLookbackMs,
+          'ratioMargin': pulseBaselineRatioMargin, 'pnnMargin': pulseBaselinePnnMargin,
+          'madMultiplier': pulseBaselineMadMultiplier,
+          'ratioCeiling': pulseBaselineRatioCeiling, 'pnnCeiling': pulseBaselinePnnCeiling,
+        },
         'thresholds': {
-          'ratio': 0.70,
-          'pnnPct': 30,
+          'ratio': ratioThreshold,
+          'pnnPct': pnnThreshold,
           'pnnMs': 70,
           'pairs': 200,
           'coverage': 0.8,
@@ -195,6 +242,13 @@ class PulseDetection {
 /// [evaluateToMs] (window starts in `[from, to)`) and supplies every beat from
 /// five minutes before `from` to five minutes after `to`; each window then has
 /// its whole context and decides exactly as it would in any other range.
+///
+/// With [context], callers supply the preceding [pulseBaselineLookbackMs]
+/// plus cleaning support. Context is source-specific; callers with different
+/// sensor contexts evaluate each source separately. [baselineExclusions] holds
+/// stored episode bounds of any status, before the policy adds its 30-min halo.
+/// Local date labels come from the caller's one day-label API. Missing context
+/// never prevents a fixed-floor-positive irregular window from qualifying.
 ///
 /// Time order and detection order are not the same thing at a record overlap:
 /// a beat that lands before its predecessor (by at most
@@ -271,7 +325,8 @@ PulseDetection detectPulseEpisodes(
     });
     if (beats.isEmpty) continue;
     final first = math.max(
-        (evaluateFromMs ?? sourceStartMs) ~/ pulseWindowMs * pulseWindowMs,
+        ((evaluateFromMs ?? sourceStartMs) -
+            (context.isEmpty ? 0 : pulseBaselineLookbackMs)) ~/ pulseWindowMs * pulseWindowMs,
         beats.first.timeMs ~/ pulseWindowMs * pulseWindowMs);
     final last = math.min(
             math.min(completeThroughMs, beats.last.timeMs),
@@ -300,8 +355,8 @@ PulseDetection detectPulseEpisodes(
           ? end + pulseWindowMs
           : math.min(sourceEndMs, end + pulseWindowMs);
       final pending = end > completeThroughMs || supportEnd > completeThroughMs;
-      final context = beats.sublist(cut(supportStart), cut(supportEnd));
-      final evidence = _evidence(context);
+      final support = beats.sublist(cut(supportStart), cut(supportEnd));
+      final evidence = _evidence(support);
       final evidenceById = {for (final b in evidence) b.id: b};
       final own = [
         for (final b in evidence)
@@ -342,7 +397,7 @@ PulseDetection detectPulseEpisodes(
       gap = math.max(gap, end - cursor);
       final cleaned = own.where((b) => b.corrected || b.dropped).length;
       final reasons = <String>[
-        if (context.any((b) => invalid.contains(b.id))) 'timestamps',
+        if (support.any((b) => invalid.contains(b.id))) 'timestamps',
         if (start < sourceStartMs) 'incompleteSupport',
         if (diffs.length < 200) 'pairs',
         if (coverage / pulseWindowMs < 0.8) 'coverage',
@@ -350,6 +405,43 @@ PulseDetection detectPulseEpisodes(
         if (own.isNotEmpty && cleaned / own.length > 0.3) 'cleaning',
         if (ratio == null) 'degenerate',
       ];
+      final ctx = context[start] ?? const PulseWindowContext();
+      final lag3 = _correlation(own, 3), lag4 = _correlation(own, 4);
+      final heartRate = values.isEmpty ? null : 60000 / mean(values)!;
+      final patterned = ctx.asleep == true && heartRate != null &&
+          heartRate <= pulseSleepMaxBpm &&
+          ((lag3 != null && lag3 >= pulseBreathingCorrelation) ||
+           (lag4 != null && lag4 >= pulseBreathingCorrelation));
+      final positiveContext = ctx.motion == true || ctx.wear == false || ctx.charging == true;
+      final quality = !pending && reasons.isEmpty && !positiveContext;
+      final excluded = (baselineExclusions[source] ?? const <List<int>>[]).any(
+        (span) => span[0] - 1800000 < end && span[1] + 1800000 > start);
+      final history = ctx.day == null ? <PulseWindow>[] : ownWindows.where((w) =>
+          w.normalForBaseline && w.context.day != null &&
+          w.context.day!.compareTo(ctx.day!) < 0 &&
+          w.endMs <= start && w.startMs >= start - pulseBaselineLookbackMs &&
+          w.context.asleep == ctx.asleep).toList();
+      final days = history.map((w) => w.context.day).toSet().length;
+      final ready = history.length >= pulseBaselineMinWindows && days >= pulseBaselineMinDays;
+      final personalRatio = ready ? _personalThreshold(
+        history.map((w) => w.ratio!).toList(), 0.7,
+        pulseBaselineRatioMargin, pulseBaselineRatioCeiling) : 0.7;
+      final personalPnn = ready ? _personalThreshold(
+        history.map((w) => w.pnnPct!).toList(), 30,
+        pulseBaselinePnnMargin, pulseBaselinePnnCeiling) : 30.0;
+      // CLAIM(pulse-baseline-bound): personal thresholds cannot suppress a
+      // fixed-floor-positive window without independent exclusion evidence
+      // [pulse_fixes_policy_test]. Uncorrelated windows keep the fixed floors.
+      final independentlyExcluded = patterned || positiveContext;
+      final ratioThreshold = independentlyExcluded ? personalRatio : 0.7;
+      final pnnThreshold = independentlyExcluded ? personalPnn : 30.0;
+      final normal = quality && !excluded && ctx.asleep != null &&
+          ctx.motion == false && ctx.wear == true &&
+          (patterned || (ratio != null && pnn != null && (ratio < 0.7 || pnn < 30)));
+      if (ctx.motion == true) reasons.add('motion');
+      if (ctx.wear == false) reasons.add('offWrist');
+      if (ctx.charging == true) reasons.add('charging');
+      if (patterned) reasons.add('sleepBreathing');
       ownWindows.add(PulseWindow(
           source: source,
           startMs: start,
@@ -364,7 +456,13 @@ PulseDetection detectPulseEpisodes(
           ratio: ratio,
           pnnPct: pnn,
           pending: pending,
-          qualified: !pending && reasons.isEmpty && ratio! >= 0.7 && pnn! >= 30,
+          qualified: !pending && reasons.isEmpty && ratio! >= ratioThreshold && pnn! >= pnnThreshold,
+          motion: ctx.motion, wear: ctx.wear, context: ctx,
+          lag3: lag3, lag4: lag4, heartRate: heartRate,
+          ratioThreshold: ratioThreshold, pnnThreshold: pnnThreshold,
+          personalRatio: personalRatio, personalPnn: personalPnn,
+          baselineWindows: history.length, baselineDays: days,
+          normalForBaseline: normal,
           reasons: reasons,
           beats: own));
     }
@@ -376,7 +474,9 @@ PulseDetection detectPulseEpisodes(
       run = [];
     }
 
-    for (final w in ownWindows) {
+    final evaluated = ownWindows.where((w) =>
+      evaluateFromMs == null || w.startMs >= evaluateFromMs).toList();
+    for (final w in evaluated) {
       if (w.pending) {
         finish(true);
         break;
@@ -388,7 +488,7 @@ PulseDetection detectPulseEpisodes(
       }
     }
     finish(true);
-    windows.addAll(ownWindows);
+    windows.addAll(evaluated);
   }
   return PulseDetection(
       List.unmodifiable(windows), List.unmodifiable(episodes));
@@ -470,4 +570,28 @@ List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
             if (corrected[i] == null) 'dropped'
           ])
   ];
+}
+
+// Pearson correlation only across intact adjacency chains. Dropped beats,
+// overlapping record boundaries and gaps never become artificial neighbours.
+double? _correlation(List<PulseBeatEvidence> beats, int lag) {
+  var n = 0, sx = 0.0, sy = 0.0, xx = 0.0, yy = 0.0, xy = 0.0;
+  for (var i = lag; i < beats.length; i++) {
+    var intact = beats[i - lag].featureUse;
+    for (var j = 0; j < lag; j++) {
+      intact = intact && beats[i - j].validAdjacent;
+    }
+    if (!intact) continue;
+    final x = beats[i].correctedMs!, y = beats[i - lag].correctedMs!;
+    n++; sx += x; sy += y; xx += x*x; yy += y*y; xy += x*y;
+  }
+  if (n < 40) return null;
+  final variance = (xx - sx*sx/n) * (yy - sy*sy/n);
+  return variance <= 0 ? null : ((xy - sx*sy/n) / math.sqrt(variance)).clamp(-1.0, 1.0);
+}
+
+double _personalThreshold(List<double> values, double floor, double margin, double ceiling) {
+  final center = median(values)!;
+  final mad = median([for (final x in values) (x-center).abs()])!;
+  return (center + math.max(margin, pulseBaselineMadMultiplier * mad)).clamp(floor, ceiling);
 }

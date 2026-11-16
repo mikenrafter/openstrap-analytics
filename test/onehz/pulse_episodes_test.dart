@@ -75,7 +75,46 @@ int stepsBack(List<PulseBeatInput> beats) {
   return n;
 }
 
+// Literal policy control: the same RR spread at sleeping and faster rates.
+List<PulseBeatInput> breathingTrace({bool random = false, double meanMs = 1150}) {
+  final rng = Random(53), out = <PulseBeatInput>[];
+  var time = 0.0, index = 0;
+  while (time < 25 * 60000) {
+    final rr = meanMs + (random ? rng.nextDouble() * 400 - 200
+      : 90 * sin(2 * pi * index / 3.7));
+    time += rr;
+    out.add(PulseBeatInput(id:'sleep:$index',source:'strap',index:index++,
+      timeMs:time.round(),rawMs:rr));
+  }
+  return out;
+}
+
 void main() {
+  // WHY/CLAIM(pulse-sleep-pattern): periodic low-HR sleep and independent
+  // irregular RR at the same HR must take different decisions.
+  // # catches: a blanket sleep veto or retaining only the old two metric floors.
+  test('breathing veto is confined to confirmed low-HR sleep', () {
+    final sleeping = <int,PulseWindowContext>{
+      for(var t=0;t<25*60000;t+=pulseWindowMs)
+        t:const PulseWindowContext(asleep:true,motion:false,wear:true,day:'1970-01-01')};
+    PulseDetection run(List<PulseBeatInput> beats, Map<int,PulseWindowContext> ctx) =>
+      detectPulseEpisodes(beats,completeThroughMs:1200000,sourceStartMs:0,context:ctx);
+    expect(run(breathingTrace(),sleeping).episodes,isEmpty);
+    expect(run(breathingTrace(),sleeping).windows.first.reasons,contains('sleepBreathing'));
+    expect(run(breathingTrace(),{}).episodes,hasLength(1));
+    expect(run(breathingTrace(meanMs:60000/66),sleeping).episodes,hasLength(1));
+    expect(run(breathingTrace(random:true),sleeping).episodes,hasLength(1));
+  });
+  // WHY/CLAIM(pulse-context): unknown optional inputs cannot switch off alerts.
+  // # catches: treating unknown wear as off-wrist or dropping context diagnostics.
+  test('unknown sensor context preserves irregular alert eligibility and fixed floors', () {
+    final result = detectPulseEpisodes(breathingTrace(random:true),
+      completeThroughMs:1200000,sourceStartMs:0);
+    expect(result.episodes.single.alertEligible,isTrue);
+    expect(result.windows.first.toJson()['context'],containsPair('status','unknown'));
+    expect(result.windows.first.ratioThreshold,0.7);
+    expect(result.windows.first.pnnThreshold,30);
+  });
   // WHY/CLAIM(pulse-closed): a transport boundary cannot vote or qualify ten minutes.
   test(
       'requires two consecutive closed supported windows; unknown wear permits alert',
