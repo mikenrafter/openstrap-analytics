@@ -42,4 +42,39 @@ void main() {
       isNull,
     );
   });
+  // WHY/CLAIM(pulse-respiratory-residual): a narrow fit removes only its known
+  // component. # catches: a broad filter or a wrong frequency/time unit.
+  test('narrow sinusoid fit has the known interpolation attenuation', () {
+    final times = [for (var i = 0; i <= 300; i++) i * 1000];
+    final values = [
+      for (var i = 0; i <= 300; i++) 1150 + 100 * sin(2 * pi * i / 4)
+    ];
+    final fit = pulseRespiratoryFit(times, values, 0, 300000, .25)!;
+    expect(fit.strong, isTrue);
+    expect(fit.frequencyHz, .25);
+    // Linear interpolation on half-second grid has fundamental amplitude
+    // 100*(1+cos(pi/4))/2 = 85.3553 ms. Fitting does not undo attenuation.
+    expect(fit.componentAt(1000), closeTo(85.3553, .1));
+    expect(fit.componentAt(0), closeTo(0, .1));
+    expect(fit.explainedVariance, closeTo(0.9714, .001));
+  });
+  // WHY: weak or unsupported fits must keep the fixed-floor decision.
+  // # catches: treating any least-squares solution as independent exclusion.
+  test('fit refuses degenerate, missing, out-of-band and weak evidence', () {
+    final times = [for (var i = 0; i <= 300; i++) i * 1000];
+    final random = Random(40);
+    final noise = [
+      for (var i = 0; i <= 300; i++) 1150 + 120 * (2 * random.nextDouble() - 1)
+    ];
+    expect(
+        pulseRespiratoryFit(
+            times, List.filled(times.length, 1150), 0, 300000, .25),
+        isNull);
+    expect(
+        pulseRespiratoryFit(
+            times.sublist(10), noise.sublist(10), 0, 300000, .25),
+        isNull);
+    expect(pulseRespiratoryFit(times, noise, 0, 300000, .10), isNull);
+    expect(pulseRespiratoryFit(times, noise, 0, 300000, .25)!.strong, isFalse);
+  });
 }

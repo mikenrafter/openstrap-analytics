@@ -7,9 +7,10 @@ import '../util.dart';
 import 'pulse_respiratory_spectrum.dart';
 
 const pulseWindowMs = 300000;
-// v3: supported neighboring respiratory spectra replace chance lag correlation.
-// V1 stored decisions stay frozen; v2 decisions may receive contextual corrections.
-const pulseDetectorVersion = 3;
+// v4: matched respiratory spectra only trigger a narrow sinusoid fit;
+// original beat-domain residuals must fail fixed floors before exclusion.
+// V1 stored decisions stay frozen; v2 and later decisions remain correctable.
+const pulseDetectorVersion = 4;
 const pulseBaselineLookbackMs = 14 * 24 * 3600000;
 const pulseSleepMaxBpm = 65.0;
 const pulseBaselineMinWindows = 24;
@@ -115,6 +116,7 @@ class PulseWindow {
   final double? lag3, lag4, heartRate;
   final double? breathingPeakHz, breathingConcentration, breathingProminence;
   final int? breathingPartnerMs;
+  final Map<String, Object?>? breathingResidual;
   final double ratioThreshold, pnnThreshold, personalRatio, personalPnn;
   final int baselineWindows, baselineDays;
   final bool normalForBaseline;
@@ -145,7 +147,7 @@ class PulseWindow {
       this.wear,
       this.context = const PulseWindowContext(),
       this.lag3, this.lag4, this.heartRate,
-      this.breathingPeakHz, this.breathingConcentration, this.breathingProminence, this.breathingPartnerMs,
+      this.breathingPeakHz, this.breathingConcentration, this.breathingProminence, this.breathingPartnerMs, this.breathingResidual,
       this.ratioThreshold = 0.7, this.pnnThreshold = 30,
       this.personalRatio = 0.7, this.personalPnn = 30,
       this.baselineWindows = 0, this.baselineDays = 0,
@@ -182,7 +184,7 @@ class PulseWindow {
           'peakHz': breathingPeakHz, 'concentration': breathingConcentration,
           'prominence': breathingProminence, 'minProminence': pulseRespiratoryProminence,
           'baselineRadiusSamples': pulseRespiratoryBaselineRadius, 'edgeTrimMs': 5000,
-          'partnerStartMs': breathingPartnerMs,
+          'partnerStartMs': breathingPartnerMs, 'residual': breathingResidual,
           'minHz': pulseRespiratoryMinHz, 'maxHz': pulseRespiratoryMaxHz,
           'minConcentration': pulseRespiratoryConcentration,
           'frequencyToleranceHz': pulseRespiratoryToleranceHz,
@@ -350,6 +352,7 @@ PulseDetection detectPulseEpisodes(
         pulseWindowMs *
         pulseWindowMs;
     final drafts = <PulseWindow>[];
+    final predecessors = <int, PulseBeatEvidence?>{};
     // Binary cuts keep a long input O(w log n + n * bounded context).
     int cut(int time) {
       var lo = 0, hi = beats.length;
@@ -378,6 +381,7 @@ PulseDetection detectPulseEpisodes(
         for (final b in evidence)
           if (b.timeMs >= start && b.timeMs < end) b
       ];
+      predecessors[start] = own.isEmpty ? null : evidenceById[own.first.predecessorId];
       final diffs = <double>[];
       for (final b in own) {
         if (b.validAdjacent && b.correctedMs != null) {
@@ -389,15 +393,9 @@ PulseDetection detectPulseEpisodes(
         for (final b in own)
           if (b.featureUse) b.correctedMs!
       ];
-      final sdsd = stddev(diffs), sdnn = stddev(values);
-      final sd1 = sdsd == null ? null : sdsd / math.sqrt2;
-      final variance =
-          sd1 == null || sdnn == null ? null : 2 * sdnn * sdnn - sd1 * sd1;
-      final sd2 = variance != null && variance > 0 ? math.sqrt(variance) : null;
-      final ratio = sd1 != null && sd2 != null ? sd1 / sd2 : null;
-      final pnn = diffs.isEmpty
-          ? null
-          : 100 * diffs.where((d) => d.abs() > 70).length / diffs.length;
+      final features = _pulseFeatures(values, diffs);
+      final sd1 = features.sd1, sd2 = features.sd2;
+      final ratio = features.ratio, pnn = features.pnnPct;
       var coverage = 0.0, cursor = start.toDouble(), gap = 0.0;
       // Union of usable raw interval support, never a sum of overlapping intervals.
       for (final b in own) {
@@ -477,7 +475,10 @@ PulseDetection detectPulseEpisodes(
           }
         }
       }
-      final patterned = partner != null;
+      // A matched respiratory peak is a trigger, not proof that it explains
+      // irregularity. Preserve every original adjacency/quality decision.
+      final residual = partner == null ? null : _respiratoryResidual(w, predecessors[w.startMs]);
+      final patterned = residual?['excludes'] == true;
       final ctx = w.context;
       final positiveContext = ctx.motion == true || ctx.wear == false || ctx.charging == true;
       final quality = !w.pending && w.qualityReasons.isEmpty && !positiveContext;
@@ -514,7 +515,7 @@ PulseDetection detectPulseEpisodes(
         lag3: w.lag3, lag4: w.lag4, heartRate: w.heartRate,
         breathingPeakHz: w.breathingPeakHz, breathingConcentration: w.breathingConcentration,
         breathingProminence: w.breathingProminence,
-        breathingPartnerMs: partner?.startMs,
+        breathingPartnerMs: partner?.startMs, breathingResidual: residual,
         ratioThreshold: ratioThreshold, pnnThreshold: pnnThreshold,
         personalRatio: personalRatio, personalPnn: personalPnn,
         baselineWindows: history.length, baselineDays: days,
@@ -631,9 +632,9 @@ List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
 // record timestamps select the UTC window; their sub-beat quantization must
 // not smear its respiratory peak. A gap beyond the recording policy or a
 // missing source beat refuses this exclusion; fixed screening floors still apply.
-({double frequencyHz, double concentration, double prominence})?
-    _rrRespiratorySpectrum(List<PulseBeatEvidence> beats) {
-  final times = <int>[], values = <double>[];
+({List<int> times, List<double> values, Map<String,double> beatTimes, int endMs})?
+    _rrTachogram(List<PulseBeatEvidence> beats) {
+  final times = <int>[], values = <double>[], beatTimes = <String,double>{};
   var elapsed = 0.0;
   for (var i = 0; i < beats.length; i++) {
     final b = beats[i];
@@ -643,14 +644,60 @@ List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
       final extraGap = b.timeMs - previous.timeMs - b.rawMs;
       if (b.index != previous.index + 1 || extraGap > 5000) return null;
       // Record placement has up to two seconds of model error. Longer gaps
-      // remain on the spectral clock instead of concatenating missing time.
+      // stay on the spectral clock instead of concatenating missing time.
       if (extraGap > pulseOverlapToleranceMs) elapsed += extraGap;
     }
     elapsed += b.rawMs;
-    // Dropped RR still advances time; no missing interval is concatenated away.
+    // Dropped RR still advances the clock; the original mask remains intact.
+    beatTimes[b.id] = elapsed;
     if (b.featureUse) { times.add(elapsed.round()); values.add(b.correctedMs!); }
   }
-  return pulseRespiratorySpectrum(times, values, 0, elapsed.round());
+  return (times: times, values: values, beatTimes: beatTimes, endMs: elapsed.round());
+}
+
+({double frequencyHz, double concentration, double prominence})?
+    _rrRespiratorySpectrum(List<PulseBeatEvidence> beats) {
+  final series = _rrTachogram(beats);
+  return series == null ? null : pulseRespiratorySpectrum(series.times, series.values, 0, series.endMs);
+}
+
+Map<String,Object?>? _respiratoryResidual(PulseWindow window, PulseBeatEvidence? predecessor) {
+  final series = _rrTachogram(window.beats);
+  if (series == null) return null;
+  final fit = pulseRespiratoryFit(series.times, series.values, 0, series.endMs, window.breathingPeakHz!);
+  if (fit == null) return {'status': 'failed', 'excludes': false};
+  final residuals = <String,double>{
+    for (final b in window.beats)
+      if (b.correctedMs != null) b.id: b.correctedMs! - fit.componentAt(series.beatTimes[b.id]!),
+    // The first window beat may pair with a predecessor outside the window.
+    // Its RR ends at clock zero, exactly one raw interval before the first beat.
+    if (predecessor?.correctedMs != null) predecessor!.id: predecessor.correctedMs! - fit.componentAt(0),
+  };
+  final values = [for (final b in window.beats) if (b.featureUse) residuals[b.id]!];
+  final diffs = <double>[];
+  for (final b in window.beats) {
+    if (!b.validAdjacent || b.correctedMs == null) continue;
+    final prior = residuals[b.predecessorId];
+    if (prior == null) return {...fit.toJson(), 'status': 'missingPredecessor', 'excludes': false};
+    diffs.add(residuals[b.id]! - prior);
+  }
+  final features = _pulseFeatures(values, diffs);
+  final ratio = features.ratio, pnn = features.pnnPct;
+  return {...fit.toJson(), 'ratio': ratio, 'pnnPct': pnn, 'pairs': diffs.length,
+    'ratioFloor': 0.7, 'pnnFloor': 30, 'pnnMs': 70, 'domain': 'original_beats',
+    'excludes': fit.strong && ((ratio != null && ratio < 0.7) || (pnn != null && pnn < 30))};
+}
+
+// Raw and residual decisions use exactly the same beat-domain statistics.
+({double? sd1, double? sd2, double? ratio, double? pnnPct})
+    _pulseFeatures(List<double> values, List<double> diffs) {
+  final sdsd = stddev(diffs), sdnn = stddev(values);
+  final sd1 = sdsd == null ? null : sdsd / math.sqrt2;
+  final variance = sd1 == null || sdnn == null ? null : 2*sdnn*sdnn-sd1*sd1;
+  final sd2 = variance != null && variance > 0 ? math.sqrt(variance) : null;
+  final ratio = sd1 != null && sd2 != null ? sd1/sd2 : null;
+  final pnn = diffs.isEmpty ? null : 100*diffs.where((d)=>d.abs()>70).length/diffs.length;
+  return (sd1: sd1, sd2: sd2, ratio: ratio, pnnPct: pnn);
 }
 
 // Pearson correlation only across intact adjacency chains. Dropped beats,
