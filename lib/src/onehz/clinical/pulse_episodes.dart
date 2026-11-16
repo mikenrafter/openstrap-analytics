@@ -210,6 +210,7 @@ PulseDetection detectPulseEpisodes(
   int? evaluateFromMs,
   int? evaluateToMs,
   Map<int, PulseWindowContext> context = const {},
+  Map<String, List<List<int>>> baselineExclusions = const {},
 }) {
   final sources = <String, List<PulseBeatInput>>{};
   for (final b in input) {
