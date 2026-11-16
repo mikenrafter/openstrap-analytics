@@ -16,6 +16,13 @@ const pulseDetectorVersion = 1;
 /// maximal plausible interval (2 s) is the bound on that model error.
 const pulseOverlapToleranceMs = 2000;
 
+/// Per-window committed context. Null measurements are explicitly unknown.
+class PulseWindowContext {
+  final bool? asleep, motion, wear, charging;
+  final String? day;
+  const PulseWindowContext({this.asleep, this.motion, this.wear, this.charging, this.day});
+}
+
 class PulseBeatInput {
   final String id, source;
   final int index, timeMs, revision;
@@ -202,6 +209,7 @@ PulseDetection detectPulseEpisodes(
   int? sourceEndMs,
   int? evaluateFromMs,
   int? evaluateToMs,
+  Map<int, PulseWindowContext> context = const {},
 }) {
   final sources = <String, List<PulseBeatInput>>{};
   for (final b in input) {
