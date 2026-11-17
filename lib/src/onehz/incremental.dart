@@ -2,6 +2,10 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
+
+import '../aggregate/aggregator.dart' show DoubleColumn;
+import '../aggregate/primitives.dart' show Sum;
 import 'types.dart';
 import 'util.dart' show hasRegressingBeatTimes;
 import 'clinical/hrv_time.dart';

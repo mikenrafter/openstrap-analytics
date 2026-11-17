@@ -9,14 +9,33 @@ class MinuteMetrics {
       {required this.trimp, required this.strain, this.energy, this.minutes});
 }
 
-class _MinuteBill {
-  final double hr;
-  final double? cadence;
-  final double trimp;
-  final MinuteEnergySource? source;
-  final double active, walking;
-  const _MinuteBill(this.hr, this.cadence, this.trimp, this.source, this.active,
-      this.walking);
+// Owned by IncrementalMinuteMetrics. Rows follow the caller's last key order.
+// Null cadence has its own presence bit so it remains distinct from NaN.
+class _MinuteBillColumns {
+  final Float64List hr, cadence, trimp, active, walking;
+  final Uint8List hasCadence, source;
+  _MinuteBillColumns(int capacity)
+      : hr = Float64List(capacity),
+        cadence = Float64List(capacity),
+        trimp = Float64List(capacity),
+        active = Float64List(capacity),
+        walking = Float64List(capacity),
+        hasCadence = Uint8List(capacity),
+        source = Uint8List(capacity);
+
+  double? cadenceAt(int i) => hasCadence[i] == 0 ? null : cadence[i];
+  MinuteEnergySource? sourceAt(int i) =>
+      source[i] == 0 ? null : MinuteEnergySource.values[source[i] - 1];
+
+  void copyRow(int to, _MinuteBillColumns old, int from) {
+    hr[to] = old.hr[from];
+    cadence[to] = old.cadence[from];
+    hasCadence[to] = old.hasCadence[from];
+    trimp[to] = old.trimp[from];
+    active[to] = old.active[from];
+    walking[to] = old.walking[from];
+    source[to] = old.source[from];
+  }
 }
 
 /// Retains nonlinear TRIMP and energy contributions by caller-supplied key.
@@ -24,13 +43,15 @@ class _MinuteBill {
 /// matching the batch dailyEnergy API's integer duration.
 // Banister 1991 / Morton 1990 TRIMP; Keytel 2005 / Mifflin-St Jeor 1990 / Tudor-
 // Locke 2019 energy. Retains identical keyed minute contributions; edits replace
-// them and dependency changes rebuild. Checked numeric field tolerance is
-// max(1e-9 absolute, 1e-8 relative); presence, tier, inputs, notes, minute keys,
-// counts, sources and abstention reasons match exactly.
+// them and dependency changes rebuild.
+// CLAIM(minute-bill-order): cached contributions fold in input order using
+// batch's compensated TRIMP sum and separate ordinary HR/walking sums
+// [minute_bill_cache_test: exact batch bytes after edits/removal/reorder/insertion].
 class IncrementalMinuteMetrics {
-  final Map<int, _MinuteBill> _bills = {};
+  final Map<int, int> _billIndices = {};
   final List<int> _keys = [];
-  final List<_MinuteBill> _orderedBills = [];
+  _MinuteBillColumns _columns = _MinuteBillColumns(0);
+  bool _cacheReady = true;
   List<Object?>? _parameters;
   double _trimpTotal = 0;
   double _hrActiveTotal = 0, _walkingTotal = 0;
@@ -82,13 +103,14 @@ class IncrementalMinuteMetrics {
     }
     if (json['bills'] is! List)
       throw const FormatException('Invalid minute bills');
+    state._columns = _MinuteBillColumns((json['bills'] as List).length);
     var summedTrimp = 0.0;
     for (final raw in json['bills'] as List) {
       final data = _map(raw);
       if (data['key'] is! int)
         throw const FormatException('Invalid minute key');
       final key = data['key'] as int;
-      if (state._bills.containsKey(key))
+      if (state._billIndices.containsKey(key))
         throw const FormatException('Duplicate minute key');
       final hr = _number(data['hr']);
       final cadence = data['cadence'] == null ? null : _number(data['cadence']);
@@ -110,16 +132,22 @@ class IncrementalMinuteMetrics {
           (source != MinuteEnergySource.hr && active != 0) ||
           (state._basalPerMinute == null && source != null))
         throw const FormatException('Invalid minute contribution');
-      state._bills[key] =
-          _MinuteBill(hr, cadence, trimp, source, active, walking);
+      final i = state._keys.length;
+      state._billIndices[key] = i;
       state._keys.add(key);
-      state._orderedBills.add(state._bills[key]!);
+      state._columns.hr[i] = hr;
+      state._columns.cadence[i] = cadence ?? 0;
+      state._columns.hasCadence[i] = cadence == null ? 0 : 1;
+      state._columns.trimp[i] = trimp;
+      state._columns.source[i] = source == null ? 0 : source.index + 1;
+      state._columns.active[i] = active;
+      state._columns.walking[i] = walking;
       summedTrimp += trimp;
       state._hrActiveTotal += active;
       state._walkingTotal += walking;
     }
-    if (state._processedMinutes < state._bills.length ||
-        (state._parameters == null && state._bills.isNotEmpty) ||
+    if (state._processedMinutes < state._billIndices.length ||
+        (state._parameters == null && state._billIndices.isNotEmpty) ||
         (summedTrimp - state._trimpTotal).abs() >
             1e-9 * math.max(1, summedTrimp))
       throw const FormatException('Inconsistent minute checkpoint');
@@ -137,6 +165,30 @@ class IncrementalMinuteMetrics {
         state._hrActiveTotal = saved;
       } else {
         state._walkingTotal = saved;
+      }
+    }
+    final columns = json['billColumns'];
+    // CLAIM(minute-bill-migration): version-one row checkpoints predate the
+    // canonical fold. Reprice once on sync, retaining the accepted basal rate
+    // [minute_bill_cache_test: legacy checkpoint without bill columns].
+    state._cacheReady = columns != null;
+    if (columns != null) {
+      final saved = _map(columns);
+      for (final entry in <String, List<num>>{
+        'trimp': state._columns.trimp,
+        'active': state._columns.active,
+        'walking': state._columns.walking,
+        'source': state._columns.source,
+      }.entries) {
+        final values = saved[entry.key];
+        if (values is! List || values.length != state._keys.length) {
+          throw const FormatException('Invalid minute bill column');
+        }
+        for (var i = 0; i < values.length; i++) {
+          if (_number(values[i], finite: true) != entry.value[i]) {
+            throw const FormatException('Inconsistent minute bill column');
+          }
+        }
       }
     }
     return state;
@@ -162,38 +214,27 @@ class IncrementalMinuteMetrics {
     if (minuteKeys.length != hr.length ||
         (cadenceSpm != null && cadenceSpm.length != hr.length))
       throw ArgumentError('Minute keys, HR and cadence must align');
-    // A proven ordered prefix already has unique retained keys. Validate only
-    // new keys in that case; arbitrary edits use one set for validation and
-    // removal. Keep our own keys so caller mutations cannot poison this proof.
     var keyPrefix = minuteKeys.length >= _keys.length;
-    final changed = <int>[];
     if (keyPrefix) {
       for (var i = 0; i < _keys.length; i++) {
         if (minuteKeys[i] != _keys[i]) {
           keyPrefix = false;
           break;
         }
-        final old = _orderedBills[i];
-        if (!_same(old.hr, hr[i]) || !_same(old.cadence, cadenceSpm?[i])) {
-          changed.add(i);
-        }
       }
     }
-    Set<int>? retained;
+    // Validate before changing owned state. Retained prefix keys are already
+    // unique, so an ordinary interior value edit needs no set allocation.
     if (keyPrefix) {
       final added = minuteKeys.length - _keys.length > 1 ? <int>{} : null;
       for (var i = _keys.length; i < minuteKeys.length; i++) {
-        if (_bills.containsKey(minuteKeys[i]) ||
+        if (_billIndices.containsKey(minuteKeys[i]) ||
             (added != null && !added.add(minuteKeys[i]))) {
           throw ArgumentError('Minute keys must be unique');
         }
-        changed.add(i);
       }
-    } else {
-      retained = minuteKeys.toSet();
-      if (retained.length != minuteKeys.length) {
-        throw ArgumentError('Minute keys must be unique');
-      }
+    } else if (minuteKeys.toSet().length != minuteKeys.length) {
+      throw ArgumentError('Minute keys must be unique');
     }
     final parameters = <Object?>[
       restingHr == null ? null : _encode(restingHr),
@@ -229,29 +270,30 @@ class IncrementalMinuteMetrics {
       if (reprice) _basalPerMinute = _energyPricer?.basalKcalPerMin;
       _pricerReady = true;
     }
-    if (reprice) {
-      _bills.clear();
-      _trimpTotal = 0;
-      _hrActiveTotal = _walkingTotal = 0;
-    }
-    if (!keyPrefix && !reprice) {
-      for (final key in _bills.keys.toList()) {
-        if (!retained!.contains(key)) {
-          final old = _bills.remove(key)!;
-          _trimpTotal -= old.trimp;
-          _hrActiveTotal -= old.active;
-          _walkingTotal -= old.walking;
+    final priceAll = reprice || !_cacheReady;
+    final oldColumns = _columns;
+    final oldLength = _keys.length;
+    final rebuildOrder = !keyPrefix;
+    if (rebuildOrder || hr.length > _columns.hr.length) {
+      _columns = _MinuteBillColumns(math.max(hr.length, oldLength * 2));
+      if (!rebuildOrder) {
+        for (var i = 0; i < oldLength; i++) {
+          _columns.copyRow(i, oldColumns, i);
         }
       }
     }
-    final workIndices =
-        reprice || !keyPrefix ? Iterable<int>.generate(hr.length) : changed;
-    for (final i in workIndices) {
-      final key = minuteKeys[i], value = hr[i];
-      final cadence = cadenceSpm?[i];
-      final old = _bills[key];
-      if (old != null && _same(old.hr, value) && _same(old.cadence, cadence))
+    for (var i = 0; i < hr.length; i++) {
+      final oldIndex = keyPrefix
+          ? (i < oldLength ? i : null)
+          : _billIndices[minuteKeys[i]];
+      final value = hr[i], cadence = cadenceSpm?[i];
+      if (!priceAll &&
+          oldIndex != null &&
+          _same(oldColumns.hr[oldIndex], value) &&
+          _same(oldColumns.cadenceAt(oldIndex), cadence)) {
+        if (rebuildOrder) _columns.copyRow(i, oldColumns, oldIndex);
         continue;
+      }
       var trimp = 0.0;
       if (trimpValid && value.isFinite && value > 0) {
         final hrr = ((value - restingHr) / (maxHr - restingHr)).clamp(0.0, 1.0);
@@ -265,41 +307,38 @@ class IncrementalMinuteMetrics {
         active = bill.active;
         walking = bill.walking;
       }
-      _trimpTotal += trimp - (old?.trimp ?? 0);
-      _hrActiveTotal += active - (old?.active ?? 0);
-      _walkingTotal += walking - (old?.walking ?? 0);
-      final bill = _MinuteBill(value, cadence, trimp, source, active, walking);
-      _bills[key] = bill;
-      if (keyPrefix && !reprice) {
-        if (i < _orderedBills.length) {
-          _orderedBills[i] = bill;
-        } else {
-          _orderedBills.add(bill);
-        }
-      }
+      _columns.hr[i] = value;
+      _columns.cadence[i] = cadence ?? 0;
+      _columns.hasCadence[i] = cadence == null ? 0 : 1;
+      _columns.trimp[i] = trimp;
+      _columns.active[i] = active;
+      _columns.walking[i] = walking;
+      _columns.source[i] = source == null ? 0 : source.index + 1;
       _processedMinutes++;
     }
-    if (keyPrefix) {
-      for (var i = _keys.length; i < minuteKeys.length; i++) {
-        _keys.add(minuteKeys[i]);
-      }
-    } else {
-      _keys
-        ..clear()
-        ..addAll(minuteKeys);
+    if (rebuildOrder) {
+      _keys.clear();
+      _billIndices.clear();
     }
-    if (!keyPrefix || reprice) {
-      _orderedBills
-        ..clear()
-        ..addAll([for (final key in minuteKeys) _bills[key]!]);
+    for (var i = _keys.length; i < minuteKeys.length; i++) {
+      _keys.add(minuteKeys[i]);
+      _billIndices[minuteKeys[i]] = i;
     }
     _parameters = parameters;
-    // Rounding after removals can leave tiny negative residue in a zero day.
-    if (_trimpTotal < 0 && _trimpTotal > -1e-9) _trimpTotal = 0;
-    if (_hrActiveTotal < 0 && _hrActiveTotal > -1e-9) _hrActiveTotal = 0;
-    if (_walkingTotal < 0 && _walkingTotal > -1e-9) _walkingTotal = 0;
-    if (_bills.isEmpty) {
-      _trimpTotal = _hrActiveTotal = _walkingTotal = 0;
+    _cacheReady = true;
+    // Reuse the batch sum implementation. A view avoids copying or repricing
+    // the cached TRIMP column; ordinary energy sums match dailyEnergy's order.
+    // ↳ CLAIM(minute-bill-order)
+    final sum = Sum<DoubleColumn>((batch) => batch.values);
+    _trimpTotal = sum.finish(sum.addSlice(
+        sum.empty(),
+        DoubleColumn(Float64List.sublistView(_columns.trimp, 0, hr.length)),
+        0,
+        hr.length));
+    _hrActiveTotal = _walkingTotal = 0;
+    for (var i = 0; i < hr.length; i++) {
+      _hrActiveTotal += _columns.active[i];
+      _walkingTotal += _columns.walking[i];
     }
     final trimp = !trimpValid || hr.isEmpty
         ? banisterTrimp(const [], restingHr: restingHr, maxHr: maxHr, sex: sex)
@@ -317,12 +356,12 @@ class IncrementalMinuteMetrics {
     final minutes = !includeMinuteSeries || _basalPerMinute == null
         ? null
         : Calories.assembleMinuteEnergySeries([
-            for (final key in minuteKeys)
+            for (var i = 0; i < minuteKeys.length; i++)
               (
-                minute: key,
-                source: _bills[key]!.source,
-                active: _bills[key]!.active,
-                walking: _bills[key]!.walking
+                minute: minuteKeys[i],
+                source: _columns.sourceAt(i),
+                active: _columns.active[i],
+                walking: _columns.walking[i]
               ),
           ], basalKcalPerMin: _basalPerMinute!);
     final basal = (_basalPerMinute ?? 0) * dayMinutes;
@@ -342,6 +381,8 @@ class IncrementalMinuteMetrics {
               ));
   }
 
+  // Preserve the row format for older readers. A null billColumns marks a
+  // pending legacy rebuild; exported columns are copies of the typed buffers.
   Map<String, dynamic> toJson() => {
         'version': 1,
         'type': 'IncrementalMinuteMetrics',
@@ -361,19 +402,27 @@ class IncrementalMinuteMetrics {
         'walkingTotal': _walkingTotal,
         'basalPerMinute': _basalPerMinute,
         'bills': [
-          for (final entry in _bills.entries)
+          for (var i = 0; i < _keys.length; i++)
             {
-              'key': entry.key,
-              'hr': _encode(entry.value.hr),
-              'cadence': entry.value.cadence == null
+              'key': _keys[i],
+              'hr': _encode(_columns.hr[i]),
+              'cadence': _columns.cadenceAt(i) == null
                   ? null
-                  : _encode(entry.value.cadence!),
-              'trimp': entry.value.trimp,
-              'source': entry.value.source?.name,
-              'active': entry.value.active,
-              'walking': entry.value.walking,
+                  : _encode(_columns.cadence[i]),
+              'trimp': _columns.trimp[i],
+              'source': _columns.sourceAt(i)?.name,
+              'active': _columns.active[i],
+              'walking': _columns.walking[i],
             }
         ],
+        'billColumns': !_cacheReady
+            ? null
+            : {
+            'trimp': _columns.trimp.take(_keys.length).toList(),
+            'active': _columns.active.take(_keys.length).toList(),
+            'walking': _columns.walking.take(_keys.length).toList(),
+            'source': _columns.source.take(_keys.length).toList(),
+          },
       };
 }
 
