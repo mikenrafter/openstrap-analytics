@@ -11,7 +11,8 @@ import 'sri.dart';
 /// [firstIndex] is the absolute index of row zero. It lets [Lookback] preserve
 /// the day a comparison belongs to when it joins copied chunks at a seam.
 class Epochs extends Batch<Epochs> {
-  Epochs(this.asleep, {this.valid, this.firstIndex = 0});
+  Epochs(this.asleep, {this.valid, this.firstIndex = 0})
+      : assert(valid == null || valid.length == asleep.length);
 
   factory Epochs.fromJson(Object? json) {
     final map = decodeMap(json);
@@ -197,6 +198,11 @@ class _GroupedPairWindows
 
 /// Mergeable Phillips SRI over [Epochs].
 ///
+/// The complete record must start at [Epochs.firstIndex] zero. Nonzero indices
+/// are for contiguous chunks of that record; combine them in order with the
+/// zero-origin prefix before finishing. To evaluate a separate record, reindex
+/// it from zero rather than finishing a nonzero-origin chunk on its own.
+///
 /// The Lookback window has one row from each of two adjacent clock days. Its
 /// last row determines the later-day key used by GroupBy.
 // Phillips et al. 2017 SRI, as in phillipsSri(). Lookback pairs epochs exactly
@@ -228,6 +234,19 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
       throw const FormatException('Lookback length disagrees with epoch count');
     }
     final groups = decodeMap(field(lookback, 'inner'));
+    if (count > 0) {
+      // The last edge's absolute index is fixed by the first and the count. A
+      // wrong one decodes and then breaks the join with the next batch (or,
+      // without assertions, compares against the wrong day).
+      final firstEdge = decodeMap(field(lookback, 'first'));
+      final lastEdge = decodeMap(field(lookback, 'last'));
+      final firstAt = decodeCount(field(firstEdge, 'firstIndex'));
+      final lastAt = decodeCount(field(lastEdge, 'firstIndex'));
+      final lastLen = Epochs.fromJson(lastEdge).length;
+      if (lastLen < 1 || lastAt != firstAt + count - lastLen) {
+        throw const FormatException('Last SRI epoch is out of position');
+      }
+    }
     if (count <= epochsPerDay) {
       if (groups.isNotEmpty) {
         throw const FormatException('Pair days without complete comparisons');
@@ -300,8 +319,17 @@ Aggregator<dynamic, Epochs, Metric<SriResult>> sriAggregator(
       );
     }
 
+  if (sriPairs.isEmpty) {
+    return Metric<SriResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no adjacent-day pair has ≥$pairFloor epochs observed on both '
+          'days (have=$cases epochs in total)',
+    );
+  }
+
     final sri = 200.0 * agreement / cases - 100.0;
-    final confidence = ((days - 1) / 7.0).clamp(0.3, 0.95);
+    final confidence = (sriPairs.length / 7.0).clamp(0.3, 0.95);
     return Metric<SriResult>(
       value: SriResult(sri, days, cases, sriPairs),
       confidence: confidence,

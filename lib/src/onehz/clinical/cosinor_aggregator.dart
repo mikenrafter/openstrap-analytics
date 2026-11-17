@@ -24,8 +24,7 @@ class TimedValues extends Batch<TimedValues> {
   final Float64List y;
 
   @override
-  Object? toJson() =>
-      {'tHours': encodeDoubles(tHours), 'y': encodeDoubles(y)};
+  Object? toJson() => {'tHours': encodeDoubles(tHours), 'y': encodeDoubles(y)};
 
   @override
   int get length => y.length;
@@ -62,7 +61,12 @@ class _CosinorState {
   var mCY = 0.0;
   var mSY = 0.0;
 
-  void addCentered(double c, double s, double y) {
+  /// The largest |2 pi t / period| seen: the scale of the argument the cosine
+  /// and sine columns were evaluated at, which bounds their rounding error.
+  /// Once non-finite it stays so, and the design is refused as non-finite.
+  var maxArg = 0.0;
+
+  void addCentered(double c, double s, double y, [double arg = 0.0]) {
     final nextN = n + 1;
     final dc = c - meanC;
     final ds = s - meanS;
@@ -79,6 +83,7 @@ class _CosinorState {
     meanC = nextMeanC;
     meanS = nextMeanS;
     meanY = nextMeanY;
+    maxArg = _maxAbs(maxArg, arg);
     n = nextN;
   }
 
@@ -94,6 +99,7 @@ class _CosinorState {
       mCS = other.mCS;
       mCY = other.mCY;
       mSY = other.mSY;
+      maxArg = other.maxArg;
       n = other.n;
       return;
     }
@@ -111,9 +117,30 @@ class _CosinorState {
     meanC += dc * other.n / total;
     meanS += ds * other.n / total;
     meanY += dy * other.n / total;
+    maxArg = _maxAbs(maxArg, other.maxArg);
     n = total;
   }
 }
+
+/// A stored argument scale is an absolute value: negative is not a state this
+/// aggregator can have built (NaN and infinity are, and are refused at finish).
+double _decodeMaxArg(Object? json) {
+  final v = decodeDouble(json);
+  if (v < 0) throw const FormatException('Negative cosinor argument scale');
+  return v;
+}
+
+/// max(|current|, |value|) that keeps a non-finite result: a NaN or infinite
+/// argument must reach the finiteness check, not be dropped by a comparison.
+double _maxAbs(double current, double value) {
+  final a = value.abs();
+  if (!current.isFinite) return current;
+  if (!a.isFinite) return a;
+  return a > current ? a : current;
+}
+
+/// Double machine epsilon, 2^-52.
+const double _machineEps = 2.220446049250313e-16;
 
 class _CosinorStats
     extends Aggregator<_CosinorState, TimedValues, _CosinorState> {
@@ -127,12 +154,13 @@ class _CosinorStats
   @override
   _CosinorState addSlice(
       _CosinorState state, TimedValues batch, int start, int end) {
+    if (!periodHours.isFinite || periodHours <= 0) return state;
     final w = 2 * math.pi / periodHours;
     for (var i = start; i < end; i++) {
       final c = math.cos(w * batch.tHours[i]);
       final s = math.sin(w * batch.tHours[i]);
       final y = batch.y[i];
-      state.addCentered(c, s, y);
+      state.addCentered(c, s, y, w * batch.tHours[i]);
     }
     return state;
   }
@@ -161,6 +189,7 @@ class _CosinorStats
         'mCS': encodeDouble(state.mCS),
         'mCY': encodeDouble(state.mCY),
         'mSY': encodeDouble(state.mSY),
+        'maxArg': encodeDouble(state.maxArg),
       };
 
   @override
@@ -176,7 +205,8 @@ class _CosinorStats
       ..mYY = decodeDouble(field(map, 'mYY'))
       ..mCS = decodeDouble(field(map, 'mCS'))
       ..mCY = decodeDouble(field(map, 'mCY'))
-      ..mSY = decodeDouble(field(map, 'mSY'));
+      ..mSY = decodeDouble(field(map, 'mSY'))
+      ..maxArg = _decodeMaxArg(field(map, 'maxArg'));
   }
 }
 
@@ -200,12 +230,62 @@ Metric<CosinorFit> _finishCosinor(
   required int minPoints,
 }) {
   const inputs = ['signal_timeseries'];
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'invalid cosinor period',
+    );
+  }
   final n = state.n;
-  if (n < math.max(4, minPoints) || periodHours <= 0) {
+  if (n < math.max(4, minPoints)) {
     return const Metric<CosinorFit>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'too few points for cosinor',
+    );
+  }
+  // A finite period or response can still overflow the design arithmetic.
+  // Reject invalid moments before NaN can bypass the identifiability gate.
+  // CLAIM(review-input-refusals): applies to slices, merges and restores too.
+  if (![
+    state.meanC,
+    state.meanS,
+    state.meanY,
+    state.mCC,
+    state.mSS,
+    state.mYY,
+    state.mCS,
+    state.mCY,
+    state.mSY,
+    state.maxArg
+  ].every((v) => v.isFinite)) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite cosinor design',
+    );
+  }
+  // A column whose centered energy is only what rounding can produce carries no
+  // phase information. Each cosine or sine is evaluated at fl(fl(2 pi / period)
+  // * t): that argument has a relative error of about 1.5 eps (the rounded
+  // period constant and the rounded product), so an absolute error of at most
+  // 1.5 eps A for A = max |argument|, and the library function adds at most one
+  // ulp (about eps). Every computed value is within 2 eps (A + 1) of the exact
+  // one, so two of them differ by at most 4 eps (A + 1), and a column whose true
+  // values are all equal (a sine at t = 12 i with a 24 h period is exactly zero
+  // at every sample) has a centered sum of squares of at most n * that bound
+  // squared. At or under it the column is indistinguishable from constant and
+  // its coefficient would be read from rounding residue, not data. The bound
+  // follows from eps and the argument scale, not from a tuned constant, and a
+  // real column (variation of even 1e-9 rad) is far above it.
+  final noise = 4 * _machineEps * (state.maxArg + 1);
+  final noiseFloor = n * noise * noise;
+  if (state.mCC <= noiseFloor || state.mSS <= noiseFloor) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
   final determinant = state.mCC * state.mSS - state.mCS * state.mCS;
@@ -219,10 +299,8 @@ Metric<CosinorFit> _finishCosinor(
       note: 'singular cosinor design (insufficient phase coverage)',
     );
   }
-  final beta =
-      (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
-  final gamma =
-      (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
+  final beta = (state.mCY * state.mSS - state.mSY * state.mCS) / determinant;
+  final gamma = (state.mSY * state.mCC - state.mCY * state.mCS) / determinant;
   final mesor = state.meanY - beta * state.meanC - gamma * state.meanS;
   final amplitude = math.sqrt(beta * beta + gamma * gamma);
   final acro = math.atan2(-gamma, beta);
@@ -240,20 +318,48 @@ Metric<CosinorFit> _finishCosinor(
       2 * beta * gamma * state.mCS;
   final double r2 = ssTot == 0 ? 0.0 : (1 - ssRes / ssTot).clamp(0, 1);
   final double r2Adj = (1 - (1 - r2) * (n - 1) / (n - 3)).clamp(0, 1);
+  // Zero-amplitude F-test (Nelson 1979): the acrophase is only defined once
+  // the test rejects. A flat or rhythm-free series still yields some
+  // atan2(−γ, β) from residual noise or float rounding.
+  final dof = n - 3;
+  final double ampP;
+  if (ssTot <= 0) {
+    ampP = 1.0;
+  } else if (ssRes <= 0) {
+    ampP = 0.0;
+  } else {
+    final f = ((ssTot - ssRes) / 2) / (ssRes / dof);
+    ampP = _f2Survival(f, dof);
+  }
+  final phaseDefined = ampP < cosinorAcrophaseAlpha;
+
   return Metric<CosinorFit>(
     value: CosinorFit(
       mesor: mesor,
       amplitude: amplitude,
-      acrophaseRad: acro,
-      acrophaseHours: phaseHours,
+      acrophaseRad: phaseDefined ? acro : null,
+      acrophaseHours: phaseDefined ? phaseHours : null,
       periodHours: periodHours,
       r2: r2,
       r2Adj: r2Adj,
+      amplitudeP: ampP,
     ),
     confidence: r2Adj.clamp(0.1, 0.95),
     tier: Tier.high,
     inputs_used: inputs,
-    note: 'single-component cosinor; anchor circadian phase on the nocturnal '
-        'trough, not the daytime peak',
+    note: phaseDefined
+        ? 'single-component cosinor; anchor circadian phase on the nocturnal '
+            'trough, not the daytime peak'
+        : 'single-component cosinor; no resolvable rhythm '
+            '(zero-amplitude test not rejected), acrophase undefined',
   );
+}
+
+/// Upper tail of F(2, d): P(F > f) = (1 + 2f/d)^(−d/2), exact for 2 numerator
+/// degrees of freedom.
+double _f2Survival(double f, int d) {
+  if (f.isNaN) return 1.0;
+  if (f.isInfinite) return 0.0;
+  if (f <= 0) return 1.0;
+  return math.pow(1 + 2 * f / d, -d / 2).toDouble();
 }

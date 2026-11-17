@@ -19,8 +19,15 @@ import 'cosinor_aggregator.dart';
 class CosinorFit {
   final double mesor; // rhythm-adjusted mean
   final double amplitude; // half the peak-to-trough range
-  final double acrophaseRad; // phase of the peak (rad), in [-π, π]
-  final double acrophaseHours; // acrophase expressed as clock-hours of [period]
+  /// Phase of the peak (rad), in [-π, π]. Null when the zero-amplitude F-test
+  /// does not reject (Nelson 1979): with no resolvable rhythm the angle of
+  /// (β, γ) is set by noise or rounding, not by the data, and a caller would
+  /// otherwise present it as the user's own peak time.
+  final double? acrophaseRad;
+  final double? acrophaseHours; // acrophase expressed as clock-hours of [period]
+
+  /// p-value of the zero-amplitude F-test, F(2, n−3).
+  final double amplitudeP;
   final double periodHours;
   final double r2; // raw goodness of fit (0..1)
 
@@ -36,17 +43,24 @@ class CosinorFit {
     required this.periodHours,
     required this.r2,
     required this.r2Adj,
+    required this.amplitudeP,
   });
   Map<String, dynamic> toJson() => {
         'mesor': round6(mesor),
         'amplitude': round6(amplitude),
-        'acrophase_rad': round6(acrophaseRad),
-        'acrophase_hours': round6(acrophaseHours),
+        'acrophase_rad': acrophaseRad == null ? null : round6(acrophaseRad!),
+        'acrophase_hours':
+            acrophaseHours == null ? null : round6(acrophaseHours!),
         'period_hours': round6(periodHours),
         'r2': round6(r2),
         'r2_adj': round6(r2Adj),
+        'amplitude_p': round6(amplitudeP),
       };
 }
+
+/// Significance level of the zero-amplitude test below which the acrophase is
+/// reported.
+const double cosinorAcrophaseAlpha = 0.05;
 
 /// Minimum samples for a cosinor fit. The model has 3 free parameters
 /// (M, β, γ); with n = 4 there is a single residual degree of freedom, so R²
@@ -66,6 +80,13 @@ Metric<CosinorFit> cosinor(
   double periodHours = 24,
   int minPoints = cosinorMinPoints,
 }) {
+  if (!periodHours.isFinite || periodHours <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
   // Runs [cosinorAggregator] over the whole series in one slice. Mismatched
   // lengths cannot be a [TimedValues] batch; they are the same "too few
   // points" refusal as before.
@@ -80,4 +101,3 @@ Metric<CosinorFit> cosinor(
       .run(TimedValues(
           Float64List.fromList(tHours), Float64List.fromList(y)));
 }
-

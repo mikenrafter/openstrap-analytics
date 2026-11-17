@@ -416,6 +416,32 @@ Metric<HrvTime> hrvTime(
   RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  if (nnTimesMs != null && nnTimesMs.length != nnMs.length) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'beat time length mismatch',
+    );
+  }
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (nnTimesMs != null && nnTimesMs.length == nnMs.length &&
+      hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (nnMs.any((value) => !value.isFinite)) {
+    return const Metric<HrvTime>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (nnMs.length < 2) {
     return const Metric<HrvTime>.absent(
       tier: Tier.high,
@@ -522,8 +548,9 @@ Metric<HrvTime> hrvTime(
 /// window into 5-min bins; required (returns absent without it). [windowMs] bin
 /// width (default 300 000 = 5 min). [minBeatsPerWindow] min NN diffs a window
 /// needs to contribute (default 5). [stageMaskPerSec] OPTIONAL per-second mask
-/// (true = keep, e.g. NREM & immobile); a window is kept only when the mask is
-/// true at the window's MIDPOINT second.
+/// (true = keep, e.g. NREM & immobile) on the [nnTimesMs] clock — index s
+/// covers nnTime s·1000 ms, NOT seconds since the first kept beat; a window is
+/// kept only when the mask is true at the window's MIDPOINT second.
 ///
 /// Returns a Metric whose value is the median-of-windows RMSSD (ms). Keeps the
 /// PRV-not-ECG honesty note. Absent when there are too few usable windows, when
@@ -540,6 +567,24 @@ Metric<double> nocturnalRmssd(
   RrCoverage? coverage,
 }) {
   const inputs = ['rr_cleaned', 'beat_times'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (nnMs.any((value) => !value.isFinite)) {
+    return const Metric<double>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (coverage != null && coverage.overCounted) {
     return Metric<double>.absent(
       tier: Tier.high,
@@ -584,7 +629,11 @@ Metric<double> nocturnalRmssd(
   final indices = buckets.keys.toList()..sort();
   for (final idx in indices) {
     if (stageMaskPerSec != null) {
-      final midSec = ((idx + 0.5) * windowMs / 1000.0).floor();
+      // Windows are bucketed from the first KEPT beat, but `correctRr` keeps
+      // the elapsed time of a dropped leading artifact run, so t0 can sit
+      // minutes past the mask's origin. Read the mask on the beat clock or
+      // every window takes the stage label from t0 seconds earlier.
+      final midSec = ((t0 + (idx + 0.5) * windowMs) / 1000.0).floor();
       final keep = midSec >= 0 &&
           midSec < stageMaskPerSec.length &&
           stageMaskPerSec[midSec];
@@ -769,6 +818,24 @@ Metric<SessionRmssd> sleepSessionRmssdDetail(
   int minDiffsPerWindow = kMinDiffsPerRmssdWindow,
 }) {
   const inputs = ['rr_sleep_window'];
+  // An unknown interval cannot support a finite HRV estimate. Refuse the
+  // input before segmentation or moments rather than discarding evidence.
+  // A reset may expose disagreement between accumulated RR and recorded
+  // sensor time. Do not turn overlapping segments into successive beats.
+  if (hasRegressingBeatTimes(rrTsMs)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
+  if (rrMs.any((value) => !value.isFinite)) {
+    return const Metric<SessionRmssd>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'non-finite NN interval',
+    );
+  }
   if (startSec <= 0 ||
       endSec <= startSec ||
       rrMs.isEmpty ||

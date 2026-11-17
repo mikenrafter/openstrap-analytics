@@ -447,28 +447,33 @@ void main() {
       // Keys and values as the old extractor stored them for gravity (0,0,1)
       // each second and HR 60 then 0 at each second over [0,90): HR 60 where
       // the oracle's last-wins reading has none (0-90:unobserved).
-      final stale = CardioRowCache.fromJson({
-        'version': 2,
-        'rows': [
-          for (final (s, fp) in [
-            (0, '-518569928497453641'),
-            (30, '6424718457559164343'),
-            (60, '6000305869726000567'),
-          ])
-            {
-              'startSec': s,
-              'epochSec': 30,
-              'fingerprint': fp,
-              'motion': 0.0,
-              'hr': 60.0,
-              'hrSd': 0.0,
-              'rmssd': 'NaN',
-              'lfhf': 'NaN',
-              'rk': 'NaN',
-              'sdnn': 'NaN',
-            }
-        ],
-      });
+      Map<String, Object?> cacheJson(int version) => {
+            'version': version,
+            'rows': [
+              for (final (s, fp) in [
+                (0, '-518569928497453641'),
+                (30, '6424718457559164343'),
+                (60, '6000305869726000567'),
+              ])
+                {
+                  'startSec': s,
+                  'epochSec': 30,
+                  'fingerprint': fp,
+                  'motion': 0.0,
+                  'hr': 60.0,
+                  'hrSd': 0.0,
+                  'rmssd': 'NaN',
+                  'lfhf': 'NaN',
+                  'rk': 'NaN',
+                  'sdnn': 'NaN',
+                }
+            ],
+          };
+      // A cache written under the old identity (version 2) is refused on load.
+      expect(() => CardioRowCache.fromJson(cacheJson(2)), throwsFormatException);
+      // Even if the same keys sit under the current version they are old
+      // fingerprints: nothing matches the byte-wise ones, so nothing is served.
+      final stale = CardioRowCache.fromJson(cacheJson(3));
       final grav = flatGrav(0, 90);
       final hr = [for (var t = 0; t < 90; t++) ...[HrTs(t, 60), HrTs(t, 0)]];
       final got = AdvancedSleepStager.stageWindow(0, 90, grav, hr,
@@ -539,5 +544,57 @@ void main() {
       expect(m.remMin, closeTo(200 / 60, 1e-9));
       expect(m.efficiency, closeTo(850 / 1000, 1e-9));
     });
+  });
+  group('night-tail exemption after an evening doze', () {
+    // tz 0, day starts at local midnight. Active until 19:00, optional still
+    // doze 19:00-20:40, active to 21:30, night 21:30-05:00, 20-min arousal,
+    // 50-min re-onset 05:20-06:10, then active.
+    const day = 1699920000; // 2023-11-14 00:00 UTC
+    ({List<GravTs> grav, List<HrTs> hr}) night({required bool doze}) {
+      final grav = <GravTs>[];
+      final hr = <HrTs>[];
+      var t = day + 12 * 3600;
+      void active(int until) {
+        for (var i = 0; t < until; i++, t++) {
+          final phase = math.sin(i * 0.5);
+          grav.add(GravTs(t, 0.3 * phase, 0.3, 0.9 * (1 - 0.2 * phase)));
+          hr.add(HrTs(t, 72 + 2 * math.sin(i / 600.0)));
+        }
+      }
+
+      void still(int until, double bpm) {
+        for (var i = 0; t < until; i++, t++) {
+          grav.add(GravTs(t, 0.001 * math.sin(i * 0.01), 0.001, 1.0));
+          hr.add(HrTs(t, bpm));
+        }
+      }
+
+      const h = 3600;
+      active(day + 19 * h);
+      if (doze) {
+        still(day + 20 * h + 40 * 60, 58);
+      } else {
+        active(day + 20 * h + 40 * 60);
+      }
+      active(day + 21 * h + 30 * 60);
+      still(day + 29 * h, 55);
+      active(day + 29 * h + 20 * 60);
+      still(day + 30 * h + 10 * 60, 56);
+      active(day + 32 * h + 10 * 60);
+      return (grav: grav, hr: hr);
+    }
+
+    for (final doze in [false, true]) {
+      test('pre-dawn tail survives (doze=$doze)', () {
+        final d = night(doze: doze);
+        final sessions = AdvancedSleepStager.detectSleep(d.grav, d.hr);
+        final tail = sessions.where((s) =>
+            s.start >= day + 29 * 3600 && s.end <= day + 30 * 3600 + 15 * 60);
+        expect(tail, hasLength(1),
+            reason: 'a chain that opens on a pre-20:00 doze must still count '
+                'as overnight once the real night joins it, or the short '
+                're-onset after the pre-dawn arousal is dropped');
+      });
+    }
   });
 }

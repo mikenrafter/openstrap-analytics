@@ -474,9 +474,6 @@ List<double> freqGrid(double loHz, double hiHz, int n) {
   return List<double>.generate(n, (i) => loHz + step * i);
 }
 
-/// Natural log guard: ln of a positive value, else null.
-double? safeLn(double x) => x > 0 ? math.log(x) : null;
-
 /// Calendar-day index (days since epoch) for each `yyyy-MM-dd` label.
 ///
 /// Trailing windows and "N nights running" counters in this package used to be
@@ -587,4 +584,15 @@ List<double?> benjaminiHochberg(List<double?> ps) {
     out[idx[k]] = running;
   }
   return out;
+}
+
+/// Whether supplied beat times move backward. Equal times remain allowed:
+/// band timestamps can be quantized to whole seconds.
+bool hasRegressingBeatTimes(List<double> times) {
+  for (var i = 1; i < times.length; i++) {
+    // Non-finite timestamps have their own refusal note at the call site.
+    if (times[i].isFinite && times[i - 1].isFinite &&
+        times[i] < times[i - 1]) return true;
+  }
+  return false;
 }

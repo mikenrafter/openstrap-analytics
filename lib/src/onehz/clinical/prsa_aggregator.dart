@@ -65,10 +65,15 @@ class _PrsaWindows extends Aggregator<_PrsaState, DoubleColumn, _PrsaState> {
   bool get persistable => true;
   @override
   Object? encodeState(_PrsaState state) =>
-      {'profile': encodeDoubles(state.profile), 'anchors': state.anchors};
+      {'profile': encodeDoubles(state.profile), 'anchors': state.anchors,
+       'deceleration': deceleration, 'anchorRatioCap': encodeDouble(cap)};
   @override
   _PrsaState decodeState(Object? json) {
     final map = decodeMap(json);
+    if (field(map, 'deceleration') != deceleration ||
+        decodeDouble(field(map, 'anchorRatioCap')).compareTo(cap) != 0) {
+      throw const FormatException('PRSA checkpoint policy mismatch');
+    }
     final profile = decodeDoubles(field(map, 'profile'));
     final anchors = decodeCount(field(map, 'anchors'));
     if (profile.length != 2 * l) {
@@ -77,6 +82,37 @@ class _PrsaWindows extends Aggregator<_PrsaState, DoubleColumn, _PrsaState> {
     if (anchors < 0) throw const FormatException('Negative PRSA anchors');
     return _PrsaState._(profile, anchors);
   }
+}
+
+/// Refuses a slice holding a non-finite interval before any child changes.
+/// [DoubleColumn] uses NaN for a missing row, and one NaN added to the profile
+/// sums stays there for good, so the whole slice is checked first.
+class _FiniteColumn<S, R> extends Aggregator<S, DoubleColumn, R> {
+  const _FiniteColumn(this.inner);
+  final Aggregator<S, DoubleColumn, R> inner;
+
+  @override
+  S empty() => inner.empty();
+  @override
+  S addSlice(S state, DoubleColumn batch, int start, int end) {
+    for (var i = start; i < end; i++) {
+      if (!batch.values[i].isFinite) {
+        throw ArgumentError('NN intervals must be finite');
+      }
+    }
+    return inner.addSlice(state, batch, start, end);
+  }
+
+  @override
+  S combine(S left, S right) => inner.combine(left, right);
+  @override
+  R finish(S state) => inner.finish(state);
+  @override
+  bool get persistable => inner.persistable;
+  @override
+  Object? encodeState(S state) => inner.encodeState(state);
+  @override
+  S decodeState(Object? json) => inner.decodeState(json);
 }
 
 /// Mergeable PRSA deceleration or acceleration capacity, matching
@@ -91,7 +127,7 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
   if (l < 2) {
     // Same absent Metric as the reference; Lookback needs a valid window.
     final absent = Metric<PrsaResult>.absent(
-      tier: Tier.high,
+      tier: Tier.relative,
       inputs_used: inputs,
       note: 'PRSA ($kind) needs l≥2 for the s=2 Haar contrast',
     );
@@ -105,7 +141,7 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
       batchFromJson: DoubleColumn.fromJson,
     ),
   );
-  return validateCheckpoint(core, (json) {
+  return validateCheckpoint(_FiniteColumn(core), (json) {
     final state = decodeList(json);
     if (state.length != 2) throw const FormatException('Expected two states');
     final count = decodeCount(state[0]);
@@ -122,7 +158,7 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
     final (n, sums) = result;
     if (n < 2 * l + 4) {
       return Metric<PrsaResult>.absent(
-        tier: Tier.high,
+        tier: Tier.relative,
         inputs_used: inputs,
         note: 'too few beats for PRSA ($kind)',
       );
@@ -130,7 +166,7 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
     final anchors = sums.anchors;
     if (anchors == 0) {
       return Metric<PrsaResult>.absent(
-        tier: Tier.high,
+        tier: Tier.relative,
         inputs_used: inputs,
         note: 'no valid PRSA anchors ($kind)',
       );
@@ -146,10 +182,10 @@ Aggregator<dynamic, DoubleColumn, Metric<PrsaResult>> prsaAggregator({
         kind: kind,
       ),
       confidence: (anchors / 1000.0).clamp(0.3, 0.95),
-      tier: Tier.high,
+      tier: Tier.relative,
       inputs_used: inputs,
-      note: 'Bauer 2006 PRSA $kind; needs a long overnight RR record for '
-          'mortality-grade stability',
+      note: 'Bauer 2006 PRSA $kind; relative to own baseline on one device '
+          'family only',
     );
   });
 }

@@ -350,6 +350,17 @@ class EpochRows {
     return a;
   }
 
+  /// Where a run's data stops for the gravity reference. Batch staging cuts
+  /// every run that another one follows to whole epochs before extracting
+  /// features, and only the last run keeps its sub-epoch tail; the same bound
+  /// here keeps a reference window from reading samples the batch never sees.
+  double _refEndMs(_Run run) {
+    if (identical(run, _runs.last)) return run.endSec * 1000.0;
+    const epSec = kEpochMs ~/ 1000;
+    final whole = (run.endSec - run.startSec) ~/ epSec;
+    return (run.startSec + whole * epSec) * 1000.0;
+  }
+
   List<EpochFeatureRow> _rows(List<int> starts) {
     if (starts.isEmpty) return [];
     final eff = _effAccel();
@@ -374,7 +385,7 @@ class EpochRows {
       final nextHi = _sampleLower(
           eff,
           math.min(start + 180000.0,
-              run == null ? double.infinity : run.endSec * 1000.0),
+              run == null ? double.infinity : _refEndMs(run)),
           (a) => a.tsMs);
       while (lo < nextLo && lo < hi) {
         sorted.remove(mag[lo]);
@@ -402,7 +413,7 @@ class EpochRows {
     final ae = _sampleLower(
         eff,
         math.min(end + (reference == null ? 150000.0 : 0.0),
-            run == null ? double.infinity : run.endSec * 1000.0),
+            run == null ? double.infinity : _refEndMs(run)),
         (a) => a.tsMs);
     final hb = _sampleLower(_hr, start.toDouble(), (h) => h.tsMs);
     final he = _sampleLower(_hr, end.toDouble(), (h) => h.tsMs);
@@ -423,12 +434,15 @@ class EpochRows {
     if (_cache != null) {
       var hash = 0xcbf29ce484222325;
       final bits = ByteData(8);
+      // Byte-wise FNV-1a: mixing a whole word lets two sign-bit flips cancel.
       void number(double v) {
         bits.setFloat64(0, v, Endian.little);
-        hash = (hash ^ bits.getUint64(0, Endian.little)) * 0x100000001b3;
+        for (var i = 0; i < 8; i++) {
+          hash = (hash ^ bits.getUint8(i)) * 0x100000001b3;
+        }
       }
 
-      number(0x45504f434833.toDouble()); // EPOCH3: 81b9b4b changed row semantics.
+      number(0x45504f434834.toDouble()); // EPOCH4: byte-wise hash.
       for (final a in av) {
         number(a.tsMs);
         number(a.x);
@@ -498,7 +512,9 @@ class EpochRows {
     return row;
   }
 
-  /// Classifies cached features with session-wide baselines. Features retain
+  /// Classifies cached features with session-wide baselines.
+  /// Uses upstream's pooled-run baseline and per-run coverage rules. Continuity
+  /// passes receive segment boundaries so they cannot bridge an unobserved gap. Features retain
   /// their observed context when a session's start or end moves.
   List<StageSegment> stageWindow(int startSec, int endSec) {
     if (endSec <= startSec) return const [];
@@ -506,53 +522,67 @@ class EpochRows {
     final pieces = <StageSegment>[];
     var cursor = startSec;
     final byStart = {for (final r in rows) r.startMs: r};
+    final runs = <({int lo, int hi, List<EpochFeatureRow> chosen})>[];
+    final pooled = <EpochFeatureRow>[];
+    final segmentStarts = <int>[];
     for (final run in _runs) {
       final lo = math.max(math.max(startSec, run.startSec), run.anchorMs ~/ 1000),
           hi = math.min(endSec, run.endSec);
       if (hi <= lo) continue;
-      if (lo > cursor) pieces.add(StageSegment(cursor, lo, 'unobserved'));
-      // A carry-only epoch still consumes time in the classifier.
-      // Keep its absent HR in the coverage denominator; omitting it can turn
-      // an otherwise abstained run into apparently sufficient cardiac data.
       final first = lo * 1000 <= run.anchorMs
           ? run.anchorMs
           : _epochIn(run, lo * 1000);
       final chosen = <EpochFeatureRow>[
-        // Whole epochs only: a sub-epoch remainder is absorbed by the last one.
         for (var s = first; s + kEpochMs <= hi * 1000; s += kEpochMs)
           byStart[s] ??
               EpochFeatureRow(s, 0, double.nan, 0, double.nan, double.nan,
                   double.nan, double.nan)
       ];
-      final features = CardioEpochFeatures(
-          motion: [for (final r in chosen) r.motion],
-          hr: [for (final r in chosen) r.hr],
-          hrSd: [for (final r in chosen) r.hrSd],
-          rmssd: [for (final r in chosen) r.rmssd],
-          lfhf: [for (final r in chosen) r.lfhf],
-          rk: [for (final r in chosen) r.rk],
-          sdnn: [for (final r in chosen) r.sdnn]);
-      final result = classifyCardioEpochs(features);
-      final labels = result.base.stages;
-      // The classifier's own per-epoch HR coverage gate abstains (no labels),
-      // exactly as the pre-bump stager did; there is no second, per-second one.
-      if (hi - lo < 90 || labels.isEmpty) {
+      // Upstream gates HR per run before pooling. Missing-HR runs must not
+      // inherit the observed coverage of the other runs in the session.
+      if (chosen.length < 3 ||
+          chosen.where((r) => !r.hr.isNaN).length < minHrCoverage * chosen.length) {
+        continue;
+      }
+      segmentStarts.add(pooled.length);
+      pooled.addAll(chosen);
+      runs.add((lo: lo, hi: hi, chosen: chosen));
+    }
+    final result = classifyCardioEpochs(CardioEpochFeatures(
+        motion: [for (final r in pooled) r.motion],
+        hr: [for (final r in pooled) r.hr],
+        hrSd: [for (final r in pooled) r.hrSd],
+        rmssd: [for (final r in pooled) r.rmssd],
+        lfhf: [for (final r in pooled) r.lfhf],
+        rk: [for (final r in pooled) r.rk],
+        sdnn: [for (final r in pooled) r.sdnn]),
+        segmentStarts: segmentStarts,
+        startTsSec: runs.isEmpty ? null : runs.first.lo,
+        endTsSec: runs.isEmpty ? null : runs.last.hi);
+    final labels = result.base.stages;
+    var offset = 0;
+    for (final run in runs) {
+      final lo = run.lo, hi = run.hi, chosen = run.chosen;
+      if (lo > cursor) pieces.add(StageSegment(cursor, lo, 'unobserved'));
+      if (labels.isEmpty) {
         pieces.add(StageSegment(lo, hi, 'unobserved'));
       } else {
         var at = lo;
-        for (var i = 0; i < labels.length; i++) {
-          final label = switch (labels[i]) {
+        for (var i = 0; i < chosen.length; i++) {
+          final g = offset + i;
+          final label = switch (labels[g]) {
             SleepStage.wake => 'wake',
             SleepStage.rem => 'rem',
-            SleepStage.nrem => result.deepFlag[i] ? 'deep' : 'light',
+            SleepStage.nrem => result.deepFlag[g] ? 'deep' : 'light',
           };
-          final until = i + 1 == labels.length
+          final until = i + 1 == chosen.length
               ? hi
               : math.min(hi, chosen[i + 1].startMs ~/ 1000);
           if (until > at) pieces.add(StageSegment(at, until, label));
           at = until;
         }
       }
+      offset += chosen.length;
       cursor = hi;
     }
     if (cursor < endSec) pieces.add(StageSegment(cursor, endSec, 'unobserved'));

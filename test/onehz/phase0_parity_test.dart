@@ -111,7 +111,10 @@ Metric<CvhrResult> refCvhrApneaScreen(
   }
 
   final perHour = cycleCount / analyzedHours;
-  final conf = ((1 - artifactFraction) * 0.85).clamp(0.2, 0.85);
+  // Target main 9db83ce scales confidence and tier by observed duration.
+  final coverage = (analyzedHours / minAnalyzedHoursPerNight).clamp(0.0, 1.0);
+  final conf = ((1 - artifactFraction) * 0.85 * coverage).clamp(0.01, 0.85);
+  final tier = analyzedHours < minAnalyzedHoursPerNight ? Tier.estimate : Tier.high;
   return Metric<CvhrResult>(
     value: CvhrResult(
       cycleCount: cycleCount,
@@ -123,7 +126,7 @@ Metric<CvhrResult> refCvhrApneaScreen(
       widthQuartilesSec: _refQuartiles(widths),
     ),
     confidence: conf,
-    tier: Tier.high,
+    tier: tier,
     inputs_used: inputs,
     note: 'CVHR/ACAT (Hayano) apnea SCREEN — NOT a diagnosis, NOT an AHI; '
         'single-night CVHR has substantial night-to-night variability, '

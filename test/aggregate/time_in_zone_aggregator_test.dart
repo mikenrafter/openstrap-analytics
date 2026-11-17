@@ -25,6 +25,8 @@
 //    streams of <= 32 rows. The hand-written duplicate case uses 5 rows with
 //    differing hr.
 
+import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:openstrap_analytics/aggregate.dart';
@@ -60,8 +62,48 @@ class _S {
       sampleCadenceSeconds([for (final t in ts) t / 1000.0]);
 }
 
-TimeInHeartRateZone? _want(_S s) =>
-    HeartRateZones.timeInZone(s.samples, _zones);
+/// The reference: the batch rule as it was before `HeartRateZones.timeInZone`
+/// delegated to the aggregator, kept here verbatim so a regression in the
+/// aggregator cannot also change what it is compared with. Its only shared
+/// piece is [sampleCadenceSeconds], a separate function; the credit bounding,
+/// the per-gap histogram and the tail are written out again.
+TimeInHeartRateZone? _referenceTimeInZone(
+    List<HrSample> hr, HeartRateZoneSet zoneSet) {
+  // Stable: by timestamp, then input position, so repeated timestamps keep the
+  // order they arrived in (Dart's List.sort is not stable for long lists).
+  final order = List<int>.generate(hr.length, (i) => i)
+    ..sort((a, b) {
+      final c = hr[a].tsMs.compareTo(hr[b].tsMs);
+      return c != 0 ? c : a.compareTo(b);
+    });
+  final sorted = [for (final i in order) hr[i]];
+  final cadence =
+      sampleCadenceSeconds([for (final s in sorted) s.tsMs / 1000.0]);
+  if (cadence == null) return null;
+  final credits = List.generate(6, (_) => <double, int>{});
+  for (var i = 1; i < sorted.length; i++) {
+    final previous = sorted[i - 1];
+    if (!previous.valid) continue;
+    final gap = (sorted[i].tsMs - previous.tsMs) / 1000.0;
+    final histogram = credits[zoneSet.zoneNumber(previous.hr)];
+    histogram[gap] = (histogram[gap] ?? 0) + 1;
+  }
+  final seconds = List<double>.filled(6, 0);
+  for (var zone = 0; zone < credits.length; zone++) {
+    for (final entry in credits[zone].entries) {
+      final gap = entry.key;
+      seconds[zone] +=
+          entry.value * (gap > 0 ? math.min(gap, cadence) : cadence);
+    }
+  }
+  if (sorted.isNotEmpty && sorted.last.valid) {
+    seconds[zoneSet.zoneNumber(sorted.last.hr)] += cadence;
+  }
+  return TimeInHeartRateZone(
+      seconds: seconds.sublist(1), belowZone1: seconds[0]);
+}
+
+TimeInHeartRateZone? _want(_S s) => _referenceTimeInZone(s.samples, _zones);
 
 void _same(TimeInHeartRateZone? got, TimeInHeartRateZone? want, String tag) {
   expect(_eq(got, want), isTrue,
@@ -371,6 +413,93 @@ void main() {
         equals: _eq);
   });
 
+  group('checkpoint zone identity', () {
+    final rows = _S([0, 1000], [110, 130]).stream;
+
+    // why: old histogram credits must never mix with a new tail/append zone
+    // definition (review 4573606761). Catches a restore without zone identity.
+    test('a different max-HR zone set is refused', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(180));
+      expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: legacy state has no evidence of which zones own its credits.
+    test('a checkpoint without zone identity is refused', () {
+      final checkpoint = checkpointOf(_agg, rows);
+      (checkpoint['state'] as Map).remove('zoneSet');
+      expect(decodeCheckpoint<dynamic>(_agg, checkpoint,
+          kind: 'test', version: 1), isNull);
+    });
+
+    // why: maxHr/source alone cannot identify custom zone boundaries or order.
+    test('custom boundaries and reordered zones are refused', () {
+      final changed = HeartRateZone(
+        number: 1,
+        lower: 90,
+        upper: 120,
+        lowerPct: .5,
+        upperPct: .6,
+      );
+      for (final zones in [
+        [changed, ..._zones.zones.skip(1)],
+        _zones.zones.reversed.toList(),
+      ]) {
+        final other = timeInZoneAggregator(HeartRateZoneSet(
+            zones: zones, maxHr: _zones.maxHr, source: _zones.source));
+        expect(decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+            kind: 'test', version: 1), isNull);
+      }
+    });
+
+    // why: identity is by definition, not Dart object identity; accepted state
+    // must retain old credits and credit appended rows under the same zones.
+    test('an equivalent zone set restores and continues', () {
+      final other = timeInZoneAggregator(HeartRateZones.zonesFromMaxHr(200));
+      final restored = decodeCheckpoint<dynamic>(other, checkpointOf(_agg, rows),
+          kind: 'test', version: 1);
+      expect(restored, isNotNull);
+      final result = other.finish(other.addSlice(
+          restored, _S([2000], [190]).stream, 0, 1))!;
+      // Three one-second credits: 110 in z1, 130 in z2, 190 in z5.
+      expect(result.seconds, [1, 1, 0, 0, 1]);
+      expect(result.belowZone1, 0);
+    });
+  });
+
+  group('checkpoint tail agrees with the retained last row', () {
+    // why: independently restored tail fields could silently move the final
+    // credit or disagree with the seam timestamp (review 4573606767).
+    for (final field in ['tailHr', 'tailTimestampMs']) {
+      for (final size in [1, 2, 3]) {
+        test('$field mismatch is refused for $size rows', () {
+          final rows = _S([for (var i = 0; i < size; i++) i * 1000.0],
+              [110.0, 130.0, 150.0].take(size).toList()).stream;
+          expectDamagedCheckpointRefused(_agg, rows, (s) {
+            (s as Map)[field] = field == 'tailHr' ? 190.0 : 9000.0;
+            return s;
+          });
+        });
+      }
+    }
+
+    // why: NaN HR is accepted as invalid/off-skin input; NaN != NaN must not
+    // make a valid checkpoint unrestoreable when the two tails agree.
+    test('matching non-finite heart rates restore and continue', () {
+      for (final hr in [double.nan, double.infinity, double.negativeInfinity]) {
+        final rows = _S([0, 1000], [110, hr]).stream;
+        final restored = decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, rows),
+            kind: 'test', version: 1);
+        expect(restored, isNotNull, reason: '$hr');
+        final result = _agg.finish(_agg.addSlice(
+            restored, _S([2000], [130]).stream, 0, 1))!;
+        // +Infinity is zone 5; NaN/-Infinity are invalid and get no credit.
+        expect(result.seconds, [1, 1, 0, 0, hr == double.infinity ? 1 : 0]);
+        expect(result.belowZone1, 0);
+      }
+    });
+  });
+
   group('lawful', () {
     final r = Rng(0x1a3);
     final cases = <HrStream>[
@@ -499,6 +628,140 @@ void main() {
       refuses(one, (s) => (s as Map)['hasTail'] = false);
       final empty = HrStream(Float64List(0), Float64List(0));
       refuses(empty, (s) => (s as Map)['hasTail'] = true);
+    });
+  });
+
+  // The batch function and the aggregator agree with the independent reference
+  // on the ordinary streams the parity tests build, including the public entry.
+  test('HeartRateZones.timeInZone agrees with the frozen reference', () {
+    final r = Rng(0x71A);
+    for (var k = 0; k < 20; k++) {
+      final s = _gen(r, r.intIn(2, 60));
+      final want = _referenceTimeInZone(s.samples, _zones);
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'public $k');
+    }
+  });
+
+  // # catches: a non-finite timestamp stored an infinite gap (cadence [1, 1,
+  // Infinity], 4 s credited at 150 bpm). The state encoded, but restore refuses
+  // infinite histogram keys, so an accepted state could not be restored.
+  group('a non-finite timestamp is refused before it can be stored', () {
+    final bad = _S([0, 1000, 2000, double.infinity], [150, 150, 150, 150]);
+
+    test('the aggregator refuses the slice and the state is unchanged', () {
+      final state = _agg.fold(_S([0, 1000], [150, 150]).stream);
+      final before = jsonEncode(_agg.encodeState(state));
+      expect(() => _agg.addSlice(state, bad.stream, 0, bad.n),
+          throwsArgumentError);
+      expect(jsonEncode(_agg.encodeState(state)), before);
+      expect(() => _agg.fold(bad.stream), throwsArgumentError);
+    });
+
+    test('NaN and -Infinity are refused the same way', () {
+      for (final t in [double.nan, double.negativeInfinity]) {
+        final s = _S([0, 1000, t, 3000], [150, 150, 150, 150]);
+        expect(() => _agg.fold(s.stream), throwsArgumentError, reason: '$t');
+      }
+    });
+
+    test('the batch entry point has no time-in-zone to report', () {
+      expect(HeartRateZones.timeInZone(bad.samples, _zones), isNull);
+    });
+
+    test('every accepted state encodes, restores and finishes the same', () {
+      final r = Rng(0x71B);
+      for (var k = 0; k < 10; k++) {
+        final s = _gen(r, r.intIn(2, 80));
+        final state = _agg.fold(s.stream);
+        final back = _agg.decodeState(
+            jsonDecode(jsonEncode(_agg.encodeState(state))));
+        _same(_agg.finish(back), _agg.finish(_agg.fold(s.stream)), 'trip $k');
+      }
+    });
+  });
+
+  // # catches: HrStream.fromJson checks column lengths only, so a retained edge
+  // with an infinite timestamp decoded and later became an infinite credit gap,
+  // a histogram key that restore refuses.
+  group('retained timestamps must be finite at restore', () {
+    final three = _S([0, 1000, 2000], [150, 150, 150]).stream;
+    Map windows(Object? s) => (s as Map)['windows'] as Map;
+    for (final bad in ['Infinity', '-Infinity', 'NaN']) {
+      test('last edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['last'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'last $bad');
+      });
+      test('first edge timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (windows(s)['first'] as Map)['tsMs'] = [bad];
+          return s;
+        }, reason: 'first $bad');
+      });
+      test('tail timestamp $bad is refused', () {
+        expectDamagedCheckpointRefused(_agg, three, (s) {
+          (s as Map)['tailTimestampMs'] = bad;
+          return s;
+        }, reason: 'tail $bad');
+      });
+    }
+    test('a good checkpoint still restores', () {
+      expect(
+          decodeCheckpoint<dynamic>(_agg, checkpointOf(_agg, three),
+              kind: 'test', version: 1),
+          isNotNull);
+    });
+  });
+
+  // # catches: HeartRateZones.timeInZone re-sorted with Dart's unstable
+  // List.sort, so the 34 rows at one instant (more than the 32 that sort keeps
+  // in order) could swap places and a different reading was credited than the
+  // aggregator, which keeps input order, credited.
+  group('repeated timestamps keep their input order on every path', () {
+    // maxHr 200. 34 rows at t = 0: 33 at HR 110 then one at 190. Then six
+    // off-skin rows a second apart, from 500 ms.
+    final ts = <double>[for (var i = 0; i < 34; i++) 0, for (var i = 0; i < 6; i++) 500.0 + 1000 * i];
+    final hr = <double>[for (var i = 0; i < 33; i++) 110, 190, for (var i = 0; i < 6; i++) 0];
+    final s = _S(ts, hr);
+
+    test('the aggregator and the batch function both match the reference', () {
+      final want = _referenceTimeInZone(s.samples, _zones);
+      expect(want, isNotNull);
+      _same(_agg.run(s.stream), want, 'aggregator');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), want, 'batch');
+      _same(HeartRateZones.timeInZone(s.samples, _zones), _agg.run(s.stream),
+          'batch vs aggregator');
+    });
+
+    test('the order the rows arrive in decides the credit, so it is kept', () {
+      // The same rows with the 190 reading first: a different credit, which
+      // shows the ordering is real and that the stable one is what is returned.
+      final swapped = _S(ts, [190, for (var i = 0; i < 33; i++) 110, for (var i = 0; i < 6; i++) 0]);
+      final a = HeartRateZones.timeInZone(s.samples, _zones)!;
+      final b = HeartRateZones.timeInZone(swapped.samples, _zones)!;
+      expect(_eq(a, b), isFalse,
+          reason: 'the last reading at the repeated instant is credited');
+      _same(b, _referenceTimeInZone(swapped.samples, _zones), 'swapped');
+    });
+
+    test('many repeated instants in a longer stream stay in input order', () {
+      final r = Rng(0x5712);
+      for (var k = 0; k < 10; k++) {
+        final n = 40 + r.intIn(0, 60);
+        final t = <double>[];
+        final h = <double>[];
+        var at = 0.0;
+        for (var i = 0; i < n; i++) {
+          if (r.nextBool(.3)) at += 1000;
+          t.add(at);
+          h.add(r.nextBool(.1) ? 0 : 60 + r.nextDouble() * 130);
+        }
+        final x = _S(t, h);
+        final want = _referenceTimeInZone(x.samples, _zones);
+        _same(HeartRateZones.timeInZone(x.samples, _zones), want, 'batch $k');
+        _same(_agg.run(x.stream), want, 'aggregator $k');
+      }
     });
   });
 }

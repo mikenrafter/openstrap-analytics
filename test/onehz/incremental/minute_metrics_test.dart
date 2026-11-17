@@ -5,6 +5,91 @@ import '../support/incremental_compare.dart';
 import '../support/incremental_fixtures.dart';
 
 void main() {
+  // why: an accepted checkpoint must remain identical on an unchanged sync,
+  // even when its stored basal rate differs from the current calculator.
+  test('restored basal rate survives unchanged sync until repricing', () {
+    final profile = energyProfiles['male']!;
+    final original = IncrementalMinuteMetrics();
+    original.sync([0], [110], restingHr: 54, maxHr: 186, profile: profile);
+    final saved = checkpoint(original.toJson());
+    final basal = (saved['basalPerMinute'] as num).toDouble() + 1;
+    saved['basalPerMinute'] = basal;
+    final restored = IncrementalMinuteMetrics.fromJson(saved);
+    final accepted = checkpoint(restored.toJson());
+    final result = restored.sync([0], [110],
+        restingHr: 54, maxHr: 186, profile: profile);
+    expect(restored.toJson(), accepted);
+    expect(result.minutes!.basalKcalPerMin, basal);
+    restored.sync([0, 1], [110, 120],
+        restingHr: 54, maxHr: 186, profile: profile);
+    expect(restored.toJson()['basalPerMinute'], basal);
+    final forced = restored.sync([0, 1], [110, 120],
+        restingHr: 54, maxHr: 186, profile: profile, force: true);
+    expect(forced.minutes!.basalKcalPerMin, basal - 1);
+  });
+  // why: restored bills and appended HR/walking surplus must share the
+  // reported basal, even if the current calculator would choose another rate.
+  // proves: CLAIM(restored-minute-pricing)
+  // catches: rebuilding the pricer without its checkpoint's basal rate.
+  for (final includeMinuteSeries in [true, false]) {
+    test('restored basal prices appended surplus series=$includeMinuteSeries',
+        () {
+      const profile =
+          WorkoutUserProfile(weightKg: 80, heightCm: 180, age: 30, sex: 'male');
+      const taller =
+          WorkoutUserProfile(weightKg: 80, heightCm: 200, age: 30, sex: 'male');
+      const keys = [0, 1, 2, 3];
+      const hr = [60.0, 150.0, 60.0, 150.0];
+      const cadence = <double?>[110, null, 110, null];
+      final original = IncrementalMinuteMetrics();
+      original.sync(keys.sublist(0, 2), hr.sublist(0, 2),
+          cadenceSpm: cadence.sublist(0, 2),
+          restingHr: 54,
+          maxHr: 186,
+          profile: profile);
+      final saved = checkpoint(original.toJson());
+      // Simulate a checkpoint whose accepted basal differs from today's
+      // profile calculation. Height changes basal only, so a fresh computation
+      // with the original profile is an oracle for every retained/new bill.
+      ((saved['parameters'] as List)[3] as List)[1] = taller.heightCm;
+      final restored = IncrementalMinuteMetrics.fromJson(saved);
+      final result = restored.sync(keys, hr,
+          cadenceSpm: cadence,
+          restingHr: 54,
+          maxHr: 186,
+          profile: taller,
+          includeMinuteSeries: includeMinuteSeries);
+      final freshState = IncrementalMinuteMetrics();
+      final fresh = freshState.sync(keys, hr,
+          cadenceSpm: cadence, restingHr: 54, maxHr: 186, profile: profile);
+      // Mifflin: (10*80 + 6.25*180 - 5*30 + 5)/1440 = 89/72.
+      const basal = 89 / 72;
+      // 110 spm is 4 METs; Keytel male at 150 bpm is
+      // (-55.0969 + .6309*150 + .1988*80 + .2017*30)/4.184 kcal/min.
+      const walking = 3 * basal;
+      const active = 61.4931 / 4.184 - basal;
+      final bills = restored.toJson()['bills'] as List;
+      expect(bills[2]['source'], 'cadence');
+      expect(bills[2]['walking'], closeTo(walking, 1e-12));
+      expect(bills[2]['active'], 0);
+      expect(bills[3]['source'], 'hr');
+      expect(bills[3]['active'], closeTo(active, 1e-12));
+      expect(bills[3]['walking'], 0);
+      expect(restored.toJson()['basalPerMinute'], basal);
+      expect(result.energy!.basal, basal * 1440);
+      expect(result.energy, fresh.energy);
+      expect(bills, freshState.toJson()['bills']);
+      expect(restored.processedMinutes, 4,
+          reason: 'accepted prefix bills remain priced exactly once');
+      if (includeMinuteSeries) {
+        expect(result.minutes!.basalKcalPerMin, basal);
+        expect(result.minutes!.minutes[2].walking, closeTo(walking, 1e-12));
+        expect(result.minutes!.minutes[3].active, closeTo(active, 1e-12));
+      } else {
+        expect(result.minutes, isNull);
+      }
+    });
+  }
   for (final entry in energyProfiles.entries) {
     for (final sex in Sex.values) {
       for (final chunk in [1, 19, 128]) {
@@ -247,5 +332,82 @@ void main() {
           h,
           profile: p);
     }
+  });
+
+  // why: a basal rate is energy per minute at rest, never negative. A checkpoint
+  // carrying -1 decoded, passed through an unchanged-parameter sync, and then
+  // priced an appended walking minute (HR 60, cadence 110, resting HR 54, max HR
+  // 186) at a walking surplus of -3, a contribution the next restore refuses.
+  // catches: IncrementalMinuteMetrics.fromJson accepting a finite negative rate.
+  group('a negative basal rate is refused', () {
+    final profile = energyProfiles['male']!;
+
+    Map<String, dynamic> saved() {
+      final original = IncrementalMinuteMetrics();
+      original.sync([0], [110], restingHr: 54, maxHr: 186, profile: profile);
+      return checkpoint(original.toJson());
+    }
+
+    test('restoring a checkpoint whose basalPerMinute is negative', () {
+      expect(() => IncrementalMinuteMetrics.fromJson(saved()), returnsNormally);
+      for (final bad in [-1.0, -1e-9, -1e300]) {
+        final json = saved()..['basalPerMinute'] = bad;
+        expect(() => IncrementalMinuteMetrics.fromJson(json),
+            throwsFormatException,
+            reason: 'basalPerMinute $bad');
+      }
+    });
+
+    test('zero and a larger rate are still accepted', () {
+      for (final ok in [0.0, 1.2, 5.0]) {
+        final json = saved()..['basalPerMinute'] = ok;
+        // A bill that is not a rest or cadence minute needs no particular
+        // rate, so these restore.
+        expect(() => IncrementalMinuteMetrics.fromJson(json), returnsNormally,
+            reason: 'basalPerMinute $ok');
+      }
+    });
+
+    test('no restored state can price a walking minute at a negative surplus',
+        () {
+      // The rate that used to be accepted, then the appended minute from the
+      // thread: with the check, restoration stops before any minute is priced.
+      final json = saved()..['basalPerMinute'] = -1.0;
+      expect(() => IncrementalMinuteMetrics.fromJson(json), throwsFormatException);
+      // A valid rate prices that minute at a non-negative surplus.
+      final state = IncrementalMinuteMetrics.fromJson(saved());
+      final result = state.sync([0, 1], [110, 60],
+          cadenceSpm: [null, 110],
+          restingHr: 54, maxHr: 186, profile: profile);
+      for (final m in result.minutes!.minutes) {
+        if (m.abstained != null) continue;
+        if (m.active != null) expect(m.active, greaterThanOrEqualTo(0));
+        if (m.walking != null) expect(m.walking, greaterThanOrEqualTo(0));
+      }
+    });
+
+    test('a negative or non-finite basal override prices nothing', () {
+      for (final bad in [-1.0, -1e-9, double.nan, double.infinity,
+          double.negativeInfinity]) {
+        expect(
+            Calories.minuteEnergyPricer(
+                profile: profile,
+                hrmax: 186,
+                restingHr: 54,
+                basalKcalPerMin: bad),
+            isNull,
+            reason: 'override $bad');
+      }
+      for (final ok in [0.0, 1.0, 1.4]) {
+        final pricer = Calories.minuteEnergyPricer(
+            profile: profile, hrmax: 186, restingHr: 54, basalKcalPerMin: ok);
+        expect(pricer, isNotNull, reason: 'override $ok');
+        expect(pricer!.basalKcalPerMin, ok);
+        // The thread's minute: surplus is never below zero.
+        final bill = pricer.price(60, 110);
+        expect(bill.active, greaterThanOrEqualTo(0));
+        expect(bill.walking, greaterThanOrEqualTo(0));
+      }
+    });
   });
 }

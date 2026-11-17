@@ -241,9 +241,10 @@ class RrCorrector {
         c._c2 <= c._c1 &&
         c._c1 <= c._n &&
         c._fcls.length == c._c2 - c._ce &&
-        c._fcls.every((k) => k >= 0 && k < BeatClass.values.length) &&
+        // Uncapped state never emits the cap-only gap label.
+        c._fcls.every((k) => k >= 0 && k <= BeatClass.extra.index) &&
         c._lastFinal >= 0 &&
-        c._lastFinal < BeatClass.values.length &&
+        c._lastFinal <= BeatClass.extra.index &&
         c._lastNormals.length <= 2 &&
         c._off <= math.max(0, c._c2 - 2 * c._h - 1);
     if (!ok) throw const FormatException('inconsistent RrCorrector checkpoint');
@@ -278,18 +279,18 @@ class RrCorrector {
         'prevTs': _prevTs,
         'prevRr': _prevRr,
         'off': _off,
-        'rr': _rr,
-        't': _t,
-        'd': _d,
+        'rr': List.of(_rr),
+        't': List.of(_t),
+        'd': List.of(_d),
         'c1': _c1,
         'c2': _c2,
         'ce': _ce,
-        'fcls': _fcls,
+        'fcls': List.of(_fcls),
         'lastFinal': _lastFinal,
         'normalFinal': _normalFinal,
         'dropped': _dropped,
         'corrected': _corrected,
-        'lastNormals': _lastNormals,
+        'lastNormals': List.of(_lastNormals),
       };
   }
 
@@ -776,9 +777,9 @@ class _CappedState {
         'origin': origin,
         'clock': clock,
         'previous': previous.index,
-        'rr': rr,
-        'ts': ts,
-        'normals': normals,
+        'rr': List.of(rr),
+        'ts': List.of(ts),
+        'normals': List.of(normals),
       };
 
   void restore(Map<String, dynamic> j, int half) {

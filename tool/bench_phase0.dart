@@ -81,7 +81,7 @@ void _cvhrStreamBench() {
   var from = 0, streamTotal = 0, batchTotal = 0;
   var parity = true;
   final start = night.tMs.first;
-  print('CVHR stream: pass  stream us  batch us  parity');
+  print('CVHR stream: pass  stream fold+snapshot us  batch us  parity');
   for (var pass = 1; pass <= 32; pass++) {
     final until = start + pass * 15 * 60 * 1000.0;
     var end = from;
@@ -89,9 +89,9 @@ void _cvhrStreamBench() {
       end++;
     }
     if (end == from) continue;
+    final streamWatch = Stopwatch()..start();
     stream.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
     from = end;
-    final streamWatch = Stopwatch()..start();
     final streamed = stream.snapshot(artifactFraction: 0.02);
     streamWatch.stop();
     final batchWatch = Stopwatch()..start();
@@ -165,7 +165,7 @@ void _welchStreamBench() {
   var rsaStreamTotal = 0, rsaBatchTotal = 0;
   var parity = true;
   final start = night.tMs.first;
-  print('Welch streams: pass  stream hrv/rsa us  batch hrv/rsa us  parity');
+  print('Welch streams: pass  stream fold+snapshot hrv/rsa us  batch hrv/rsa us  parity');
   for (var pass = 1; pass <= 32; pass++) {
     final until = start + pass * 15 * 60 * 1000.0;
     var end = from;
@@ -173,20 +173,20 @@ void _welchStreamBench() {
       end++;
     }
     if (end == from) continue;
-    hrv.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
-    rsa.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
-    from = end;
     final tailEnd = (end + 100).clamp(0, night.nn.length);
     final tailNn = night.nn.sublist(end, tailEnd);
     final tailTimes = night.tMs.sublist(end, tailEnd);
     final hrvStreamWatch = Stopwatch()..start();
+    hrv.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
     final streamHrv = hrv.snapshot(
         tailNnMs: tailNn, tailNnTimesMs: tailTimes, artifactFraction: 0.02);
     hrvStreamWatch.stop();
     final rsaStreamWatch = Stopwatch()..start();
+    rsa.fold(night.nn.sublist(from, end), night.tMs.sublist(from, end));
     final streamRsa = rsa.snapshot(
         tailNnMs: tailNn, tailNnTimesMs: tailTimes, artifactFraction: 0.02);
     rsaStreamWatch.stop();
+    from = end;
     final hrvBatchWatch = Stopwatch()..start();
     final batchHrv = hrvFreq(night.nn.sublist(0, tailEnd),
         night.tMs.sublist(0, tailEnd), artifactFraction: 0.02);

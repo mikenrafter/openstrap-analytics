@@ -18,7 +18,6 @@
 //   - CAUSAL (online) wake/NREM/REM stager       (causal_stager.dart) —
 //       the same features/weights/cutoffs on past-only windows, abstains with a
 //       reason; for live decisions, NOT a replacement for cardioStager.
-//   - Cardiopulmonary Coupling (CPC)              (cpc.dart)
 //   - Nonparametric circadian IS/IV/RA/L5/M10     (circadian_np.dart)
 //
 // Pure Dart, built on the package foundations (RR correction, Lomb-Scargle,
@@ -34,16 +33,21 @@ export 'band_offset.dart';
 export 'hypnogram.dart';
 export 'sri.dart';
 export 'accounting.dart';
-// stager.dart provides StagerResult + the shared Webster/consolidation
-// post-processing (both used by cardio_stager and tests). Its deprecated
-// `autonomicStager` is DELETED — `cardioStager` is the stager.
+// stager.dart provides StagerResult + the shared consolidation post-step. Its
+// deprecated `autonomicStager` is DELETED — `cardioStager` is the stager.
 export 'stager.dart';
-export 'cardio_stager.dart';
+// The test hooks drive private passes directly and are not entry points; tests
+// import cardio_stager.dart itself to reach them.
+export 'cardio_stager.dart'
+    hide
+        websterRescoreCardio,
+        cleanBeatsInWindowForTest,
+        cleanBeatDiffsInWindowForTest,
+        windowRmssdRkForTest;
 export 'stage_ranges.dart';
 export 'cardio_row_cache.dart';
 export 'epoch_rows.dart';
 export 'causal_stager.dart';
-export 'cpc.dart';
 export 'circadian_np.dart';
 export 'cycles.dart';
 export 'night_hrv_shape.dart';

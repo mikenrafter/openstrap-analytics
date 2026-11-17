@@ -1,6 +1,6 @@
 // Epochs + sriAggregator, and the public phillipsSri rewired onto them, must
-// reproduce the ORIGINAL phillipsSri exactly. `_referenceSri` below is a frozen
-// copy of that original body. Do not edit it when phillipsSri is rewired.
+// reproduce upstream main 9db83ce phillipsSri exactly. `_referenceSri` below is a frozen
+// copy of that target body, including its pair-coverage publication gate.
 //
 // Contract used here:
 //  * Epochs(asleep, {valid, firstIndex = 0}): asleep is 0/1 per epoch, valid
@@ -78,6 +78,8 @@ Metric<SriResult> _referenceSri(
     }
     agreement += pairAgreement;
     cases += pairCases;
+    // `> 0` is not redundant with the floor: a caller may pass
+    // `minPairCases: 0`, and a zero-case pair would make SriPair.sri NaN.
     if (pairCases > 0 && pairCases >= pairFloor) {
       pairs.add(SriPair(d, pairAgreement, pairCases));
     }
@@ -90,8 +92,19 @@ Metric<SriResult> _referenceSri(
     );
   }
 
+  if (pairs.isEmpty) {
+    return Metric<SriResult>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'no adjacent-day pair has ≥$pairFloor epochs observed on both '
+          'days (have=$cases epochs in total)',
+    );
+  }
+
   final sri = 200.0 * agreement / cases - 100.0;
-  final conf = ((days - 1) / 7.0).clamp(0.3, 0.95);
+  // Confidence: scales with the number of adequately-observed day-comparisons
+  // (more of them, more stable). Saturates around a typical 7-day record.
+  final conf = (pairs.length / 7.0).clamp(0.3, 0.95);
   return Metric<SriResult>(
     value: SriResult(sri, days, cases, pairs),
     confidence: conf,
@@ -101,6 +114,7 @@ Metric<SriResult> _referenceSri(
         'SRI=200·agreement/cases−100; NOT SD-of-midsleep',
   );
 }
+
 // ---------------------------------------------------------------------------
 
 typedef _Agg = Aggregator<dynamic, Epochs, Metric<SriResult>>;
@@ -216,6 +230,18 @@ void _checkRecord(Rng r, _Rec rec, int epd, int? floor, String tag,
 
 void main() {
   group('Epochs batch', () {
+    // why: reject mismatched columns at construction before aggregation can
+    // overrun a short mask or silently ignore a long one (analytics#107).
+    test('constructor asserts equal column lengths', () {
+      for (final maskLength in [1, 3]) {
+        expect(
+          () => Epochs(Uint8List(2), valid: Uint8List(maskLength)),
+          throwsA(isA<AssertionError>()),
+          reason: 'valid length $maskLength must match asleep length 2',
+        );
+      }
+    });
+
     Epochs mk(int n, {bool mask = false, int first = 0}) => Epochs(
           Uint8List.fromList([for (var i = 0; i < n; i++) i % 3 == 0 ? 1 : 0]),
           valid: mask
@@ -630,6 +656,33 @@ void main() {
             ..['cases'] = 4
             ..['agreement'] = 4;
         }
+        return s;
+      });
+    });
+    // # catches: only the first edge's index was checked, so a last edge at the
+    // wrong index decoded and then broke the join with the next batch (or, with
+    // assertions off, compared against the wrong day).
+    test('the last edge must sit at first + count - its length', () {
+      // 14 epochs from index 0: the last edge holds 4 rows, from index 10.
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, b),
+              kind: 'test', version: 1),
+          isNotNull);
+      for (final bad in [0, 9, 11, 14, 100]) {
+        expectDamagedCheckpointRefused(agg, b, (s) {
+          (lookback(s)['last'] as Map)['firstIndex'] = bad;
+          return s;
+        }, reason: 'last.firstIndex $bad');
+      }
+    });
+    test('a short record (one day or less) checks its edges too', () {
+      final short = _record(Rng(0x5A2), 3, 4, masked: false, flipP: .3).epochs;
+      expect(
+          decodeCheckpoint<dynamic>(agg, checkpointOf(agg, short),
+              kind: 'test', version: 1),
+          isNotNull);
+      expectDamagedCheckpointRefused(agg, short, (s) {
+        (lookback(s)['last'] as Map)['firstIndex'] = 1;
         return s;
       });
     });

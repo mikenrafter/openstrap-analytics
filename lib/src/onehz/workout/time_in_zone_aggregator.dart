@@ -94,6 +94,14 @@ class _TimeInZoneAggregator
   @override
   _TimeInZoneState addSlice(
       _TimeInZoneState state, HrStream batch, int start, int end) {
+    // Checked before anything changes. A non-finite timestamp would store an
+    // infinite or NaN gap in the histograms, a state that restore refuses
+    // (finite keys are its contract), so an accepted state could not round-trip.
+    for (var i = start; i < end; i++) {
+      if (!batch.tsMs[i].isFinite) {
+        throw ArgumentError('heart-rate timestamps must be finite');
+      }
+    }
     state.windows = _windows.addSlice(state.windows, batch, start, end);
     if (start < end) {
       state.hasTail = true;
@@ -120,19 +128,58 @@ class _TimeInZoneAggregator
 
   @override
   Object? encodeState(_TimeInZoneState state) => {
+        'zoneSet': _zoneIdentity(),
         'windows': _windows.encodeState(state.windows),
         'hasTail': state.hasTail,
         'tailTimestampMs': encodeDouble(state.tailTimestampMs),
         'tailHr': encodeDouble(state.tailHr),
       };
 
+  // Ordered definition, including custom bounds: maxHr/source alone do not
+  // identify the zone indices already assigned to histogram credits.
+  List<Object> _zoneIdentity() => [
+        zoneSet.source,
+        encodeDouble(zoneSet.maxHr),
+        for (final zone in zoneSet.zones) ...[
+          zone.number,
+          encodeDouble(zone.lower),
+          encodeDouble(zone.upper),
+          encodeDouble(zone.lowerPct),
+          encodeDouble(zone.upperPct),
+        ],
+      ];
+
   @override
   _TimeInZoneState decodeState(Object? json) {
     final map = decodeMap(json);
+    final storedZones = decodeList(field(map, 'zoneSet'));
+    final currentZones = _zoneIdentity();
+    if (storedZones.length != currentZones.length) {
+      throw const FormatException('Different heart-rate zone set');
+    }
+    for (var i = 0; i < currentZones.length; i++) {
+      if (storedZones[i] != currentZones[i]) {
+        throw const FormatException('Different heart-rate zone set');
+      }
+    }
     final windows = decodeMap(field(map, 'windows'));
     final length = decodeCount(field(windows, 'length'));
     final hasTail = field(map, 'hasTail');
     if (hasTail is! bool) throw const FormatException('Expected a bool');
+    // Every timestamp the state retains must be finite. The stream decoder only
+    // checks column lengths, so an infinite edge timestamp would decode and
+    // later turn into an infinite credit gap, a histogram key that restore then
+    // refuses. Ingestion refuses non-finite timestamps, so no state it built
+    // holds one.
+    for (final edge in ['first', 'last']) {
+      final raw = windows[edge];
+      if (raw == null) continue;
+      for (final t in HrStream.fromJson(raw).tsMs) {
+        if (!t.isFinite) {
+          throw const FormatException('Non-finite retained timestamp');
+        }
+      }
+    }
     final result = empty()
       ..windows = _windows.decodeState(windows)
       ..hasTail = hasTail
@@ -140,6 +187,19 @@ class _TimeInZoneAggregator
       ..tailHr = decodeDouble(field(map, 'tailHr'));
     if (hasTail != (length > 0)) {
       throw const FormatException('Invalid tail');
+    }
+    if (hasTail && !result.tailTimestampMs.isFinite) {
+      throw const FormatException('Non-finite tail timestamp');
+    }
+    if (hasTail) {
+      final last = HrStream.fromJson(field(windows, 'last'));
+      // The lookback decoder has checked that this edge holds exactly one row.
+      // Encoded comparison preserves accepted NaN HR, which is invalid input
+      // for crediting but must still survive a checkpoint round trip.
+      if (result.tailTimestampMs != last.tsMs.single ||
+          encodeDouble(result.tailHr) != encodeDouble(last.hr.single)) {
+        throw const FormatException('Tail disagrees with retained last row');
+      }
     }
     _validateHistogramCounts(result.histograms(), length);
     return result;

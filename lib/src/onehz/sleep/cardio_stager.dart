@@ -61,8 +61,9 @@
 // TODO: re-run the DREAMT effect size for RMSSD at ±90 s and publish both
 // numbers side by side. DO NOT move the shipped weights on the strength of
 // this — it says the measurement is untrustworthy, not which way it moves.
-// Post: Webster continuity rescore (bridges brief arousals into sleep — this is
-// what kills the over-call) + consolidateSleepStages (no single-epoch flicker).
+// Post: arousal-bridging continuity smoother (bridges brief arousals into sleep
+// — this is what kills the over-call; it is NOT Webster's rescore, see
+// `_websterRescore`) + consolidateSleepStages (no single-epoch flicker).
 //
 // LOCAL vs WHOLE-NIGHT baselines (2026-07, real-data root cause): a real WHOOP-4
 // capture showed BOTH the motion and HR features have night-scale
@@ -337,9 +338,15 @@ class SleepUserProfile {
 
 /// One night's observed sleep baselines, emitted by [cardioStager] for folding
 /// into a [SleepUserProfile]. [epochs] = staged epoch count (lets the caller
-/// pick the MAIN sleep among a night's sessions/naps, and reject short naps).
+/// reject short naps). [startTsSec]/[endTsSec] = the staged window in epoch
+/// seconds, which is what ties an observation to ITS night: among the sessions
+/// a search window stages, the epoch count alone cannot tell the night the
+/// caller chose from a longer session of the day before. Null when the caller
+/// did not know the window (the fold then has nothing to match on).
 class SleepNightObservation {
   final int epochs;
+  final int? startTsSec;
+  final int? endTsSec;
   final double? hrFloorP5;
   final double? hrFloorP25;
   final double? hrSleepMedian;
@@ -352,6 +359,8 @@ class SleepNightObservation {
   final double? rkMed;
   const SleepNightObservation({
     required this.epochs,
+    this.startTsSec,
+    this.endTsSec,
     this.hrFloorP5,
     this.hrFloorP25,
     this.hrSleepMedian,
@@ -401,27 +410,45 @@ void resetCardioObservations() => _cardioObservations.clear();
 ///   clock as `accel[i].tsMs`, ASCENDING in [rrTsMs] (the per-epoch window
 ///   gather lower-bounds into it). Sparse/empty is fine — REM/deep just lean
 ///   more on HR and confidence drops.
+/// [runStarts] sample indices (ascending, each a multiple of one epoch's
+///   worth of samples) where a new contiguous recording run begins, when the
+///   input is several runs separated by unrecorded gaps and laid end to end.
+///   See [classifyCardioEpochs]' `segmentStarts` for what that changes.
 CardioStagerResult cardioStager(
   List<double> hr1hz,
   List<AccelSample> accel, {
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
+  List<int> runStarts = const [],
   int epochSec = _epochSec,
   SleepUserProfile? userProfile,
   double remScoreCut = _remScoreCut,
   double deepScoreCut = _deepScoreCut,
   CardioRowCache? rowCache,
 }) {
-  return classifyCardioEpochs(
-    cardioEpochFeatures(
-      hr1hz,
-      accel,
-      rrMs: rrMs,
-      rrTsMs: rrTsMs,
-      epochSec: epochSec,
-      rowCache: rowCache,
-    ),
+  final features = cardioEpochFeatures(
+    hr1hz,
+    accel,
+    rrMs: rrMs,
+    rrTsMs: rrTsMs,
+    runStarts: runStarts,
     epochSec: epochSec,
+    rowCache: rowCache,
+  );
+  final n = math.min(hr1hz.length, accel.length);
+  final cadence = runStarts.isEmpty ? null : sampleCadenceSeconds(
+      [for (var i = 0; i < n; i++) accel[i].tsMs / 1000.0]);
+  final perEpoch = math.max(1, (epochSec / (cadence ?? 1)).round());
+  // The staged window, for the observation this call may record.
+  final firstMs = n > 0 ? accel[0].tsMs : double.nan;
+  final lastMs = n > 0 ? accel[n - 1].tsMs : double.nan;
+  return classifyCardioEpochs(
+    features,
+    epochSec: epochSec,
+    startTsSec: firstMs.isFinite ? (firstMs / 1000).floor() : null,
+    endTsSec: lastMs.isFinite ? (lastMs / 1000).ceil() : null,
+    segmentStarts: [for (final i in runStarts)
+      if (i > 0 && i ~/ perEpoch < features.length) i ~/ perEpoch],
     userProfile: userProfile ?? cardioUserProfile,
     remScoreCut: remScoreCut,
     deepScoreCut: deepScoreCut,
@@ -455,6 +482,7 @@ CardioEpochFeatures cardioEpochFeatures(
   List<AccelSample> accel, {
   List<double> rrMs = const [],
   List<double> rrTsMs = const [],
+  List<int> runStarts = const [],
   int epochSec = _epochSec,
   int startEpoch = 0,
   int? endEpoch,
@@ -505,6 +533,11 @@ CardioEpochFeatures cardioEpochFeatures(
   final nEpoch = n ~/ perEpoch;
   if (nEpoch < 3) return _emptyCardioFeatures;
 
+  assert(runStarts.every((i) => i % perEpoch == 0),
+      'runStarts must fall on epoch boundaries');
+  final segmentStarts = [for (final i in runStarts)
+    if (i > 0 && i ~/ perEpoch < nEpoch) i ~/ perEpoch];
+  final segOf = _segmentOfEpoch(segmentStarts, nEpoch);
   final firstEpoch = startEpoch.clamp(0, nEpoch);
   final lastEpoch = (endEpoch ?? nEpoch).clamp(firstEpoch, nEpoch);
   final rows = lastEpoch - firstEpoch;
@@ -527,6 +560,7 @@ CardioEpochFeatures cardioEpochFeatures(
       firstEpoch,
       lastEpoch,
       rowCache,
+      runStarts,
     );
   }
 
@@ -557,8 +591,13 @@ CardioEpochFeatures cardioEpochFeatures(
   const int _gRefWinSec = 300; // 5 min window, centered per epoch
   // …in SAMPLES at the measured cadence. 300 at 1 Hz, unchanged.
   final gRefHalf = math.max(1, (_gRefWinSec / cadenceSec).round()) ~/ 2;
-  final gRefByEpoch = _epochGRefMedians(
-      mag, perEpoch, gRefHalf, firstEpoch, lastEpoch);
+  final gRefByEpoch = segmentStarts.isEmpty
+      ? _epochGRefMedians(mag, perEpoch, gRefHalf, firstEpoch, lastEpoch)
+      : [for (var e = firstEpoch; e < lastEpoch; e++)
+          median(mag.sublist(
+              math.max(segOf.lo[e] * perEpoch, e * perEpoch - gRefHalf),
+              math.min(segOf.hi[e] == nEpoch ? n : segOf.hi[e] * perEpoch,
+                  (e + 1) * perEpoch + gRefHalf))) ?? 1.0];
 
   // ── per-epoch features ─────────────────────────────────────────────────────
   final motion = List<double>.filled(rows, 0);
@@ -628,6 +667,7 @@ CardioEpochFeatures _cachedCardioEpochFeatures(
   int firstEpoch,
   int lastEpoch,
   CardioRowCache cache,
+  List<int> runStarts,
 ) {
   final count = lastEpoch - firstEpoch;
   final keys = List<CardioRowKey>.filled(
@@ -638,7 +678,7 @@ CardioEpochFeatures _cachedCardioEpochFeatures(
   for (var e = firstEpoch; e < lastEpoch; e++) {
     final row = e - firstEpoch;
     final key = _cardioRowKey(
-        hr1hz, accel, rrMs, rrTsMs, epochSec, n, cadenceSec, perEpoch, e, gRefHalf);
+        hr1hz, accel, rrMs, rrTsMs, epochSec, n, cadenceSec, perEpoch, e, gRefHalf, runStarts);
     keys[row] = key;
     final value = cache.lookup(key);
     values[row] = value;
@@ -664,6 +704,7 @@ CardioEpochFeatures _cachedCardioEpochFeatures(
       rrMs: rrMs,
       rrTsMs: rrTsMs,
       epochSec: epochSec,
+      runStarts: runStarts,
       startEpoch: firstEpoch + first,
       endEpoch: firstEpoch + row,
     );
@@ -713,11 +754,19 @@ CardioRowKey _cardioRowKey(
   int perEpoch,
   int epoch,
   int gRefHalf,
+  List<int> runStarts,
 ) {
   var hash = _fnvOffset64;
+  // Byte-wise FNV-1a. Mixing a whole 64-bit word at a time lets two sign-bit
+  // flips cancel: flipping bit 63 survives every later multiply by the odd
+  // prime as the same flip, so two such changes undo each other.
   void word(int value) {
-    hash ^= value & _u64Mask;
-    hash = (hash * _fnvPrime64) & _u64Mask;
+    var v = value & _u64Mask;
+    for (var i = 0; i < 8; i++) {
+      hash ^= v & 0xff;
+      hash = (hash * _fnvPrime64) & _u64Mask;
+      v >>>= 8;
+    }
   }
   void number(double value) {
     final bytes = ByteData(8)..setFloat64(0, value, Endian.little);
@@ -726,16 +775,21 @@ CardioRowKey _cardioRowKey(
 
   final s = epoch * perEpoch;
   final t = math.min(s + perEpoch, n);
-  final lo = math.max(0, s - gRefHalf);
-  final hi = math.min(n, t + gRefHalf);
-  word(0x43415244494f31); // domain separator: CARDIO1
+  var runLo = 0, runHi = n;
+  for (final boundary in runStarts) {
+    if (boundary <= s) runLo = math.max(runLo, boundary);
+    if (boundary > s) runHi = math.min(runHi, boundary);
+  }
+  final lo = math.max(runLo, s - gRefHalf);
+  final hi = math.min(runHi, t + gRefHalf);
+  word(0x43415244494f32); // domain separator: CARDIO2 (byte-wise hash)
   word(epochSec);
   word(perEpoch);
   number(cadenceSec);
   // Only an actually clipped edge is length-sensitive. A stable marker for an
   // unclipped side means shifting a far-away session edge preserves the row.
-  word(lo == 0 ? gRefHalf - s : -1);
-  word(hi == n ? t + gRefHalf - n : -1);
+  word(lo == runLo ? gRefHalf - (s - runLo) : -1);
+  word(hi == runHi ? t + gRefHalf - runHi : -1);
   word(hi - lo);
   for (var i = lo; i < hi; i++) {
     final a = accel[i];
@@ -776,6 +830,25 @@ CardioRowKey _cardioRowKey(
     word(count);
   }
   return CardioRowKey((accel[s].tsMs / 1000.0).round(), epochSec, hash);
+}
+
+/// For each epoch, the [lo, hi) epoch range of the run it belongs to.
+({List<int> lo, List<int> hi}) _segmentOfEpoch(
+    List<int> segmentStarts, int nEpoch) {
+  final bounds = <int>{0, nEpoch};
+  for (final s in segmentStarts) {
+    if (s > 0 && s < nEpoch) bounds.add(s);
+  }
+  final sorted = bounds.toList()..sort();
+  final lo = List<int>.filled(nEpoch, 0);
+  final hi = List<int>.filled(nEpoch, nEpoch);
+  for (var b = 0; b + 1 < sorted.length; b++) {
+    for (var e = sorted[b]; e < sorted[b + 1]; e++) {
+      lo[e] = sorted[b];
+      hi[e] = sorted[b + 1];
+    }
+  }
+  return (lo: lo, hi: hi);
 }
 
 /// Per-epoch feature vectors — the ONLY thing the staging DECISION layer sees.
@@ -924,16 +997,22 @@ void _removeEpochSorted(List<double> sorted, double value) {
 /// [remScoreCut] / [deepScoreCut] default to the shipped constants and exist so
 /// a calibration harness can sweep them on a DEVELOPMENT split and report the
 /// held-out result. Production callers should not pass them.
-// Reformulates cardioStager() feature extraction and classification: van Hees
-// 2013 motion and Long 2016 / Fonseca 2015/2018 cardiorespiratory staging.
-// Internal fitted weights and rules remain ESTIMATE with low confidence.
-// Session-onset anchoring and post-gap re-anchoring preserve the pre-bump grid;
-// shared arithmetic preserves labels except for separately documented
-// RR/spectral changes. Cached rows require matching dependencies; missing phases
-// are recomputed.
+///
+/// [segmentStarts] epoch indices where a new contiguous recording run begins.
+/// The night baselines (motion median/MAD, the local HR median and arousal cut,
+/// the robust-z scales) are taken across ALL runs, because a run is not a
+/// night: a short run that holds only an awakening would otherwise be judged
+/// against its own awake HR, never reach its own arousal cut, and fall through
+/// to NREM end to end. Everything that assumes two epochs are adjacent in time
+/// (the previous-epoch big-move test, the mode filter, Webster continuity,
+/// consolidation, the short-deep merge) stays inside one run, so nothing is
+/// bridged across time nobody recorded.
 CardioStagerResult classifyCardioEpochs(
   CardioEpochFeatures f, {
   int epochSec = _epochSec,
+  int? startTsSec,
+  int? endTsSec,
+  List<int> segmentStarts = const [],
   SleepUserProfile? userProfile,
   double remScoreCut = _remScoreCut,
   double deepScoreCut = _deepScoreCut,
@@ -964,6 +1043,7 @@ CardioStagerResult classifyCardioEpochs(
   final lfhf = f.lfhf;
   final rk = f.rk;
   final sdnn = f.sdnn;
+  final segOf = _segmentOfEpoch(segmentStarts, nEpoch);
 
   // ── night baselines (from the LOW-MOTION epochs — the actual sleep) ────────
   // motMed/motMad stay WHOLE-NIGHT scalars: `motion` is now computed against a
@@ -1155,7 +1235,7 @@ CardioStagerResult classifyCardioEpochs(
     // within half an epoch 'unobserved' and keeps it out of TST, WASO and the
     // efficiency denominator.
     final hrUp = !hr[e].isNaN && hr[e] >= hrArousal;
-    final bigPrev = e > 0 && bigMove(e - 1);
+    final bigPrev = e > segOf.lo[e] && bigMove(e - 1);
     final bigMoveWake =
         bigMove(e) && ((!hr[e].isNaN && hr[e] >= hrMed) || bigPrev);
     if (hrUp || bigMoveWake) {
@@ -1249,9 +1329,14 @@ CardioStagerResult classifyCardioEpochs(
   // A 3-epoch categorical median (mode) filter first, to drop isolated
   // single-epoch label flips (e.g. a lone REM/deep spike inside a stable run)
   // before the continuity/consolidation stages act on min bouts.
-  _modeFilterStages(stages);
-  _websterRescore(stages, epochSec);
-  final sm = consolidateSleepStages(stages, epochSec);
+  // Per run — see [segmentStarts]. With a single run this is the whole night.
+  final sm = <SleepStage>[];
+  for (var lo = 0; lo < nEpoch; lo = segOf.hi[lo]) {
+    final part = stages.sublist(lo, segOf.hi[lo]);
+    _modeFilterStages(part);
+    _websterRescore(part, epochSec);
+    sm.addAll(consolidateSleepStages(part, epochSec));
+  }
   // Keep deepFlag in lockstep with the FINAL consolidated stage: the mode filter,
   // Webster rescore, and consolidation can move a deep-flagged NREM epoch to REM
   // or Wake. Clear the flag there so no epoch is ever reported deep while its
@@ -1260,7 +1345,12 @@ CardioStagerResult classifyCardioEpochs(
   for (var e = 0; e < deepFlag.length && e < sm.length; e++) {
     if (deepFlag[e] && sm[e] != SleepStage.nrem) deepFlag[e] = false;
   }
-  _mergeShortDeep(deepFlag, sm, epochSec);
+  for (var lo = 0; lo < nEpoch; lo = segOf.hi[lo]) {
+    final hi = segOf.hi[lo];
+    final part = deepFlag.sublist(lo, hi);
+    _mergeShortDeep(part, sm.sublist(lo, hi), epochSec);
+    deepFlag.setRange(lo, hi, part);
+  }
 
   // ── record this night's baselines for the rolling per-user profile (P2) ─────
   // Only when the edge armed recording AND the staged span is a real sleep
@@ -1269,6 +1359,8 @@ CardioStagerResult classifyCardioEpochs(
     final hrSleepMed = median(sleepHr);
     _cardioObservations.add(SleepNightObservation(
       epochs: nEpoch,
+      startTsSec: startTsSec,
+      endTsSec: endTsSec,
       hrFloorP5: percentile(sleepHr, 5),
       hrFloorP25: percentile(sleepHr, 25),
       hrSleepMedian: hrSleepMed,
@@ -1276,8 +1368,12 @@ CardioStagerResult classifyCardioEpochs(
           (hrSleepMed ?? hrMedGlobal) + math.max(6.0, stddev(sleepHr) ?? 6.0),
       rmssdMed: rmssdMed,
       rmssdMad: mad(sleepRmssd),
-      enmoStillCut: motMed + 1.5 * motMad,
-      enmoMoveCut: motMed + 5.0 * motMad,
+      // A MAD-0 night abstained from the motion axis above; its cuts would be
+      // the same degenerate ~0 g threshold, and folding that into the profile
+      // drags later nights' big-move bar toward 0 so ordinary repositioning
+      // reads as WAKE. No measurement ⇒ null ⇒ the fold leaves the axis alone.
+      enmoStillCut: motUsable ? motMed + 1.5 * motMad : null,
+      enmoMoveCut: motUsable ? motMed + 5.0 * motMad : null,
       lfhfMed: median(sleepLfhf),
       rkMed: median(sleepRk),
     ));
@@ -1535,14 +1631,27 @@ List<double> cleanBeatDiffsInWindowForTest(
       rk: _windowRemFeatures(rrMs, rrTsMs, accel, s, t, _epochSec).rk,
     );
 
-/// Webster sleep-continuity rescore: brief wake bouts flanked by enough sleep
-/// are re-labelled sleep (NREM). This is the published actigraphy step that
-/// prevents normal in-sleep repositioning from inflating WASO.
+/// Arousal-bridging continuity smoother: brief wake bouts flanked by enough
+/// sleep are re-labelled sleep (NREM), so in-sleep repositioning that the
+/// HR/motion wake spine over-calls does not inflate WASO.
+///
+/// This is NOT Webster's rescore and is not a published method. Webster et
+/// al. 1982 / Cole et al. 1992 run the other way: after >=4/10/15 min of
+/// scored WAKE the next 1/3/4 min of SLEEP become wake, and a sleep bout of
+/// <=6 (<=10) min with >=10 (>=20) min of wake on both sides becomes wake. Their
+/// pass only ever removes sleep; this one only ever adds it, borrowing the
+/// same minute values as its bounds. It is a deliberate bias toward TST: each
+/// rule row can hide a genuine awakening of up to that row's length.
+///
+/// Context is the LONGER of the two flanking sleep runs, not both. Requiring
+/// both sides was measured: on the Apple-Watch-labelled real night
+/// (real_night_cardio_stager_test, reference wake = 3 min) it raised wake from
+/// 26.0 to 41.5 min, i.e. the one-sided context is absorbing over-called wake
+/// on real data, not erasing real awakenings there.
 ///
 /// The flanking-sleep CONTEXT is measured against an immutable SNAPSHOT of the
-/// hypnogram taken before the pass — Webster's rule scores each wake bout
-/// against the ORIGINAL surrounding sleep (Webster et al. 1982; Cole et al.
-/// 1992), not against sleep this same pass just manufactured. Reading the list
+/// hypnogram taken before the pass, not against sleep this same pass just
+/// manufactured. Reading the list
 /// being mutated let every bridged bout count as context for the next one, so
 /// bridging CASCADED: a fragmented night of short sleep bouts separated by long
 /// wake bouts collapsed into one continuous sleep block (WASO 0, efficiency
@@ -1583,9 +1692,10 @@ void _websterRescore(List<SleepStage> sm, int epochSec) {
     return c;
   }
 
-  // Context (min sleep flanking) → max bridgeable wake (min). THE PUBLISHED
-  // TABLE, unmodified: Webster et al. 1982 / Cole et al. 1992 rescoring rules —
-  // 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15 bridges ≤4.
+  // Context (min sleep flanking) → max bridgeable wake (min). The minute values
+  // are Webster et al. 1982 / Cole et al. 1992's; the direction is not (see the
+  // doc comment) — 4 min of sleep bridges ≤1 min of wake, 10 bridges ≤3, 15
+  // bridges ≤4.
   //
   // This used to run [15→10], [10→5], [4→2] — 2.5x the published bridge — on
   // the argument that the van Hees window had already certified the span as the

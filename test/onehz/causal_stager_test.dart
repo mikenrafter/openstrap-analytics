@@ -19,6 +19,9 @@ import 'dart:isolate';
 import 'package:test/test.dart';
 import 'package:openstrap_analytics/onehz.dart';
 
+import 'package:openstrap_analytics/src/onehz/sleep/cardio_stager.dart'
+    show cleanBeatsInWindowForTest;
+
 import 'support/causal_night.dart';
 
 /// Everything an observation decides, excluding bookkeeping counters in the

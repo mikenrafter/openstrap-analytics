@@ -5,13 +5,14 @@
 //  * TimedValues(tHours, y): equal-length Float64Lists (assert). Row r is the
 //    sample (tHours[r], y[r]). copyRange returns copies; join concatenates.
 //    TimedValues and cosinorAggregator are exported from
-//    package:openstrap_analytics/aggregate.dart. No NaN handling is promised
-//    or tested (cosinor() has none); a tHours/y length mismatch cannot occur.
+//    package:openstrap_analytics/aggregate.dart. Non-finite moments abstain;
+//    a tHours/y length mismatch cannot occur.
 //  * cosinorAggregator({periodHours = 24, minPoints = cosinorMinPoints}) is an
 //    Aggregator<_, TimedValues, Metric<CosinorFit>>. Constructing it never
 //    throws, also for periodHours <= 0 (then every run is absent).
 //  * Absent exactly when cosinor() is absent: n < max(4, minPoints),
-//    periodHours <= 0 ('too few points for cosinor'), or a singular design
+//    invalid/non-finite period ('invalid cosinor period'), non-finite moments,
+//    or a singular design
 //    (relative centered determinant <= 1e-12 of the diagonal product;
 //    'singular cosinor design (insufficient phase coverage)').
 //    Absent metrics carry the same tier, inputs_used and note.
@@ -26,6 +27,7 @@
 //  * Batch now runs the same aggregator. The near-singular fixture below
 //    pins its relative gate; ordinary parity fixtures avoid that threshold.
 
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -33,6 +35,7 @@ import 'package:openstrap_analytics/aggregate.dart';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
+import 'support/upstream_cosinor.dart';
 import '../support/checkpoint_support.dart';
 import '../support/aggregator_laws.dart';
 import '../support/property.dart' show Rng;
@@ -80,8 +83,6 @@ String? _diff(Metric<CosinorFit> got, Metric<CosinorFit> want) {
   for (final (name, a, b) in [
     ('mesor', g.mesor, w.mesor),
     ('amplitude', g.amplitude, w.amplitude),
-    ('acrophaseRad', g.acrophaseRad, w.acrophaseRad),
-    ('acrophaseHours', g.acrophaseHours, w.acrophaseHours),
     ('r2', g.r2, w.r2),
     ('r2Adj', g.r2Adj, w.r2Adj),
   ]) {
@@ -102,18 +103,28 @@ String? _diff(Metric<CosinorFit> got, Metric<CosinorFit> want) {
   if (!rel(g.amplitude, w.amplitude, floor)) {
     return 'amplitude ${g.amplitude} vs ${w.amplitude}';
   }
-  final noPhase = w.amplitude < 1000 * floor && g.amplitude < 1000 * floor;
-  if (!noPhase &&
-      _circ(g.acrophaseRad, w.acrophaseRad, _twoPi) >
-      1e-9 * math.max(1, w.acrophaseRad.abs())) {
+  for (final (name, a, b) in [
+    ('acrophaseRad', g.acrophaseRad, w.acrophaseRad),
+    ('acrophaseHours', g.acrophaseHours, w.acrophaseHours),
+  ]) {
+    if ((a == null) != (b == null)) return '$name presence $a vs $b';
+    if (a != null && b != null && _nonFiniteMismatch(a, b)) {
+      return '$name non-finite mismatch $a vs $b';
+    }
+  }
+  if (g.acrophaseRad != null && w.acrophaseRad != null &&
+      _circ(g.acrophaseRad!, w.acrophaseRad!, _twoPi) >
+      1e-9 * math.max(1, w.acrophaseRad!.abs())) {
     return 'acrophaseRad ${g.acrophaseRad} vs ${w.acrophaseRad}';
   }
   if (g.periodHours != w.periodHours) return 'periodHours';
-  if (!noPhase &&
-      _circ(g.acrophaseHours, w.acrophaseHours, w.periodHours) >
+  if (g.acrophaseHours != null && w.acrophaseHours != null &&
+      _circ(g.acrophaseHours!, w.acrophaseHours!, w.periodHours) >
       1e-9 * w.periodHours) {
     return 'acrophaseHours ${g.acrophaseHours} vs ${w.acrophaseHours}';
   }
+  if (_nonFiniteMismatch(g.amplitudeP, w.amplitudeP) ||
+      (g.amplitudeP - w.amplitudeP).abs() > 1e-7) return 'amplitudeP';
   if ((g.r2 - w.r2).abs() > 1e-7) return 'r2 ${g.r2} vs ${w.r2}';
   if ((g.r2Adj - w.r2Adj).abs() > 1e-7) {
     return 'r2Adj ${g.r2Adj} vs ${w.r2Adj}';
@@ -127,8 +138,19 @@ void _same(Metric<CosinorFit> got, Metric<CosinorFit> want, String tag) {
   expect(_diff(got, want), isNull, reason: tag);
 }
 
-Metric<CosinorFit> _want(TimedValues d, double period, int minPoints) =>
-    cosinor(d.tHours, d.y, periodHours: period, minPoints: minPoints);
+Metric<CosinorFit> _want(TimedValues d, double period, int minPoints) {
+  // Review 3c21387 changed the invalid-period note and its precedence. Keep
+  // the frozen independent solver for finite-input numerical comparisons.
+  if (!period.isFinite || period <= 0) {
+    return const Metric<CosinorFit>.absent(
+      tier: Tier.high,
+      inputs_used: ['signal_timeseries'],
+      note: 'invalid cosinor period',
+    );
+  }
+  return upstreamCosinor(d.tHours, d.y,
+      periodHours: period, minPoints: minPoints);
+}
 
 void _allPaths(_Agg a, TimedValues d, List<int> b, Metric<CosinorFit> want,
     String tag) {
@@ -185,10 +207,16 @@ TimedValues _lawSeries(Rng r, int i) {
 }
 
 void main() {
+  // The singular case is built to be EXACT, not near the gate. Every sample sits
+  // at the same time, so cos and sin receive bit-identical inputs and every
+  // sample has the same c and s. The running means then equal c and s exactly,
+  // so each later deviation is exactly 0 and mCC, mSS and mCS stay exactly 0 (in
+  // one slice and across merges, where the mean difference is exactly 0 too).
+  // The determinant is 0 and the gate `0 <= 1e-12 * 0 * 0` holds whatever libm
+  // returns for cos and sin. Nothing here sits near the 1e-12 threshold, so no
+  // platform's rounding can move it.
   test('tiny phase coverage returns an absent metric, not a fabricated fit', () {
-    // Distinct finite times, clustered around phase pi/4. The two centered
-    // design columns become nearly collinear despite enough observations.
-    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-6];
+    final t = List<double>.filled(16, 3.0);
     final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
     final batch = _tv(t, y);
     final agg = cosinorAggregator();
@@ -206,9 +234,32 @@ void main() {
     }
   });
 
+  // Control: a narrow phase window that is still sufficient. The times span
+  // 0.015 h (about 54 s) in 1e-3 h steps. The relative determinant of that
+  // design is about 1.15e-6, over a million times the 1e-12 gate, and the
+  // cancellation in the determinant costs about 1e-10 relative, so the verdict
+  // does not depend on how a platform rounds cos and sin.
+  test('a narrow but sufficient phase window still fits', () {
+    final t = [for (var i = 0; i < 16; i++) 3.0 + i * 1e-3];
+    final y = [for (var i = 0; i < t.length; i++) 60.0 + i * 0.01];
+    final batch = _tv(t, y);
+    final agg = cosinorAggregator();
+    final left = agg.addSlice(agg.empty(), batch, 0, 8);
+    final right = agg.addSlice(agg.empty(), batch, 8, batch.length);
+    for (final result in [agg.run(batch),
+      agg.finish(agg.combine(left, right)), cosinor(t, y)]) {
+      expect(result.present, isTrue);
+      expect(result.value, isNotNull);
+      expect(result.value!.amplitude.isFinite, isTrue);
+    }
+  });
+
   group('TimedValues batch', () {
-    final d = _tv([0, 1, 2, 3, 4], [10, 11, 12, 13, 14]);
+    // A fresh batch for every test: one of them writes into it, so a shared one
+    // would hand the others different data depending on the run order.
+    TimedValues fresh() => _tv([0, 1, 2, 3, 4], [10, 11, 12, 13, 14]);
     test('length, copyRange, join', () {
+      final d = fresh();
       expect(d.length, 5);
       final c = d.copyRange(1, 4);
       expect(c.tHours, [1.0, 2.0, 3.0]);
@@ -219,6 +270,7 @@ void main() {
       expect(d.copyRange(2, 2).length, 0);
     });
     test('copies are independent of the source and of the join inputs', () {
+      final d = fresh();
       final c = d.copyRange(0, 3);
       d.y[0] = -1;
       d.tHours[1] = -1;
@@ -321,7 +373,7 @@ void main() {
       expect(v.mesor, closeTo(10, 1e-9));
       expect(v.amplitude, closeTo(2, 1e-9));
       expect(v.acrophaseRad, closeTo(0, 1e-9));
-      expect(_circ(v.acrophaseHours, 0, 24), lessThan(1e-7));
+      expect(_circ(v.acrophaseHours!, 0, 24), lessThan(1e-7));
     });
     test('period 12 and a custom period are carried through', () {
       final d = _series(Rng(2), 80, period: 12, peak: 4, step: .3);
@@ -482,6 +534,7 @@ void main() {
             double? hours,
             double? r2,
             double? r2Adj,
+            double? amplitudeP,
             double? confidence}) =>
         Metric<CosinorFit>(
           value: CosinorFit(
@@ -492,6 +545,7 @@ void main() {
             periodHours: base.value!.periodHours,
             r2: r2 ?? base.value!.r2,
             r2Adj: r2Adj ?? base.value!.r2Adj,
+            amplitudeP: amplitudeP ?? base.value!.amplitudeP,
           ),
           confidence: confidence ?? base.confidence,
           tier: base.tier,
@@ -509,6 +563,7 @@ void main() {
     test('every field turned NaN or infinite is reported', () {
       for (final bad in [double.nan, double.infinity]) {
         expect(_diff(with_(r2Adj: bad), base), isNotNull, reason: 'r2Adj $bad');
+        expect(_diff(with_(amplitudeP: bad), base), isNotNull, reason: 'amplitudeP $bad');
         expect(_diff(with_(confidence: bad), base), isNotNull,
             reason: 'confidence $bad');
         expect(_diff(with_(rad: bad), base), isNotNull, reason: 'rad $bad');
@@ -583,5 +638,91 @@ void main() {
         narrow(20, step: .005),
       ], equals: _eq);
     });
+  });
+
+  // A column of pure rounding residue is not data. With a 24 h period and
+  // t = 12 i the phase is exactly pi i, so the true sine is 0 at every sample;
+  // the computed values are tiny, nonzero and arbitrary (sin of fl(pi) * i). The
+  // cosine column is +-1 and well conditioned, so the design is not collinear in
+  // the relative sense and used to pass the gate and report an amplitude read
+  // from that residue. The guard compares the column's centered energy with the
+  // most rounding can produce at that argument scale (see the aggregator), which
+  // follows from machine epsilon and the largest argument, not a tuned constant:
+  // here the residue is about 1e-14 against a floor near 1e-13, and any real
+  // sine column is many orders above it, so no platform's libm can move this.
+  group('a column of rounding residue makes the metric absent', () {
+    const note = 'singular cosinor design (insufficient phase coverage)';
+    void expectAbsent(List<double> t, String why) {
+      final y = [for (var i = 0; i < t.length; i++) 60.0 + 3 * (i % 5)];
+      final batch = _tv(t, y);
+      final agg = cosinorAggregator();
+      final half = t.length ~/ 2;
+      final left = agg.addSlice(agg.empty(), batch, 0, half);
+      final right = agg.addSlice(agg.empty(), batch, half, batch.length);
+      for (final (name, result) in [
+        ('run', agg.run(batch)),
+        ('merged', agg.finish(agg.combine(left, right))),
+        ('batch', cosinor(t, y)),
+      ]) {
+        expect(result.present, isFalse, reason: '$why $name');
+        expect(result.value, isNull, reason: '$why $name');
+        expect(result.note, note, reason: '$why $name');
+      }
+    }
+
+    test('sine column: t = 12 i, period 24 (the true sine is 0)', () {
+      expectAbsent([for (var i = 0; i < 48; i++) 12.0 * i], 'sine');
+    });
+    test('cosine column: t = 6 + 12 i (the true cosine is 0)', () {
+      expectAbsent([for (var i = 0; i < 48; i++) 6.0 + 12.0 * i], 'cosine');
+    });
+    test('the same holds for a long record, where the argument is large', () {
+      expectAbsent([for (var i = 0; i < 2000; i++) 12.0 * i], 'long sine');
+    });
+    test('the guard survives a checkpoint', () {
+      final t = [for (var i = 0; i < 48; i++) 12.0 * i];
+      final y = [for (var i = 0; i < 48; i++) 60.0 + 3 * (i % 5)];
+      final batch = _tv(t, y);
+      final agg = cosinorAggregator();
+      final json = jsonDecode(jsonEncode(
+          agg.encodeState(agg.addSlice(agg.empty(), batch, 0, 24))));
+      final back = agg.decodeState(json);
+      final done = agg.finish(agg.addSlice(back, batch, 24, 48));
+      expect(done.present, isFalse);
+      expect(done.note, note);
+    });
+    test('a negative stored argument scale is refused', () {
+      final batch = _tv([0, 1, 2, 3], [1, 2, 3, 4]);
+      final agg = cosinorAggregator();
+      final json = jsonDecode(jsonEncode(
+          agg.encodeState(agg.addSlice(agg.empty(), batch, 0, 4)))) as Map;
+      expect(() => agg.decodeState(json), returnsNormally);
+      json['maxArg'] = -1.0;
+      expect(() => agg.decodeState(json), throwsFormatException);
+    });
+  });
+
+  // The relative-determinant gate still does its own job: two distinct phases
+  // only (t = 0 and t = 6, a quarter period apart) make every centered column a
+  // multiple of the same two-valued indicator, so the design has rank one while
+  // both columns carry real energy. Each column takes exactly two values (equal
+  // inputs give equal outputs), so the only noise is the accumulation, about
+  // 1e-16 relative, four orders under the 1e-12 gate.
+  test('two phases only: rank one, caught by the determinant gate', () {
+    final t = [for (var i = 0; i < 16; i++) i.isEven ? 0.0 : 6.0];
+    final y = [for (var i = 0; i < 16; i++) 60.0 + (i.isEven ? 0.0 : 5.0) + i * 0.01];
+    final batch = _tv(t, y);
+    final agg = cosinorAggregator();
+    final left = agg.addSlice(agg.empty(), batch, 0, 8);
+    final right = agg.addSlice(agg.empty(), batch, 8, 16);
+    for (final result in [
+      agg.run(batch),
+      agg.finish(agg.combine(left, right)),
+      cosinor(t, y)
+    ]) {
+      expect(result.present, isFalse);
+      expect(result.note,
+          'singular cosinor design (insufficient phase coverage)');
+    }
   });
 }

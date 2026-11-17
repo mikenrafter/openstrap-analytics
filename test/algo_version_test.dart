@@ -4,11 +4,12 @@ import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 
 void main() {
-  test('adopted output revisions move their owning group counters', () {
+  test('merged output revisions move their owning groups', () {
     const changed = {
       'found.core', // Lomb-Scargle first-sample origin.
       'found.rr_correction', // Artifact-run cap, already bumped.
-      'sleep.stage', // Counter 4 adds the HMM whole-session baseline, fallback and provenance (3 added HMM and nightly metadata).
+      'found.energy', // Floor negative adjusted minutes in hourly energy.
+      'sleep.stage', // Already bumped; also owns adopted HRV staging paths.
       'hrv.freq', // HRV aggregator rounding and invalid-time abstention.
       'night.rhythm', // Cosinor/circadian and gap-aware irregular screening.
       'activity.load', // TRIMP, CTL/ATL and time-in-zone aggregation.

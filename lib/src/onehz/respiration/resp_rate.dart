@@ -197,6 +197,13 @@ Metric<RespEstimate> rsaRespRate(
       note: 'non-finite beat time',
     );
   }
+  if (hasRegressingBeatTimes(nnTimesMs)) {
+    return const Metric<RespEstimate>.absent(
+      tier: Tier.high,
+      inputs_used: inputs,
+      note: 'regressing beat time',
+    );
+  }
   final spanSec = tSec.last - tSec.first;
   if (spanSec <= 0) {
     return const Metric<RespEstimate>.absent(
@@ -267,7 +274,7 @@ Metric<RespEstimate> rsaRespRate(
 }
 
 class _RsaSegmentResult {
-  // 0 = usable peak, 1 = ceiling, 2 = below HF band, 3 = thin, 4 = gappy
+  // 0 = usable peak, 1 = ceiling, 2 = below HF band, 3 = thin, 5 = floor, 4 = gappy
   // (kept beats cover < 80 % of the sub-window).
   final int kind;
   final double? brpm, peakHz, power;
@@ -315,6 +322,22 @@ _RsaSegmentResult _rsaSegment(
   if (pk >= segHi - (segHi - rsaLoHz) / (grid - 1)) {
     return _RsaSegmentResult(1, null, null, null, segHi * 60);
   }
+    // The same absence at the BOTTOM edge. A true rate below [rsaLoHz] (slow
+    // deep-sleep or paced breathing at 7.5–9 br/min) leaves only the skirt of
+    // its main lobe inside the band, so the in-band maximum sits on or just
+    // above the floor. Every sub-window then lands near that one value, the
+    // agreement gate passes, and ~9 br/min went out at confidence 0.8–0.9 for
+    // a true 8. One resolution width (1/span) was not enough: noise on the
+    // skirt still put sub-windows at 9.2–10 br/min. Two widths of a full
+    // [rsaSegmentSec] sub-window (0.4 br/min) withholds the whole skirt; the
+    // cost is that a true 9.0–9.4 is withheld too, which is an absence rather
+    // than a wrong number. The guard is capped at that width rather than
+    // scaling with 1/segSpan: on a short input (a 3-min window gives ~90 s
+    // sub-windows) 2/segSpan is 1.33 br/min and blanked a true 10 br/min,
+    // while the floor failure there already sits on the first bin.
+    if (pk <= rsaLoHz + math.min(2 / segSpan, 2 / rsaSegmentSec)) {
+      return const _RsaSegmentResult(5);
+    }
   return _RsaSegmentResult(0, pk * 60.0, pk, _powerAt(ls, pk));
 }
 
@@ -330,7 +353,7 @@ Metric<RespEstimate> _rsaMetricFromSegments(
   final peaks = <double>[];
   final peakHz = <double>[];
   final peakPwr = <double>[];
-  var atCeiling = 0, belowBand = 0, thin = 0, gappy = 0;
+  var atCeiling = 0, atFloor = 0, belowBand = 0, thin = 0, gappy = 0;
   // The ceilings those sub-windows peaked at, br/min — their own, which
   // move with heart rate; not the whole input's.
   var ceilingLo = double.infinity, ceilingHi = 0.0;
@@ -345,13 +368,15 @@ Metric<RespEstimate> _rsaMetricFromSegments(
       ceilingHi = math.max(ceilingHi, segment.ceilingBrpm!);
     } else if (segment.kind == 2) {
       belowBand++;
+    } else if (segment.kind == 5) {
+      atFloor++;
     } else if (segment.kind == 4) {
       gappy++;
     } else {
       thin++;
     }
   }
-  final dropped = atCeiling + belowBand + thin + gappy;
+  final dropped = atCeiling + atFloor + belowBand + thin + gappy;
   final total = peaks.length + dropped;
   if (peaks.length < 3) {
     // The largest counter is the reason; ties go to the earlier entry.
@@ -369,6 +394,11 @@ Metric<RespEstimate> _rsaMetricFromSegments(
                 'resolvable ceiling (${round6(ceilingLo)}'
                 '${ceilingHi > ceilingLo ? '–${round6(ceilingHi)}' : ''} '
                 'br/min)'
+      ),
+      (
+        atFloor,
+        '$atFloor of $total sub-windows peaked at the floor of the RSA band '
+            '(${round6(rsaLoHz * 60)} br/min) — the true rate may be below it'
       ),
       (
         gappy,
@@ -401,13 +431,16 @@ Metric<RespEstimate> _rsaMetricFromSegments(
   for (final p in peaks) {
     if ((p - medBrpm0).abs() <= tolBrpm) within++;
   }
-  final consensus = within / peaks.length;
+  // A floor-pinned sub-window is a vote for "below the band", not an
+  // abstention: leaving it out let the few skirt sub-windows that cleared the
+  // floor guard agree among themselves and publish a rate.
+  final consensus = within / (peaks.length + atFloor);
   if (consensus < minConsensus) {
     return Metric<RespEstimate>.absent(
       tier: Tier.high,
       inputs_used: inputs,
       note: 'HF peak unstable across the window\'s own sub-windows — only '
-          '$within of ${peaks.length} ${round6(segSec)}s sub-windows fall '
+          '$within of ${peaks.length + atFloor} ${round6(segSec)}s sub-windows fall '
           'within ${round6(tolBrpm)} br/min of the median; withheld',
     );
   }
@@ -434,8 +467,7 @@ Metric<RespEstimate> _rsaMetricFromSegments(
       .clamp(0.2, 0.9);
   return Metric<RespEstimate>(
     value: RespEstimate(brpm, bestPeakHz, bestPower, 'rsa',
-        usableSubwindows: peaks.length,
-        subwindows: total),
+        usableSubwindows: peaks.length, subwindows: total),
     confidence: conf,
     tier: Tier.high,
     inputs_used: inputs,
@@ -451,8 +483,9 @@ Metric<RespEstimate> _rsaMetricFromSegments(
 ///
 /// The whole-input ceiling comes from the MEDIAN beat interval, so every folded
 /// NN is kept once more in [_sorted] ([double.compareTo] order, as `median`
-/// sorts); a snapshot merges the tail in. Checkpoint version 2 carries it; a
-/// version 1 checkpoint (span-based ceiling, no gappy sub-windows) is refused.
+/// sorts); a snapshot merges the tail in. Checkpoint version 3 also carries
+/// the floor outcomes. Versions 1 and 2
+/// are refused because their closed windows did not apply the floor guard.
 // Welch 1967; Lomb 1976; Scargle 1982; Press & Rybicki 1989; DeBoer, Karemaker &
 // Strackee 1984, as in rsaRespRate(). Shared segment scoring, retained exact NN
 // median and provisional windows reproduce batch.
@@ -471,7 +504,7 @@ class RsaRespStream {
       if (field(j, 'type') != 'RsaRespStream') {
         throw const FormatException('not an RsaRespStream checkpoint');
       }
-      if (field(j, 'version') != 2) {
+      if (field(j, 'version') != 3) {
         throw const FormatException('unsupported RsaRespStream version');
       }
       final n = decodeCount(field(j, 'n'));
@@ -503,7 +536,7 @@ class RsaRespStream {
       for (final value in encoded) {
         final r = decodeMap(value);
         final kind = field(r, 'kind');
-        if (kind is! int || kind < 0 || kind > 4) {
+        if (kind is! int || kind < 0 || kind > 5) {
           throw const FormatException('invalid RSA segment');
         }
         final brpm = decodeDoubleOrNull(field(r, 'brpm'));
@@ -526,7 +559,7 @@ class RsaRespStream {
 
   Map<String, dynamic> toJson() => {
         'type': 'RsaRespStream',
-        'version': 2,
+        'version': 3,
         'n': _n,
         'first': _first == null ? null : encodeDouble(_first!),
         'last': _last == null ? null : encodeDouble(_last!),
@@ -578,10 +611,6 @@ class RsaRespStream {
       throw ArgumentError('tailNnMs and tailNnTimesMs must have the same length');
     }
     final tail = [for (final t in tailNnTimesMs) t / 1000.0];
-    if (!_nondecreasing(tail) ||
-        (tail.isNotEmpty && _last != null && tail.first < _last!)) {
-      throw StateError('beat times must be non-decreasing');
-    }
     final n = _n + tailNnMs.length;
     // A non-finite tail time: the batch's own answer (it abstains).
     if (n < 20 || _first == null || tail.any((t) => !t.isFinite)) {
@@ -591,6 +620,10 @@ class RsaRespStream {
           tolBrpm: tolBrpm,
           minConsensus: minConsensus,
           maxArtifact: maxArtifact);
+    }
+    if (!_nondecreasing(tail) ||
+        (tail.isNotEmpty && _last != null && tail.first < _last!)) {
+      throw StateError('beat times must be non-decreasing');
     }
     if (artifactFraction > maxArtifact) {
       return Metric<RespEstimate>.absent(

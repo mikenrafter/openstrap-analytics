@@ -144,11 +144,11 @@ class _CircadianStatsAggregator
       final value = values[i];
       state.sum += value;
       state.count++;
+      // Match the batch centered-variance pass: NaN is absorbing. Counts and
+      // the raw sum still need every row for the other circadian indices.
+      if (state.m2.isNaN) continue;
       if (!value.isFinite) {
-        // The reference later evaluates (value - grand) squared for this row.
-        // Whatever grand is, this makes ssTot non-finite (and usually NaN).
         state.m2 = double.nan;
-        state.mean = state.sum / state.count;
         continue;
       }
       final delta = value - state.mean;
@@ -175,7 +175,11 @@ class _CircadianStatsAggregator
     left
       ..sum += right.sum
       ..mean += delta * right.count / count
-      ..m2 += right.m2 + delta * delta * leftCount * right.count / count
+      // The pair weight leftCount * right.count / count comes first: scaling
+      // delta * delta by the two counts before dividing by their sum can pass
+      // the double range (1e306 * 51 * 50) when the combined value, with the
+      // division applied, is finite (about 2.5e307).
+      ..m2 += right.m2 + delta * delta * (leftCount * right.count / count)
       ..count = count;
     return left;
   }
@@ -303,6 +307,16 @@ Aggregator<dynamic, EpochSeries, Metric<CircadianNp>> circadianNpAggregator(
     final firstEpoch = EpochSeries.fromJson(first);
     if (firstEpoch.length != 1) {
       throw const FormatException('Expected one first circadian epoch');
+    }
+    // The last edge row sits at an absolute index the epoch count fixes. A
+    // wrong one decodes (the lookback checks only the length) and then fails
+    // when the next batch is joined to it, so it is refused here.
+    final lastRaw = field(lookback, 'last');
+    if (lastRaw == null) throw const FormatException('Missing last circadian epoch');
+    final lastEpoch = EpochSeries.fromJson(lastRaw);
+    if (lastEpoch.length != 1 ||
+        lastEpoch.firstIndex != firstEpoch.firstIndex + count - 1) {
+      throw const FormatException('Last circadian epoch is out of position');
     }
     final start = firstEpoch.firstIndex % p;
     final expectedGroups = count < p ? count : p;

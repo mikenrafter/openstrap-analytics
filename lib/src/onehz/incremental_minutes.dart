@@ -48,6 +48,12 @@ class IncrementalMinuteMetrics {
     state._basalPerMinute = json['basalPerMinute'] == null
         ? null
         : _number(json['basalPerMinute'], finite: true);
+    // A basal rate is energy per minute at rest: never negative. A negative one
+    // would pass through an unchanged-parameter sync and price a walking minute
+    // at a negative surplus, which the next restore then refuses.
+    if (state._basalPerMinute != null && state._basalPerMinute! < 0) {
+      throw const FormatException('Invalid basal rate');
+    }
     if (json['parameters'] != null) {
       final parameters = json['parameters'];
       if (parameters is! List ||
@@ -212,8 +218,15 @@ class IncrementalMinuteMetrics {
       _energyPricer = profile == null || restingHr == null || maxHr == null
           ? null
           : Calories.minuteEnergyPricer(
-              profile: profile, hrmax: maxHr, restingHr: restingHr);
-      _basalPerMinute = _energyPricer?.basalKcalPerMin;
+              profile: profile,
+              hrmax: maxHr,
+              restingHr: restingHr,
+              basalKcalPerMin: reprice ? null : _basalPerMinute);
+      // Restoring the callable must not change an accepted checkpoint's rate.
+      // CLAIM(restored-minute-pricing): retained and new bills use that rate
+      // [minute_metrics_test: restored basal prices appended surplus].
+      // Parameter changes or force select the current profile's rate instead.
+      if (reprice) _basalPerMinute = _energyPricer?.basalKcalPerMin;
       _pricerReady = true;
     }
     if (reprice) {

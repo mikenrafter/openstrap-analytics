@@ -1,6 +1,6 @@
 // LAWS of the append-only beat streams behind the night's spectral and CVHR
-// estimators: `RsaRespStream` (respiration/resp_rate.dart, checkpoint v2),
-// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v1) and `CvhrStream`
+// estimators: `RsaRespStream` (respiration/resp_rate.dart, checkpoint v3),
+// `HrvFreqStream` (clinical/hrv_freq_stream.dart, v2) and `CvhrStream`
 // (respiration/cvhr_apnea.dart, v1). Each folds settled NN with their beat
 // times and answers `snapshot` with a provisional tail; the batch functions
 // (`rsaRespRate`, `hrvFreq`, `cvhrApneaScreen`) are the reference.
@@ -27,8 +27,9 @@
 //        as written. An unknown key: ignored.
 //   L4   identity: an empty fold changes nothing (on a fresh stream it records
 //        nothing), `snapshot` never writes, and a refused fold (lengths that
-//        differ, a non-finite beat time, a time that steps back) leaves the
-//        stream unchanged.
+//        differ or a non-finite beat time) leaves the stream unchanged. A
+//        backward beat is refused by RSA/CVHR; spectral HRV counts its omission
+//        and keeps the retained samples and closed powers unchanged.
 //   L5   conservation, from counts made HERE from the input: the stream counts
 //        every folded beat once; RsaRespStream keeps exactly the sorted
 //        multiset of the folded NN and has closed exactly the sub-windows the
@@ -167,6 +168,9 @@ abstract class _Ops<S> {
 
   /// Whether a fold with a non-finite beat time is refused.
   bool get refusesNonFiniteTimes => true;
+
+  /// Spectral HRV omits backward beats; RSA and CVHR refuse them at fold.
+  bool get omitsRegressingTimes => false;
 
   /// Counts made from the input ([nn] / [t], everything folded so far).
   void conserved(Json cp, List<double> nn, List<double> t, int cfg, String why);
@@ -410,8 +414,23 @@ void _l4<S>(_Ops<S> ops, _Case c) {
     }
   }
   if (cut > 0) {
-    refused('a time that steps back',
-        () => ops.fold(s, const [800.0], [x.t[cut - 1] - 1000]), throwsStateError);
+    final backward = x.t[cut - 1] - 1000;
+    if (ops.omitsRegressingTimes) {
+      // why: the batch spectral policy drops backward beats and counts them;
+      // this fold must leave the retained samples and band sums unchanged.
+      final expected = (jsonDecode(before) as Map).cast<String, dynamic>()
+        ..['n'] = cut + 1
+        ..['dropped'] = 1;
+      ops.fold(s, const [800.0], [backward]);
+      expect(_text(ops, s), jsonEncode(expected), reason: '$tag: omission only');
+      expect(ops.show(ops.snapshot(s, ev, const [], const [])),
+          ops.show(ops.batch([...x.nn.take(cut), 800.0],
+              [...x.t.take(cut), backward], cfg, ev)),
+          reason: '$tag: backward beat follows batch policy');
+    } else {
+      refused('a time that steps back',
+          () => ops.fold(s, const [800.0], [backward]), throwsStateError);
+    }
   }
 }
 
@@ -451,7 +470,8 @@ void _observe(_Ops ops, _Case c, void Function(String) bump) {
   ops.observe(c, bump);
 }
 
-void _register<S>(_Ops<S> ops, {int maxN = 1200, int cases = 60}) {
+void _register<S>(_Ops<S> ops,
+    {int maxN = 1200, int cases = 60, Duration? roundTripBudget}) {
   const pool = [0, 1, 15, 16, 19, 20, 59, 60, 61, 300, 700, 1200];
   final shares = {..._sharesOf(ops), ...ops.shares};
   final reach = Reach<_Case>(shares, (c, bump) => _observe(ops, c, bump));
@@ -486,6 +506,7 @@ void _register<S>(_Ops<S> ops, {int maxN = 1200, int cases = 60}) {
       examples: ops.forced,
       cases: cases,
       reach: noEval,
+      budget: roundTripBudget,
     );
     _laws.law<(_Case, Mut)>(
       'L3 ${ops.name}: another version or type, a missing, mistyped or '
@@ -605,7 +626,7 @@ class _RsaOps extends _Ops<RsaRespStream> {
 
   @override
   List<Object?> get badVersions =>
-      const [1, 0, 3, -1, '2', null, true, 2.5, 1 << 40];
+      const [1, 0, 2, -1, '3', null, true, 3.5, 1 << 40];
 
   @override
   List<void Function(Json)> get refuseMutations => [
@@ -624,7 +645,7 @@ class _RsaOps extends _Ops<RsaRespStream> {
           if ((j['n'] as int) == 0) j['first'] = 0.0; // a start without beats
         },
         (j) => (j['closed'] as List).add({
-              'kind': 5, // no such sub-window outcome
+              'kind': 6, // no such sub-window outcome
               'brpm': null,
               'peakHz': null,
               'power': null,
@@ -760,6 +781,8 @@ const _bandLo = [0.0003, 0.003, 0.04, 0.15];
 
 class _HrvOps extends _Ops<HrvFreqStream> {
   @override
+  bool get omitsRegressingTimes => true;
+  @override
   String get name => 'HrvFreqStream';
   @override
   String get type => 'HrvFreqStream';
@@ -804,7 +827,7 @@ class _HrvOps extends _Ops<HrvFreqStream> {
   HrvFreqStream fromJson(Json j) => HrvFreqStream.fromJson(j);
 
   @override
-  List<Object?> get badVersions => const [0, 2, -1, '1', null, true, 1.5, 1 << 40];
+  List<Object?> get badVersions => const [0, 1, 3, -1, '2', null, true, 2.5, 1 << 40];
 
   @override
   List<void Function(Json)> get refuseMutations => [
@@ -1063,7 +1086,14 @@ class _CvhrOps extends _Ops<CvhrStream> {
 }
 
 void main() {
-  _register(_RsaOps());
+  // L2 folds each night, writes real JSON text, restores, and goes on, for 60
+  // generated cases plus the forced examples on nights up to 1,200 beats; RSA is
+  // the costly one (each evaluation re-runs Lomb-Scargle over the sub-windows).
+  // It took 5,073 ms against the 5,000 ms guard on the slow Dart 3.5.0 runner.
+  // The guard exists to stop a runaway, not to time a healthy run, so this law
+  // gets a larger explicit one. Nothing it checks changes: same 60 cases, same
+  // night lengths, same forced examples.
+  _register(_RsaOps(), roundTripBudget: const Duration(seconds: 20));
   _register(_HrvOps());
   _register(_CvhrOps());
 
