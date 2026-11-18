@@ -490,7 +490,6 @@ PulseDetection detectPulseEpisodes(
       run = [];
     }
 
-    final decided = {for (final w in ownWindows) w.startMs: w};
     final evaluated = ownWindows.where((w) =>
       (evaluateFromMs == null || w.startMs >= evaluateFromMs) &&
       (evaluateToMs == null || w.startMs < evaluateToMs)).toList();
@@ -505,14 +504,23 @@ PulseDetection detectPulseEpisodes(
         finish(false);
       }
     }
-    // A run still open at the end of the range is over only if the window right
-    // after it is closed and refused. That window is drafted (one past
-    // evaluateTo) whatever the range, and a respiratory partner can only add a
-    // refusal to it, so a refused draft is final. Absent, pending or qualified
-    // means the episode may still grow. CLAIM(pulse-range) [pulse_episodes_test].
+    // A closed, refused successor ends the run. A respiratory partner can only
+    // add a refusal, so that decision is final even at the range boundary.
+    // CLAIM(pulse-range) [pulse_episodes_test]. If no successor was drafted,
+    // its empty window refuses for pairs once its own end and support are
+    // complete. CLAIM(pulse-end-closure) [pulse_episodes_test].
     if (run.isNotEmpty) {
-      final next = decided[run.last.endMs];
-      finish(next == null || next.pending || next.qualified);
+      final nextIndex = ownWindows.indexOf(run.last) + 1;
+      final next = nextIndex < ownWindows.length ? ownWindows[nextIndex] : null;
+      if (next == null) {
+        final nextEnd = run.last.endMs + pulseWindowMs;
+        final supportEnd = sourceEndMs == null
+            ? nextEnd + pulseWindowMs
+            : math.min(sourceEndMs, nextEnd + pulseWindowMs);
+        finish(nextEnd > completeThroughMs || supportEnd > completeThroughMs);
+      } else {
+        finish(next.pending || next.qualified);
+      }
     }
     windows.addAll(evaluated);
   }

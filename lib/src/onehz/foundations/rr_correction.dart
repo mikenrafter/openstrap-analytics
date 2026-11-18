@@ -78,6 +78,7 @@ class RrCorrectionResult {
   /// (same length as the input rr). Beats the classifier never thresholded, the
   /// ones in an over-cap gap or in a segment under three beats, carry
   /// `minThresholdMs`. Empty on a hand-built result that did not track it.
+  /// Callers index it only when `th1.length == classes.length`.
   /// Lets a caller label a raw change against the corrector's own threshold
   /// instead of recomputing the sliding quartile deviation.
   final List<double> th1;

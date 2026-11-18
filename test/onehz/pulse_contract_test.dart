@@ -140,6 +140,7 @@ void main() {
   // WHY/CLAIM(pulse-fixed-support): the SD1/SD2 floor is inclusive at exactly 0.70.
   // The fixture is built from plain IEEE operations only (no libm), tuned so the
   // computed double ratio IS the literal 0.7; the first assertion guards that.
+  // If another platform fails that guard, retune slow/tweak; keep exact equality.
   // # catches: `ratio >= 0.7` turned into `ratio > 0.7`.
   test('SD1/SD2 floor qualifies at exactly 0.70 and refuses just below', () {
     List<PulseBeatInput> shaped(double slow, double tweak) {
@@ -169,6 +170,8 @@ void main() {
   });
   // WHY/CLAIM(pulse-corrector-mapping): the sudden-change labels and the pair
   // test read the corrector's own th1, not a second threshold computation.
+  // window() clips support to [0, 300000), so support and own beats are the
+  // same list here and their threshold indices must correspond one for one.
   // # catches: a recomputed threshold that drifts when the corrector's window,
   // alpha or floor change, or that ignores a segment cut at a capped gap.
   test('beat thresholds are the corrector th1 for dispersed, flat and capped series', () {

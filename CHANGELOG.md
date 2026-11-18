@@ -7,9 +7,9 @@
   paired respiratory spectra and one narrow fit with fixed residual floors.
   Existing daily metrics, PRSA/CVHR policies and incremental caches are preserved.
   Edge must pin this commit and bump its algorithm version before using the new output.
-- `RrCorrectionResult.th1`: the dRR threshold each beat was classified against,
-  additive; the Pulse detector labels sudden changes with it instead of
-  recomputing the sliding quartile deviation.
+- RR correction adds `RrCorrectionResult.th1`, the dRR threshold each beat was
+  classified against. Consumers can label sudden changes with the corrector's
+  thresholds instead of recomputing the sliding quartile deviation.
 - `stageMinuteRanges`: a [lo, hi] range of minutes per sleep stage (wake,
   light, deep, REM, and NREM = light + deep). `lo` counts epochs that can only
   be that stage: HR-covered, labelled so, and every deciding score at least

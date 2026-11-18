@@ -247,8 +247,8 @@ void main() {
         detectPulseEpisodes(reversed,
                 completeThroughMs: 1200000, sourceStartMs: 0)
             .toJson());
-    // The conflict is refused where it sits and nowhere else; an empty result
-    // would also compare equal to itself.
+    // The home window is refused; the clean run refuses no timestamps. An
+    // empty result would also compare equal to itself.
     final clean =
         detectPulseEpisodes(beats, completeThroughMs: 1200000, sourceStartMs: 0);
     final home = b.timeMs ~/ pulseWindowMs * pulseWindowMs;
@@ -391,8 +391,9 @@ void main() {
       // cannot change closure of the preceding three-window episode.
       final drafted = detectPulseEpisodes([...beats, boundaryBeat],
           completeThroughMs: watermark, sourceStartMs: 0, sourceEndMs: 900001);
-      expect(jsonEncode(episode.toJson()),
-          jsonEncode(drafted.episodes.single.toJson()));
+      final control = drafted.episodes.single;
+      expect([control.startMs, control.endMs, control.ongoing],
+          [0, 900000, watermark == 1199999], reason: 'drafted at $watermark');
     }
   });
   // WHY/CLAIM(pulse-end-closure): without a source end the empty successor
