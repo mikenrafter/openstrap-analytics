@@ -224,6 +224,7 @@ const _expectedGroups = [
   'sleep.stage',
   'hrv.freq',
   'night.rhythm',
+  'pulse.episodes',
   'day.blocks',
   'readiness.stress_illness',
   'activity.load',
