@@ -373,6 +373,41 @@ void main() {
       }
     }
   });
+  // WHY/CLAIM(pulse-end-closure): an explicit source end certifies the trailing
+  // empty window once that window's own end is complete.
+  // # catches: treating an undrafted successor as ongoing forever, or closing
+  // before its own end is complete just because the source ended earlier.
+  test('trailing episode closes at a certified source end', () {
+    final beats = trace(40).where((b) => b.timeMs < 900000).toList();
+    final boundaryBeat = PulseBeatInput(id: 'strap:boundary', source: 'strap',
+        index: beats.length, timeMs: 900000, rawMs: 1000);
+    for (final watermark in [1199999, 1200000, 3000000]) {
+      final result = detectPulseEpisodes(beats, completeThroughMs: watermark,
+          sourceStartMs: 0, sourceEndMs: 900000);
+      final episode = result.episodes.single;
+      expect([episode.startMs, episode.endMs, episode.ongoing],
+          [0, 900000, watermark == 1199999], reason: 'watermark $watermark');
+      // One beat at the boundary drafts the refused successor. Its presence
+      // cannot change closure of the preceding three-window episode.
+      final drafted = detectPulseEpisodes([...beats, boundaryBeat],
+          completeThroughMs: watermark, sourceStartMs: 0, sourceEndMs: 900001);
+      expect(jsonEncode(episode.toJson()),
+          jsonEncode(drafted.episodes.single.toJson()));
+    }
+  });
+  // WHY/CLAIM(pulse-end-closure): without a source end the empty successor
+  // needs its full right support through 1500000 before it can close the run.
+  // # catches: an absent successor staying ongoing after support is complete,
+  // or being closed as soon as its own end (1200000) is complete.
+  test('trailing episode closes without a source end after support completes', () {
+    final beats = trace(40).where((b) => b.timeMs < 900000).toList();
+    for (final watermark in [1200000, 1499999, 1500000, 3000000]) {
+      final episode = detectPulseEpisodes(beats, completeThroughMs: watermark,
+          sourceStartMs: 0).episodes.single;
+      expect([episode.startMs, episode.endMs, episode.ongoing],
+          [0, 900000, watermark < 1500000], reason: 'watermark $watermark');
+    }
+  });
   // WHY/CLAIM(pulse-range): `ongoing` is stored with the episode, so it is a
   // decision like any window and cannot depend on where the query range ends.
   // The window one past the range is already drafted; if it is closed and
