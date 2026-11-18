@@ -211,3 +211,20 @@ References added for the methods above:
 - Banister, E. W., Calvert, T. W., Savage, M. V., Bach, T. (1975). A systems model of training for athletic performance. Australian Journal of Sports Medicine 7:57-61.
 - Morton, R. H., Fitz-Clarke, J. R., Banister, E. W. (1990). Modeling human performance in running. Journal of Applied Physiology 69(3):1171-1177.
 - Berry, R. B., et al. The AASM Manual for the Scoring of Sleep and Associated Events: Rules, Terminology and Technical Specifications. American Academy of Sleep Medicine. Used for duration terminology; application conventions are listed in the hypnogram row.
+
+## Experimental Pulse episodes
+
+`detectPulseEpisodes` is an internal ESTIMATE policy, with low confidence and no
+clinical accuracy claim. It uses `correctRr` and its source-index mapping, then
+`irregularBeatFeatures`, shared with the existing daily screen's windows. Two
+closed UTC five-minute windows must each meet SD1/SD2 >= 0.70, pNN70 >= 30%,
+200 adjacent pairs, 80% union coverage, at most 5 seconds of missing support and
+at most 30% cleaned beats. Missing sensor context stays unknown.
+
+`pulseRespiratorySpectrum` applies Welch's 1967 method to a 2 Hz resampled RR
+series. Detector v4 uses paired peaks only to trigger `pulseRespiratoryFit`, one
+narrow sinusoid fit per window. Exclusion requires explained variance >= 12%
+and residual failure of the same fixed floors on original beats and adjacency.
+These thresholds and the single-fit policy are internal experimental rules,
+accepted in Pulse structural spec 5.1–5.2 on 2026-11-17. They are not validation
+of a rhythm diagnosis. Personal-history thresholds are deferred.

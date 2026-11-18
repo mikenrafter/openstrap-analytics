@@ -51,15 +51,27 @@ bool? irregularWindowVerdict(
   ];
   // Valid on contiguous pairs, not beats (same reason as the aggregate).
   if (diffs.length < minWindowBeats - 1) return null;
-  final sdsd = stddev(diffs);
-  final sdnn = stddev(bucket);
-  if (sdsd == null || sdnn == null) return false;
-  final sd1 = sdsd / math.sqrt2;
-  final v = 2 * sdnn * sdnn - sd1 * sd1;
-  final sd2 = v > 0 ? math.sqrt(v) : 0.0;
-  if (sd2 <= 0) return false;
-  final ratio = sd1 / sd2;
-  final over = diffs.where((d) => d.abs() > pnnThresholdMs).length;
-  final pnn = 100.0 * over / diffs.length;
-  return ratio >= sd1sd2Flag && pnn >= pnnFlagPct;
+  final features = irregularBeatFeatures(bucket, diffs,
+      pnnThresholdMs: pnnThresholdMs);
+  final ratio = features.ratio, pnn = features.pnnPct;
+  return ratio != null && pnn != null &&
+      ratio >= sd1sd2Flag && pnn >= pnnFlagPct;
+}
+
+/// Shared original-beat descriptors for the daily screen's windows and Pulse's
+/// raw/residual windows. Callers own the feature and adjacency masks, including
+/// any predecessor outside the window. No filtering or re-cleaning occurs here.
+/// CLAIM(pulse-feature-owner): both Pulse passes and irregularWindowVerdict use
+/// this one formula [pulse_contract_test; irregular_rhythm_test].
+({double? sd1, double? sd2, double? ratio, double? pnnPct})
+    irregularBeatFeatures(List<double> values, List<double> diffs,
+        {required double pnnThresholdMs}) {
+  final sdsd = stddev(diffs), sdnn = stddev(values);
+  final sd1 = sdsd == null ? null : sdsd / math.sqrt2;
+  final variance = sd1 == null || sdnn == null ? null : 2 * sdnn * sdnn - sd1 * sd1;
+  final sd2 = variance != null && variance > 0 ? math.sqrt(variance) : null;
+  final ratio = sd1 != null && sd2 != null ? sd1 / sd2 : null;
+  final pnn = diffs.isEmpty ? null :
+      100.0 * diffs.where((d) => d.abs() > pnnThresholdMs).length / diffs.length;
+  return (sd1: sd1, sd2: sd2, ratio: ratio, pnnPct: pnn);
 }

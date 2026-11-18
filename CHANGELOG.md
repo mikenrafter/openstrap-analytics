@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- Experimental Pulse detector v4 with closed UTC windows, original-beat evidence,
+  paired respiratory spectra and one narrow fit with fixed residual floors.
+  Existing daily metrics, PRSA/CVHR policies and incremental caches are preserved.
+  Edge must pin this commit and bump its algorithm version before using the new output.
 - `stageMinuteRanges`: a [lo, hi] range of minutes per sleep stage (wake,
   light, deep, REM, and NREM = light + deep). `lo` counts epochs that can only
   be that stage: HR-covered, labelled so, and every deciding score at least

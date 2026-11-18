@@ -1,6 +1,11 @@
 // Owner: analytics. Versioned experimental pulse timing policy, not diagnosis.
 // CLAIM(pulse-closed): only certified, supported UTC windows vote [pulse_episodes_test].
+import 'dart:math' as math;
+import '../foundations/rr_correction.dart';
+import '../foundations/rr_correction_kernel.dart';
+import '../util.dart';
 import 'pulse_respiratory_spectrum.dart';
+import 'irregular_window.dart';
 
 const pulseWindowMs = 300000;
 // v4: matched respiratory spectra only trigger a narrow sinusoid fit;
@@ -239,8 +244,10 @@ class PulseDetection {
 /// clipped there and nowhere else. A query range is not a source boundary, so a
 /// caller that reads only part of a source passes [evaluateFromMs] /
 /// [evaluateToMs] (window starts in `[from, to)`) and supplies every beat from
-/// five minutes before `from` to five minutes after `to`; each window then has
-/// its whole context and decides exactly as it would in any other range.
+/// ten minutes before `from` to ten minutes after `to`, plus modeled-overlap
+/// padding. Each window cleans with fixed five-minute support on either side;
+/// the extra window supplies that same support for its respiratory partners.
+/// Clip only at actual source boundaries, never at a query boundary.
 ///
 /// Context belongs to one source. Evaluate sources separately when their
 /// sensor contexts differ. Missing context never blocks fixed-floor qualification.
@@ -260,4 +267,417 @@ PulseDetection detectPulseEpisodes(
   int? evaluateFromMs,
   int? evaluateToMs,
   Map<int, PulseWindowContext> context = const {},
-}) => const PulseDetection([], []);
+}) {
+  final sources = <String, List<PulseBeatInput>>{};
+  for (final b in input) {
+    (sources[b.source] ??= []).add(b);
+  }
+  final windows = <PulseWindow>[];
+  final episodes = <PulseEpisode>[];
+  for (final source in sources.keys.toList()..sort()) {
+    final byId = <String, PulseBeatInput>{};
+    final conflicts = <String>{};
+    for (final b in sources[source]!) {
+      final prior = byId[b.id];
+      if (prior == null || b.revision > prior.revision) {
+        byId[b.id] = b;
+        conflicts.remove(b.id);
+      } else if (b.revision == prior.revision &&
+          (b.timeMs != prior.timeMs || b.rawMs != prior.rawMs ||
+              b.index != prior.index || b.timestampValid != prior.timestampValid ||
+              b.originalTimeMs != prior.originalTimeMs)) {
+        conflicts.add(b.id);
+        // A refused conflicting revision still has deterministic evidence.
+        final order = _compareBeat(b, prior);
+        if (order < 0) byId[b.id] = b;
+      }
+    }
+    final ordered = byId.values.toList()
+      ..sort(_compareBeat);
+    final invalid = <String>{...conflicts};
+    final beats = <PulseBeatInput>[];
+    for (var i = 0; i < ordered.length; i++) {
+      final b = ordered[i];
+      if (!b.timestampValid || !b.rawMs.isFinite) invalid.add(b.id);
+      if (i > 0 && b.index == ordered[i - 1].index) {
+        invalid.add(b.id);
+        invalid.add(ordered[i - 1].id);
+      }
+      var time = b.timeMs;
+      if (i > 0 && time <= beats[i - 1].timeMs) {
+        final previous = beats[i - 1].timeMs;
+        if (previous - time > pulseOverlapToleranceMs) {
+          invalid.add(b.id);
+          invalid.add(ordered[i - 1].id);
+        } else {
+          time = previous;
+        }
+      }
+      beats.add(time == b.timeMs
+          ? b
+          : PulseBeatInput(
+              id: b.id,
+              source: b.source,
+              index: b.index,
+              timeMs: time,
+              rawMs: b.rawMs,
+              revision: b.revision,
+              timestampValid: b.timestampValid,
+              originalTimeMs: b.originalTimeMs));
+    }
+    // Held times never decrease along the index, so this is detection order;
+    // only a refused wrong clock can reorder anything.
+    beats.sort((a, b) {
+      final t = a.timeMs.compareTo(b.timeMs);
+      return t == 0 ? _compareBeat(a, b) : t;
+    });
+    if (beats.isEmpty) continue;
+    final first = math.max(
+        ((evaluateFromMs ?? sourceStartMs) - pulseWindowMs) ~/ pulseWindowMs * pulseWindowMs,
+        beats.first.timeMs ~/ pulseWindowMs * pulseWindowMs);
+    final last = math.min(
+            math.min(completeThroughMs, beats.last.timeMs),
+            evaluateToMs == null ? beats.last.timeMs : evaluateToMs + pulseWindowMs - 1) ~/
+        pulseWindowMs *
+        pulseWindowMs;
+    final drafts = <PulseWindow>[];
+    final predecessors = <int, PulseBeatEvidence?>{};
+    // Binary cuts keep a long input O(w log n + n * bounded context).
+    int cut(int time) {
+      var lo = 0, hi = beats.length;
+      while (lo < hi) {
+        final mid = (lo + hi) ~/ 2;
+        if (beats[mid].timeMs < time) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      return lo;
+    }
+
+    for (var start = first; start <= last; start += pulseWindowMs) {
+      final end = start + pulseWindowMs;
+      final supportStart = math.max(sourceStartMs, start - pulseWindowMs);
+      final supportEnd = sourceEndMs == null
+          ? end + pulseWindowMs
+          : math.min(sourceEndMs, end + pulseWindowMs);
+      final pending = end > completeThroughMs || supportEnd > completeThroughMs;
+      final support = beats.sublist(cut(supportStart), cut(supportEnd));
+      final evidence = _evidence(support);
+      final evidenceById = {for (final b in evidence) b.id: b};
+      final own = [
+        for (final b in evidence)
+          if (b.timeMs >= start && b.timeMs < end) b
+      ];
+      predecessors[start] = own.isEmpty ? null : evidenceById[own.first.predecessorId];
+      final diffs = <double>[];
+      for (final b in own) {
+        if (b.validAdjacent && b.correctedMs != null) {
+          final prev = evidenceById[b.predecessorId]!;
+          diffs.add(b.correctedMs! - prev.correctedMs!);
+        }
+      }
+      final values = [
+        for (final b in own)
+          if (b.featureUse) b.correctedMs!
+      ];
+      final features = irregularBeatFeatures(values, diffs, pnnThresholdMs: 70);
+      final sd1 = features.sd1, sd2 = features.sd2;
+      final ratio = features.ratio, pnn = features.pnnPct;
+      var coverage = 0.0, cursor = start.toDouble(), gap = 0.0;
+      // Union of usable raw interval support, never a sum of overlapping intervals.
+      for (final b in own) {
+        if (!b.featureUse) continue;
+        final lo = math.max(start.toDouble(), b.timeMs - b.rawMs);
+        final hi = math.min(end.toDouble(), b.timeMs.toDouble());
+        gap = math.max(gap, lo - cursor);
+        if (hi > cursor) {
+          coverage += hi - math.max(cursor, lo);
+          cursor = hi;
+        }
+      }
+      gap = math.max(gap, end - cursor);
+      final cleaned = own.where((b) => b.corrected || b.dropped).length;
+      final reasons = <String>[
+        if (support.any((b) => invalid.contains(b.id))) 'timestamps',
+        if (start < sourceStartMs) 'incompleteSupport',
+        if (diffs.length < 200) 'pairs',
+        if (coverage / pulseWindowMs < 0.8) 'coverage',
+        if (gap > 5000) 'gaps',
+        if (own.isNotEmpty && cleaned / own.length > 0.3) 'cleaning',
+        if (ratio == null) 'degenerate',
+      ];
+      final ctx = context[start] ?? const PulseWindowContext();
+      final lag3 = _correlation(own, 3), lag4 = _correlation(own, 4);
+      final heartRate = values.isEmpty ? null : 60000 / mean(values)!;
+      final spectrum = !pending && reasons.isEmpty && ctx.asleep == true &&
+          heartRate != null && heartRate <= pulseSleepMaxBpm
+          ? _rrRespiratorySpectrum(own) : null;
+      if (ctx.motion == true) reasons.add('motion');
+      if (ctx.wear == false) reasons.add('offWrist');
+      if (ctx.charging == true) reasons.add('charging');
+      drafts.add(PulseWindow(
+          source: source,
+          startMs: start,
+          endMs: end,
+          pairs: diffs.length,
+          totalBeats: own.length,
+          cleanedBeats: cleaned,
+          coverageMs: coverage,
+          longestGapMs: gap,
+          sd1: sd1,
+          sd2: sd2,
+          ratio: ratio,
+          pnnPct: pnn,
+          pending: pending,
+          qualified: !pending && reasons.isEmpty && ratio! >= 0.7 && pnn! >= 30,
+          motion: ctx.motion, wear: ctx.wear, context: ctx,
+          lag3: lag3, lag4: lag4, heartRate: heartRate,
+          breathingPeakHz: spectrum?.frequencyHz,
+          breathingConcentration: spectrum?.concentration, breathingProminence: spectrum?.prominence,
+          reasons: reasons,
+          beats: own));
+    }
+    // CLAIM(pulse-respiratory-pair): each window examines both canonical
+    // neighbors, including outside the output range, with complete correction
+    // support on both sides [pulse_respiratory_pair_test]. Arrival order and the
+    // requested output range cannot choose a different partner.
+    final byStart = {for (final w in drafts) w.startMs: w};
+    bool respiratory(PulseWindow w) => !w.pending && w.qualityReasons.isEmpty &&
+        w.context.asleep == true && w.heartRate != null &&
+        w.heartRate! <= pulseSleepMaxBpm && w.breathingPeakHz != null &&
+        w.breathingPeakHz! >= pulseRespiratoryMinHz &&
+        w.breathingPeakHz! <= pulseRespiratoryMaxHz &&
+        w.breathingConcentration! >= pulseRespiratoryConcentration &&
+        w.breathingProminence! >= pulseRespiratoryProminence && w.exclusionReasons.isEmpty;
+    final ownWindows = <PulseWindow>[];
+    for (final w in drafts) {
+      PulseWindow? partner;
+      if (respiratory(w)) {
+        for (final t in [w.startMs-pulseWindowMs, w.endMs]) {
+          final neighbor = byStart[t];
+          if (neighbor != null && respiratory(neighbor) &&
+              (w.breathingPeakHz!-neighbor.breathingPeakHz!).abs() <= pulseRespiratoryToleranceHz) {
+            partner = neighbor;
+            break;
+          }
+        }
+      }
+      // A matched respiratory peak is a trigger, not proof that it explains
+      // irregularity. Preserve every original adjacency/quality decision.
+      final residual = partner == null ? null : _respiratoryResidual(w, predecessors[w.startMs]);
+      final patterned = residual?['excludes'] == true;
+      final ctx = w.context;
+      final reasons = [...w.reasons, if (patterned) 'sleepBreathing'];
+      ownWindows.add(PulseWindow(source: w.source, startMs: w.startMs, endMs: w.endMs,
+        pairs: w.pairs, totalBeats: w.totalBeats, cleanedBeats: w.cleanedBeats,
+        coverageMs: w.coverageMs, longestGapMs: w.longestGapMs,
+        sd1: w.sd1, sd2: w.sd2, ratio: w.ratio, pnnPct: w.pnnPct,
+        pending: w.pending, qualified: !w.pending && reasons.isEmpty &&
+          w.ratio! >= 0.7 && w.pnnPct! >= 30,
+        motion: w.motion, wear: w.wear, context: ctx,
+        lag3: w.lag3, lag4: w.lag4, heartRate: w.heartRate,
+        breathingPeakHz: w.breathingPeakHz, breathingConcentration: w.breathingConcentration,
+        breathingProminence: w.breathingProminence,
+        breathingPartnerMs: partner?.startMs, breathingResidual: residual,
+ reasons: reasons, beats: w.beats));
+    }
+    var run = <PulseWindow>[];
+    void finish(bool ongoing) {
+      if (run.length >= 2)
+        episodes.add(
+            PulseEpisode(source, List.unmodifiable(run), ongoing: ongoing));
+      run = [];
+    }
+
+    final evaluated = ownWindows.where((w) =>
+      (evaluateFromMs == null || w.startMs >= evaluateFromMs) &&
+      (evaluateToMs == null || w.startMs < evaluateToMs)).toList();
+    for (final w in evaluated) {
+      if (w.pending) {
+        finish(true);
+        break;
+      }
+      if (w.qualified) {
+        run.add(w);
+      } else {
+        finish(false);
+      }
+    }
+    finish(true);
+    windows.addAll(evaluated);
+  }
+  return PulseDetection(
+      List.unmodifiable(windows), List.unmodifiable(episodes));
+}
+
+List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
+  if (input.isEmpty) return [];
+  final raw = [for (final b in input) b.rawMs.isFinite ? b.rawMs : 0.0];
+  final correction = correctRr(raw);
+  final classes = correction.classes;
+  final artifacts = [for (final c in classes) c != BeatClass.normal];
+  final corrected = List<double?>.filled(raw.length, null);
+  for (var j = 0; j < correction.nnSourceIndex.length; j++) {
+    corrected[correction.nnSourceIndex[j]] = correction.nn[j];
+  }
+  final differences = [
+    0.0,
+    for (var i = 1; i < raw.length; i++) raw[i] - raw[i - 1]
+  ];
+  final thresholds = <double>[], baselines = <double>[];
+  for (var i = 0; i < raw.length; i++) {
+    final lo = math.max(0, i - 45), hi = math.min(raw.length, i + 46);
+    final d = differences.sublist(lo, hi)..sort();
+    final r = raw.sublist(lo, hi)..sort();
+    thresholds.add(thresholdOfSorted(d, 5.2, 100));
+    baselines.add(medianExcluding(r, raw[i]) ?? raw[i]);
+  }
+  bool adjacent(int i) =>
+      i > 0 &&
+      input[i].index == input[i - 1].index + 1 &&
+      input[i].timeMs > input[i - 1].timeMs &&
+      ((input[i].timeMs - input[i - 1].timeMs) - raw[i]).abs() <= 1000;
+  final pairs = <int, String>{};
+  for (var i = 1; i < raw.length; i++) {
+    if (!adjacent(i) || i < 2 || !adjacent(i - 1)) continue;
+    if (differences[i] * differences[i - 1] < 0 &&
+        differences[i].abs() > thresholds[i] &&
+        differences[i - 1].abs() > thresholds[i - 1] &&
+        (raw[i] + raw[i - 1] - 2 * baselines[i]).abs() <= 0.4 * baselines[i]) {
+      pairs[i - 1] = pairs[i] = '${input[i - 1].id}/${input[i].id}';
+    }
+  }
+  return [
+    for (var i = 0; i < raw.length; i++)
+      PulseBeatEvidence(
+          id: input[i].id,
+          source: input[i].source,
+          timeMs: input[i].timeMs,
+          originalTimeMs: input[i].originalTimeMs,
+          index: input[i].index,
+          rawMs: raw[i],
+          correctedMs: corrected[i],
+          changeMs: adjacent(i) ? differences[i] : null,
+          predecessorId: i > 0 ? input[i - 1].id : null,
+          pairId: pairs[i],
+          thresholdMs: thresholds[i],
+          baselineMs: baselines[i],
+          cleaningClass: classes[i].name,
+          plausible: raw[i] >= 300 && raw[i] <= 2000,
+          retained: corrected[i] != null,
+          corrected: artifacts[i] && corrected[i] != null,
+          dropped: corrected[i] == null,
+          featureUse: corrected[i] != null &&
+              corrected[i]! >= 300 &&
+              corrected[i]! <= 2000,
+          validAdjacent: adjacent(i) &&
+              corrected[i] != null &&
+              corrected[i - 1] != null &&
+              corrected[i]! >= 300 &&
+              corrected[i]! <= 2000 &&
+              corrected[i - 1]! >= 300 &&
+              corrected[i - 1]! <= 2000,
+          labels: [
+            if (adjacent(i) && differences[i] > thresholds[i]) 'suddenLong',
+            if (adjacent(i) && differences[i] < -thresholds[i]) 'suddenShort',
+            if (pairs.containsKey(i)) 'shortLongPair',
+            if (classes[i] == BeatClass.extra) 'likelyExtra',
+            if (classes[i] == BeatClass.missed) 'likelyMissed',
+            if (artifacts[i] && corrected[i] != null) 'corrected',
+            if (corrected[i] == null) 'dropped'
+          ])
+  ];
+}
+
+// RR intervals supply the spectral clock, as in hrv_freq.dart. Modelled
+// record timestamps select the UTC window; their sub-beat quantization must
+// not smear its respiratory peak. A gap beyond the recording policy or a
+// missing source beat refuses this exclusion; fixed screening floors still apply.
+({List<int> times, List<double> values, Map<String,double> beatTimes, int endMs})?
+    _rrTachogram(List<PulseBeatEvidence> beats) {
+  final times = <int>[], values = <double>[], beatTimes = <String,double>{};
+  var elapsed = 0.0;
+  for (var i = 0; i < beats.length; i++) {
+    final b = beats[i];
+    if (b.rawMs <= 0 || !b.rawMs.isFinite) return null;
+    if (i > 0) {
+      final previous = beats[i-1];
+      final extraGap = b.timeMs - previous.timeMs - b.rawMs;
+      if (b.index != previous.index + 1 || extraGap > 5000) return null;
+      // Record placement has up to two seconds of model error. Longer gaps
+      // stay on the spectral clock instead of concatenating missing time.
+      if (extraGap > pulseOverlapToleranceMs) elapsed += extraGap;
+    }
+    elapsed += b.rawMs;
+    // Dropped RR still advances the clock; the original mask remains intact.
+    beatTimes[b.id] = elapsed;
+    if (b.featureUse) { times.add(elapsed.round()); values.add(b.correctedMs!); }
+  }
+  return (times: times, values: values, beatTimes: beatTimes, endMs: elapsed.round());
+}
+
+({double frequencyHz, double concentration, double prominence})?
+    _rrRespiratorySpectrum(List<PulseBeatEvidence> beats) {
+  final series = _rrTachogram(beats);
+  return series == null ? null : pulseRespiratorySpectrum(series.times, series.values, 0, series.endMs);
+}
+
+Map<String,Object?>? _respiratoryResidual(PulseWindow window, PulseBeatEvidence? predecessor) {
+  final series = _rrTachogram(window.beats);
+  if (series == null) return null;
+  final fit = pulseRespiratoryFit(series.times, series.values, 0, series.endMs, window.breathingPeakHz!);
+  if (fit == null) return {'status': 'failed', 'excludes': false};
+  final residuals = <String,double>{
+    for (final b in window.beats)
+      if (b.correctedMs != null) b.id: b.correctedMs! - fit.componentAt(series.beatTimes[b.id]!),
+    // The first window beat may pair with a predecessor outside the window.
+    // Its RR ends at clock zero, exactly one raw interval before the first beat.
+    if (predecessor?.correctedMs != null) predecessor!.id: predecessor.correctedMs! - fit.componentAt(0),
+  };
+  final values = [for (final b in window.beats) if (b.featureUse) residuals[b.id]!];
+  final diffs = <double>[];
+  for (final b in window.beats) {
+    if (!b.validAdjacent || b.correctedMs == null) continue;
+    final prior = residuals[b.predecessorId];
+    if (prior == null) return {...fit.toJson(), 'status': 'missingPredecessor', 'excludes': false};
+    diffs.add(residuals[b.id]! - prior);
+  }
+  final features = irregularBeatFeatures(values, diffs, pnnThresholdMs: 70);
+  final ratio = features.ratio, pnn = features.pnnPct;
+  return {...fit.toJson(), 'ratio': ratio, 'pnnPct': pnn, 'pairs': diffs.length,
+    'ratioFloor': 0.7, 'pnnFloor': 30, 'pnnMs': 70, 'domain': 'original_beats',
+    'excludes': fit.strong && ((ratio != null && ratio < 0.7) || (pnn != null && pnn < 30))};
+}
+
+// Pearson correlation only across intact adjacency chains. Dropped beats,
+// overlapping record boundaries and gaps never become artificial neighbours.
+double? _correlation(List<PulseBeatEvidence> beats, int lag) {
+  var n = 0, sx = 0.0, sy = 0.0, xx = 0.0, yy = 0.0, xy = 0.0;
+  for (var i = lag; i < beats.length; i++) {
+    var intact = beats[i - lag].featureUse;
+    for (var j = 0; j < lag; j++) {
+      intact = intact && beats[i - j].validAdjacent;
+    }
+    if (!intact) continue;
+    final x = beats[i].correctedMs!, y = beats[i - lag].correctedMs!;
+    n++; sx += x; sy += y; xx += x*x; yy += y*y; xy += x*y;
+  }
+  if (n < 40) return null;
+  final variance = (xx - sx*sx/n) * (yy - sy*sy/n);
+  return variance <= 0 ? null : ((xy - sx*sy/n) / math.sqrt(variance)).clamp(-1.0, 1.0);
+}
+
+
+// Total ordering also fixes the evidence chosen for refused equal-revision
+// payloads. A newer revision clears conflicts belonging to the older payload.
+int _compareBeat(PulseBeatInput a, PulseBeatInput b) {
+  for (final order in [a.index.compareTo(b.index), a.timeMs.compareTo(b.timeMs),
+      a.rawMs.compareTo(b.rawMs), a.originalTimeMs.compareTo(b.originalTimeMs),
+      (a.timestampValid ? 1 : 0).compareTo(b.timestampValid ? 1 : 0),
+      a.id.compareTo(b.id)]) {
+    if (order != 0) return order;
+  }
+  return 0;
+}
