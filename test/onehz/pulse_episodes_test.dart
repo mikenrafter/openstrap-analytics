@@ -132,8 +132,8 @@ void main() {
     expect(closed.episodes.single.startMs, 0);
     expect(closed.episodes.single.endMs, 900000);
     expect(closed.episodes.single.alertEligible, isTrue);
-    expect(closed.windows.first.motion, isNull);
-    expect(closed.windows.first.wear, isNull);
+    expect(closed.windows.first.context.motion, isNull);
+    expect(closed.windows.first.context.wear, isNull);
   });
   // WHY/CLAIM(pulse-deterministic): input arrival order and repeated evaluation preserve identity.
   test('canonical ordering, extension, restart preserve the seed', () {

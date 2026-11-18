@@ -104,7 +104,7 @@ final _typeDecl = RegExp(
     r'^(?:(?:abstract|final|base|sealed|interface|mixin)\s+)*(?:class|mixin|enum|typedef|extension type)\s+(\w+)',
     multiLine: true);
 final _fnDecl = RegExp(
-    r'^(?!(?:import|export|part|library|class|enum|typedef|const|final|var|late|abstract|mixin|extension|static|return|if|for|while|switch|else|sealed|base|interface)\b)[A-Za-z_][\w<>,?\[\]. \t\r\n]*?\s(\w+)\s*(?:<[^>(]*>)?\(',
+    r'^(?!(?:import|export|part|library|class|enum|typedef|const|final|var|late|abstract|mixin|extension|static|return|if|for|while|switch|else|sealed|base|interface)\b)(?:[A-Za-z_][\w<>,?\[\]. \t\r\n]*?|\((?:[\w<>,?\[\]. \t\r\n]|\{[^{}]*\})*\)\??)\s(\w+)\s*(?:<[^>(]*>)?\(',
     multiLine: true);
 
 /// Public top-level names declared in [file] itself, split by kind.

@@ -74,7 +74,12 @@ class RrCorrectionResult {
   /// Count of isolated beats that were spline-corrected.
   final int correctedCount;
 
-  /// STUB (red): th1 per input beat, not yet filled in.
+  /// The dRR threshold th1 the classifier compared each input beat against
+  /// (same length as the input rr). Beats the classifier never thresholded, the
+  /// ones in an over-cap gap or in a segment under three beats, carry
+  /// `minThresholdMs`. Empty on a hand-built result that did not track it.
+  /// Lets a caller label a raw change against the corrector's own threshold
+  /// instead of recomputing the sliding quartile deviation.
   final List<double> th1;
 
   const RrCorrectionResult({
@@ -165,7 +170,7 @@ RrCorrectionResult correctRr(
     return RrCorrectionResult(nn: nn, nnTimesMs: times, classes: w.classes,
         cleanFraction: rrMs.isEmpty ? 0 : normal / rrMs.length,
         droppedCount: dropped, correctedCount: corrected,
-        nnSourceIndex: source);
+        nnSourceIndex: source, th1: w.th1);
   }
   final n = rrMs.length;
   // Beat-end time for EVERY input beat, kept or not. One array, built once, so
@@ -206,6 +211,7 @@ RrCorrectionResult correctRr(
       droppedCount: n - nn.length,
       correctedCount: 0,
       nnSourceIndex: source,
+      th1: List<double>.filled(n, minThresholdMs),
     );
   }
 
@@ -310,6 +316,7 @@ RrCorrectionResult correctRr(
     droppedCount: dropped,
     correctedCount: corrected,
     nnSourceIndex: source,
+    th1: th1,
   );
 }
 

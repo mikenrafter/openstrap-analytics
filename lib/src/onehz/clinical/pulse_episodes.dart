@@ -111,9 +111,8 @@ class PulseWindow {
   final double coverageMs, longestGapMs;
   final double? sd1, sd2, ratio, pnnPct;
   final bool pending, qualified;
-  final bool? motion, wear;
   final PulseWindowContext context;
-  final double? lag3, lag4, heartRate;
+  final double? heartRate;
   final double? breathingPeakHz, breathingConcentration, breathingProminence;
   final int? breathingPartnerMs;
   final Map<String, Object?>? breathingResidual;
@@ -141,10 +140,8 @@ class PulseWindow {
       required this.qualified,
       required this.reasons,
       required this.beats,
-      this.motion,
-      this.wear,
       this.context = const PulseWindowContext(),
-      this.lag3, this.lag4, this.heartRate,
+      this.heartRate,
       this.breathingPeakHz, this.breathingConcentration, this.breathingProminence, this.breathingPartnerMs, this.breathingResidual,
       this.ratioThreshold = 0.7, this.pnnThreshold = 30,
 });
@@ -166,17 +163,15 @@ class PulseWindow {
         'qualified': qualified,
         'reasons': reasons,
         'qualityReasons': qualityReasons, 'exclusionReasons': exclusionReasons,
-        'motion': motion,
-        'wear': wear,
         'context': {
-          'status': motion == null || wear == null ? 'unknown' : 'known',
-          'asleep': context.asleep, 'motion': motion, 'wear': wear,
+          'status': context.motion == null || context.wear == null ? 'unknown' : 'known',
+          'asleep': context.asleep, 'motion': context.motion, 'wear': context.wear,
           'charging': context.charging,
           'motionThresholdG': pulseMotionThresholdG,
           'minContextSamples': pulseContextMinSamples,
           'minMovingSamples': pulseMovingMinSamples,
         },
-        'breathing': {'lag3': lag3, 'lag4': lag4, 'heartRate': heartRate,
+        'breathing': {'heartRate': heartRate,
           'peakHz': breathingPeakHz, 'concentration': breathingConcentration,
           'prominence': breathingProminence, 'minProminence': pulseRespiratoryProminence,
           'baselineRadiusSamples': pulseRespiratoryBaselineRadius, 'edgeTrimMs': 5000,
@@ -412,7 +407,6 @@ PulseDetection detectPulseEpisodes(
         if (ratio == null) 'degenerate',
       ];
       final ctx = context[start] ?? const PulseWindowContext();
-      final lag3 = _correlation(own, 3), lag4 = _correlation(own, 4);
       final heartRate = values.isEmpty ? null : 60000 / mean(values)!;
       final spectrum = !pending && reasons.isEmpty && ctx.asleep == true &&
           heartRate != null && heartRate <= pulseSleepMaxBpm
@@ -434,9 +428,11 @@ PulseDetection detectPulseEpisodes(
           ratio: ratio,
           pnnPct: pnn,
           pending: pending,
-          qualified: !pending && reasons.isEmpty && ratio! >= 0.7 && pnn! >= 30,
-          motion: ctx.motion, wear: ctx.wear, context: ctx,
-          lag3: lag3, lag4: lag4, heartRate: heartRate,
+          // A draft decides nothing: the second pass owns `qualified`, because
+          // a respiratory partner can still refuse it.
+          qualified: false,
+          context: ctx,
+          heartRate: heartRate,
           breathingPeakHz: spectrum?.frequencyHz,
           breathingConcentration: spectrum?.concentration, breathingProminence: spectrum?.prominence,
           reasons: reasons,
@@ -479,12 +475,12 @@ PulseDetection detectPulseEpisodes(
         sd1: w.sd1, sd2: w.sd2, ratio: w.ratio, pnnPct: w.pnnPct,
         pending: w.pending, qualified: !w.pending && reasons.isEmpty &&
           w.ratio! >= 0.7 && w.pnnPct! >= 30,
-        motion: w.motion, wear: w.wear, context: ctx,
-        lag3: w.lag3, lag4: w.lag4, heartRate: w.heartRate,
+        context: ctx,
+        heartRate: w.heartRate,
         breathingPeakHz: w.breathingPeakHz, breathingConcentration: w.breathingConcentration,
         breathingProminence: w.breathingProminence,
         breathingPartnerMs: partner?.startMs, breathingResidual: residual,
- reasons: reasons, beats: w.beats));
+        reasons: reasons, beats: w.beats));
     }
     var run = <PulseWindow>[];
     void finish(bool ongoing) {
@@ -494,6 +490,7 @@ PulseDetection detectPulseEpisodes(
       run = [];
     }
 
+    final decided = {for (final w in ownWindows) w.startMs: w};
     final evaluated = ownWindows.where((w) =>
       (evaluateFromMs == null || w.startMs >= evaluateFromMs) &&
       (evaluateToMs == null || w.startMs < evaluateToMs)).toList();
@@ -508,7 +505,15 @@ PulseDetection detectPulseEpisodes(
         finish(false);
       }
     }
-    finish(true);
+    // A run still open at the end of the range is over only if the window right
+    // after it is closed and refused. That window is drafted (one past
+    // evaluateTo) whatever the range, and a respiratory partner can only add a
+    // refusal to it, so a refused draft is final. Absent, pending or qualified
+    // means the episode may still grow. CLAIM(pulse-range) [pulse_episodes_test].
+    if (run.isNotEmpty) {
+      final next = decided[run.last.endMs];
+      finish(next == null || next.pending || next.qualified);
+    }
     windows.addAll(evaluated);
   }
   return PulseDetection(
@@ -529,12 +534,13 @@ List<PulseBeatEvidence> _evidence(List<PulseBeatInput> input) {
     0.0,
     for (var i = 1; i < raw.length; i++) raw[i] - raw[i - 1]
   ];
-  final thresholds = <double>[], baselines = <double>[];
+  // The corrector's own th1 labels sudden changes and tests pairs; only the
+  // label-only baseline (median excluding the beat) is computed here.
+  final thresholds = correction.th1;
+  final baselines = <double>[];
   for (var i = 0; i < raw.length; i++) {
     final lo = math.max(0, i - 45), hi = math.min(raw.length, i + 46);
-    final d = differences.sublist(lo, hi)..sort();
     final r = raw.sublist(lo, hi)..sort();
-    thresholds.add(thresholdOfSorted(d, 5.2, 100));
     baselines.add(medianExcluding(r, raw[i]) ?? raw[i]);
   }
   bool adjacent(int i) =>
@@ -653,25 +659,6 @@ Map<String,Object?>? _respiratoryResidual(PulseWindow window, PulseBeatEvidence?
     'ratioFloor': 0.7, 'pnnFloor': 30, 'pnnMs': 70, 'domain': 'original_beats',
     'excludes': fit.strong && ((ratio != null && ratio < 0.7) || (pnn != null && pnn < 30))};
 }
-
-// Pearson correlation only across intact adjacency chains. Dropped beats,
-// overlapping record boundaries and gaps never become artificial neighbours.
-double? _correlation(List<PulseBeatEvidence> beats, int lag) {
-  var n = 0, sx = 0.0, sy = 0.0, xx = 0.0, yy = 0.0, xy = 0.0;
-  for (var i = lag; i < beats.length; i++) {
-    var intact = beats[i - lag].featureUse;
-    for (var j = 0; j < lag; j++) {
-      intact = intact && beats[i - j].validAdjacent;
-    }
-    if (!intact) continue;
-    final x = beats[i].correctedMs!, y = beats[i - lag].correctedMs!;
-    n++; sx += x; sy += y; xx += x*x; yy += y*y; xy += x*y;
-  }
-  if (n < 40) return null;
-  final variance = (xx - sx*sx/n) * (yy - sy*sy/n);
-  return variance <= 0 ? null : ((xy - sx*sy/n) / math.sqrt(variance)).clamp(-1.0, 1.0);
-}
-
 
 // Total ordering also fixes the evidence chosen for refused equal-revision
 // payloads. A newer revision clears conflicts belonging to the older payload.

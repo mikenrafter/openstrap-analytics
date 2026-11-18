@@ -160,12 +160,17 @@ class RrCapWindow {
   final List<double> times;
   final List<bool> gaps;
   final List<bool> hardGaps;
-  RrCapWindow._(int n)
+
+  /// The th1 each evaluated beat was classified against; `minThresholdMs`
+  /// where no dispersion window applied (gap beats, segments under three beats).
+  final List<double> th1;
+  RrCapWindow._(int n, double floor)
       : classes = List.filled(n, BeatClass.normal),
         values = List.filled(n, null),
         times = List.filled(n, 0),
         gaps = List.filled(n, false),
-        hardGaps = List.filled(n, false);
+        hardGaps = List.filled(n, false),
+        th1 = List.filled(n, floor);
 
   static RrCapWindow evaluate(
     List<double> rr, {
@@ -184,7 +189,7 @@ class RrCapWindow {
     double clock = 0,
     double? origin,
   }) {
-    final out = RrCapWindow._(rr.length);
+    final out = RrCapWindow._(rr.length, minThresholdMs);
     if (rr.isEmpty) return out;
     final wall = ts != null && ts.length == rr.length;
     final base = origin ?? (wall ? ts[0] - rr[0] : 0.0);
@@ -219,6 +224,7 @@ class RrCapWindow {
         med[i - a] = medianExcluding(wr.a, rr[i]) ?? rr[i];
         mrr[i - a] = medianDeviation(rr[i], med[i - a]);
         th1[i - a] = thresholdOfSorted(wd.a, alpha, minThresholdMs);
+        if (i >= start) out.th1[i] = th1[i - a];
       }
       final wm = SortedMultiset();
       lo = a;
@@ -318,6 +324,7 @@ class RrCapWindow {
       if (cutA >= 0) {
         for (var i = cutA; i < cutB; i++) {
           out.classes[i] = BeatClass.gap;
+          out.th1[i] = minThresholdMs;
           out.gaps[i] = true;
           out.hardGaps[i] = hardCut || (inGap && hardLeading && cutA == start);
         }
