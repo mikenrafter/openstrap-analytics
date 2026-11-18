@@ -35,6 +35,8 @@ export 'src/onehz/clinical/cosinor.dart';
 export 'src/onehz/clinical/load_trimp.dart';
 export 'src/onehz/clinical/stress_si.dart';
 export 'src/onehz/clinical/irregular_rhythm.dart';
+export 'src/onehz/clinical/pulse_episodes.dart';
+export 'src/onehz/clinical/pulse_respiratory_spectrum.dart';
 export 'src/onehz/clinical/irregular_rhythm_state.dart';
 export 'src/onehz/clinical/irregular_diagnostics.dart'
     hide diagnosticArtifactFraction;
