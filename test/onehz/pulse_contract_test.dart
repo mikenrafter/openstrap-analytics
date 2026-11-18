@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:openstrap_analytics/onehz.dart';
 import 'package:test/test.dart';
 import 'pulse_episodes_test.dart' as f;
@@ -10,6 +11,39 @@ List<PulseBeatInput> steady(int count, {double rr = 1000, int offset = 1000}) =>
     index: i, timeMs: offset + i * 1000, rawMs: rr),
 ];
 void main() {
+  // WHY/CLAIM(pulse-closed): replacement history cannot change the outcome
+  // depending on admission order. Only the highest revision owns the beat.
+  // # catches: leaving an obsolete equal-revision conflict latched forever.
+  test('newer revisions supersede obsolete conflicts in either arrival order', () {
+    final beats = f.trace(25), b = f.trace(25)[100];
+    final conflict = PulseBeatInput(id: b.id, source: b.source, index: b.index,
+      timeMs: b.timeMs + 1, rawMs: b.rawMs + 100);
+    final replacement = PulseBeatInput(id: b.id, source: b.source, index: b.index,
+      timeMs: b.timeMs, rawMs: b.rawMs, revision: 1);
+    String run(List<PulseBeatInput> input) => jsonEncode(detectPulseEpisodes(input,
+      sourceStartMs: 0, completeThroughMs: 1200000).toJson());
+    expect(run([...beats, conflict, replacement]), run([replacement, conflict, ...beats]));
+    expect(run([...beats, conflict, replacement]), run(beats));
+  });
+  // WHY/CLAIM(pulse-closed): two arbitrary transport chunkings reconstruct
+  // byte-identical closed evidence and stable seeds from canonical inputs.
+  // # catches: retaining per-chunk cleaner state or map insertion ordering.
+  test('all-at-once and two chunkings have byte-identical closed evidence', () {
+    final beats = f.bandTrace(30);
+    String evidence(List<PulseBeatInput> input) => jsonEncode(detectPulseEpisodes(input,
+      sourceStartMs: 0, completeThroughMs: 1500000).toJson());
+    final all = evidence(beats);
+    for (final cut in [177, beats.length ~/ 2]) {
+      final durable = <String, PulseBeatInput>{};
+      for (final chunk in [beats.sublist(0, cut), beats.sublist(cut)]) {
+        for (final b in chunk) { durable[b.id] = b; }
+        detectPulseEpisodes(durable.values.toList(), sourceStartMs: 0,
+          completeThroughMs: chunk.last.timeMs);
+      }
+      expect(evidence(durable.values.toList()), all);
+      expect(evidence(durable.values.toList().reversed.toList()), all);
+    }
+  });
   // WHY/CLAIM(pulse-fixed-support): equality at each documented floor matters.
   // # catches: off-by-one pair/coverage tests and summing interval coverage.
   test('199/200 usable pairs and 79.9/80 percent union coverage', () {
