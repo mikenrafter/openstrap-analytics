@@ -74,6 +74,9 @@ class RrCorrectionResult {
   /// Count of isolated beats that were spline-corrected.
   final int correctedCount;
 
+  /// STUB (red): th1 per input beat, not yet filled in.
+  final List<double> th1;
+
   const RrCorrectionResult({
     required this.nn,
     required this.nnTimesMs,
@@ -82,6 +85,7 @@ class RrCorrectionResult {
     required this.droppedCount,
     required this.correctedCount,
     this.nnSourceIndex = const [],
+    this.th1 = const [],
   });
 }
 

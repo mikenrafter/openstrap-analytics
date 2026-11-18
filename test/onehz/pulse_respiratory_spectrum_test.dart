@@ -23,6 +23,9 @@ void main() {
     final values = [
       for (var i = 0; i < 301; i++) 1150 + 100 * sin(2 * pi * i / 4),
     ];
+    // The intact series returns its peak, so the refusals below mean
+    // "refused" and not "not implemented".
+    expect(pulseRespiratorySpectrum(times, values, 0, 300000)?.frequencyHz, 0.25);
     expect(
       pulseRespiratorySpectrum(
         times.sublist(10),

@@ -270,6 +270,24 @@ class Example {
     expect(_declaredSource(source).fns, {'factoryWithWrappedType', 'oneLine'});
     expect(_declaredSource(source).types, {'Example'});
   });
+  // why: pulseRespiratorySpectrum once hid from this scanner behind its record
+  // return type; the typedef that fixed it is a workaround, so pin the scanner.
+  test('declaration scanner sees functions returning an inline record', () {
+    const source = """
+({double hz, double power})? recordReturn(List<int> xs) => null;
+({
+  double wrapped, double more
+}) wrappedRecord() => (wrapped: 1, more: 2);
+(int, int) positional() => (1, 2);
+double plain() => 1;
+class Example {
+  ({int a}) method() => (a: 1);
+}
+""";
+    expect(_declaredSource(source).fns,
+        {'recordReturn', 'wrappedRecord', 'positional', 'plain'});
+    expect(_declaredSource(source).types, {'Example'});
+  });
   test('public API scan includes the multiline aggregate-only readiness factory', () {
     expect(_publicApi(libs: _publicLibs)['readinessLnRmssdAggregator'],
         'lib/src/onehz/clinical/readiness_lnrmssd_aggregator.dart');

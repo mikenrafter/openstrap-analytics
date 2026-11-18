@@ -219,6 +219,14 @@ void main() {
     final result = detectPulseEpisodes(
         [...trace(5, source: 'a'), ...trace(5, source: 'b', offset: 300000)],
         completeThroughMs: 900000, sourceStartMs: 0);
+    // Each source alone has one qualified window, and the two are adjacent in
+    // time: a merged timeline would be a ten minute episode. Evidence must exist
+    // for the refusal to mean anything (an empty result also has no episodes).
+    List<int> qualified(String source) => [
+      for (final w in result.windows)
+        if (w.source == source && w.qualified) w.startMs];
+    expect(qualified('a'), [0]);
+    expect(qualified('b'), [300000]);
     expect(result.episodes, isEmpty);
   });
   // WHY/CLAIM(pulse-deterministic): conflicting duplicates refuse without arrival-order evidence drift.
@@ -233,15 +241,25 @@ void main() {
         rawMs: b.rawMs + 100);
     final input = [...beats, conflict];
     final reversed = input.reversed.toList();
-    expect(
-        detectPulseEpisodes(input, completeThroughMs: 1200000, sourceStartMs: 0)
-            .toJson(),
+    final conflicted =
+        detectPulseEpisodes(input, completeThroughMs: 1200000, sourceStartMs: 0);
+    expect(conflicted.toJson(),
         detectPulseEpisodes(reversed,
                 completeThroughMs: 1200000, sourceStartMs: 0)
             .toJson());
+    // The conflict is refused where it sits and nowhere else; an empty result
+    // would also compare equal to itself.
+    final clean =
+        detectPulseEpisodes(beats, completeThroughMs: 1200000, sourceStartMs: 0);
+    final home = b.timeMs ~/ pulseWindowMs * pulseWindowMs;
+    expect(conflicted.windows.firstWhere((w) => w.startMs == home).reasons,
+        contains('timestamps'));
+    expect(clean.windows.any((w) => w.reasons.contains('timestamps')), isFalse);
+    expect(clean.episodes, hasLength(1));
     for (final watermark in [900000, 1200000, 1500000]) {
       final batch = detectPulseEpisodes(beats,
           completeThroughMs: watermark, sourceStartMs: 0);
+      expect(batch.windows.where((w) => !w.pending), isNotEmpty);
       final prefix = detectPulseEpisodes(
           beats.where((b) => b.timeMs < watermark).toList(),
           completeThroughMs: watermark,
@@ -352,5 +370,32 @@ void main() {
         expect(w.toJson(), same.toJson(), reason: 'window ${w.startMs}');
       }
     }
+  });
+  // WHY/CLAIM(pulse-range): `ongoing` is stored with the episode, so it is a
+  // decision like any window and cannot depend on where the query range ends.
+  // The window one past the range is already drafted; if it is closed and
+  // refused the episode is over, whichever range asked.
+  // # catches: finishing the last run as ongoing just because the range ended.
+  test('episode closure does not depend on the query range', () {
+    final beats = trace(40)
+      ..removeWhere((b) => b.timeMs >= 900000 && b.timeMs < 1200000);
+    final full = detectPulseEpisodes(beats,
+        completeThroughMs: 3000000, sourceStartMs: 0);
+    final over = full.episodes.first;
+    expect([over.source, over.startMs, over.endMs, over.ongoing],
+        ['strap', 0, 900000, false]);
+    PulseDetection ranged(int from, int to) => detectPulseEpisodes([
+      for (final b in beats)
+        if (b.timeMs >= from - pulseWindowMs - 10000 &&
+            b.timeMs < to + pulseWindowMs + 10000) b],
+      completeThroughMs: 3000000, sourceStartMs: 0,
+      evaluateFromMs: from, evaluateToMs: to);
+    // The range ends on the last window of the episode; the hole follows it.
+    expect(jsonEncode(ranged(0, 900000).episodes.single.toJson()),
+        jsonEncode(over.toJson()));
+    // The range ends inside the episode: the next window is still qualified, so
+    // the episode may well continue and stays open.
+    final early = ranged(0, 600000).episodes.single;
+    expect([early.endMs, early.ongoing], [600000, true]);
   });
 }

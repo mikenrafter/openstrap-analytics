@@ -102,6 +102,109 @@ void main() {
     expect(exact.pnnThreshold, 30);
     expect(exact.ratioThreshold, .7);
   });
+  // WHY/CLAIM(pulse-fixed-support): the pNN70 floor is inclusive at exactly 30 percent
+  // on a window that clears every other floor, and refuses just below it.
+  // # catches: `pnn >= 30` turned into `pnn > 30` (the 70/71 ms test above is
+  // refused for coverage and gaps, so it never reaches qualification).
+  test('pNN70 floor qualifies at exactly 90 of 300 differences and refuses 89', () {
+    // 301 beats near 980 ms, full coverage. Each isolated +80 ms bump makes two
+    // differences over 70 ms (up, then down); every other difference is 0.
+    PulseWindow floor(int bumps, {bool step = false}) {
+      final rr = List<double>.filled(301, 980);
+      for (var k = 0; k < bumps; k++) {
+        rr[5 + 6 * k] = 1060;
+      }
+      // One more big difference: +80 once, then back down in two 40 ms steps.
+      if (step) {
+        rr[275] = 1060;
+        rr[276] = 1020;
+      }
+      var t = 0.0;
+      return window([for (var i = 0; i < rr.length; i++)
+        PulseBeatInput(id: 'f:$i', source: 'strap', index: i,
+          timeMs: (t += rr[i]).round(), rawMs: rr[i])]);
+    }
+    final exact = floor(45), below = floor(44, step: true);
+    expect(exact.pairs, 300);
+    expect(exact.totalBeats, 301);
+    expect(exact.pnnPct, 30.0);
+    expect(exact.reasons, isEmpty);
+    expect(exact.ratio, greaterThan(0.7), reason: 'only the pNN floor is at stake');
+    expect(exact.qualified, isTrue);
+    expect(below.pairs, 300);
+    expect(below.pnnPct, closeTo(100 * 89 / 300, 1e-9));
+    expect(below.reasons, isEmpty);
+    expect(below.ratio, greaterThan(0.7));
+    expect(below.qualified, isFalse);
+  });
+  // WHY/CLAIM(pulse-fixed-support): the SD1/SD2 floor is inclusive at exactly 0.70.
+  // The fixture is built from plain IEEE operations only (no libm), tuned so the
+  // computed double ratio IS the literal 0.7; the first assertion guards that.
+  // # catches: `ratio >= 0.7` turned into `ratio > 0.7`.
+  test('SD1/SD2 floor qualifies at exactly 0.70 and refuses just below', () {
+    List<PulseBeatInput> shaped(double slow, double tweak) {
+      final out = <PulseBeatInput>[];
+      var t = 0.0;
+      for (var i = 0;; i++) {
+        final tri = (i % 40 < 20 ? i % 40 : 40 - i % 40) - 10;
+        final rr = 1000 + slow * (tri / 10) + (i.isEven ? 60.0 : -60.0) +
+            tweak * ((i * 7) % 11 - 5);
+        if (t + rr > 299999) break;
+        t += rr;
+        out.add(PulseBeatInput(id: 'r:$i', source: 'strap', index: i,
+          timeMs: t.round(), rawMs: rr));
+      }
+      return out;
+    }
+    const slow = 150.32120906854246;
+    final exact = window(shaped(slow, -2.98e-13));
+    expect(exact.ratio, 0.7, reason: 'fixture must compute exactly the floor');
+    expect(exact.reasons, isEmpty);
+    expect(exact.pnnPct, greaterThan(90));
+    expect(exact.qualified, isTrue);
+    final below = window(shaped(slow + 1e-9, 0));
+    expect(below.ratio, lessThan(0.7));
+    expect(below.reasons, isEmpty);
+    expect(below.qualified, isFalse);
+  });
+  // WHY/CLAIM(pulse-corrector-mapping): the sudden-change labels and the pair
+  // test read the corrector's own th1, not a second threshold computation.
+  // # catches: a recomputed threshold that drifts when the corrector's window,
+  // alpha or floor change, or that ignores a segment cut at a capped gap.
+  test('beat thresholds are the corrector th1 for dispersed, flat and capped series', () {
+    final dispersed = [for (final b in f.trace(5)) if (b.timeMs < 300000) b];
+    final flat = steady(299);
+    final capped = [for (var i = 0; i < 299; i++) PulseBeatInput(id: 's:$i',
+      source: 'strap', index: i, timeMs: 1000 + i * 1000,
+      rawMs: i >= 100 && i < 145 ? 2500.0 : 1000.0)];
+    for (final beats in [dispersed, flat, capped]) {
+      final corrected = correctRr([for (final b in beats) b.rawMs]);
+      final actual = window(beats).beats;
+      expect(corrected.th1, hasLength(beats.length));
+      for (var i = 0; i < beats.length; i++) {
+        expect(actual[i].thresholdMs, corrected.th1[i], reason: 'beat $i');
+      }
+    }
+    expect(correctRr([for (final b in dispersed) b.rawMs]).th1.first, greaterThan(100),
+        reason: 'the dispersed series is above the 100 ms floor, so th1 is not a constant');
+  });
+  // WHY/CLAIM(pulse-fixed-support): evidence stays small: sensor context is
+  // stored once per window, and the lag correlations of the retired veto are gone.
+  // # catches: duplicated motion/wear fields and unconsumed lag diagnostics.
+  test('window JSON holds context once and no lag diagnostics', () {
+    final json = detectPulseEpisodes(steady(299), sourceStartMs: 0,
+      sourceEndMs: 300000, completeThroughMs: 300000, evaluateFromMs: 0,
+      evaluateToMs: 300000,
+      context: {0: PulseWindowContext(asleep: false, motion: false, wear: true)})
+      .windows.single.toJson(evidence: false);
+    expect(json.containsKey('motion'), isFalse);
+    expect(json.containsKey('wear'), isFalse);
+    expect((json['breathing'] as Map).containsKey('lag3'), isFalse);
+    expect((json['breathing'] as Map).containsKey('lag4'), isFalse);
+    expect(json['context'], containsPair('motion', false));
+    expect(json['context'], containsPair('wear', true));
+    expect(json['context'], containsPair('status', 'known'));
+  });
   // WHY/CLAIM(pulse-corrector-mapping): duplicate values cannot identify NN owners.
   // # catches: value searching, a second cleaner, or rolling back capped-gap behavior.
   test('current corrector source mapping and capped gaps survive the detector', () {
