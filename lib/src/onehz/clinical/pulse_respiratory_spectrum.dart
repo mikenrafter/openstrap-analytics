@@ -13,6 +13,11 @@ const pulseRespiratoryBaselineRadius = 10;
 const pulseRespiratorySampleMs = 500;
 const pulseRespiratorySegmentSamples = 256;
 
+/// The paired-window policy consumes all three measurements together.
+typedef PulseRespiratorySpectrum = ({
+  double frequencyHz, double concentration, double prominence
+});
+
 /// Welch power on a linearly resampled 2 Hz tachogram. Missing interpolation
 /// support refuses evidence. Interpolation anchors are at most seven seconds
 /// apart (the recording policy's five-second gap plus one plausible RR).
@@ -21,8 +26,7 @@ const pulseRespiratorySegmentSamples = 256;
 /// Prominence compares its mean bin power with bins three through seven away.
 /// CLAIM(pulse-respiratory-spectrum): a broad noise hump cannot alone establish
 /// a respiratory cycle [pulse_respiratory_pair_test; pulse_respiratory_spectrum_test].
-({double frequencyHz, double concentration, double prominence})?
-    pulseRespiratorySpectrum(
+PulseRespiratorySpectrum? pulseRespiratorySpectrum(
   List<int> times,
   List<double> values,
   int startMs,

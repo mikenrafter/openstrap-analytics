@@ -269,6 +269,20 @@ const GroupRegistry kAnalyticsGroupRegistry = GroupRegistry(1, <GroupDecl>[
       'lib/src/onehz/sleep/circadian_window.dart',
     ],
   ),
+  // Pulse owns its cost-bearing entrypoints. Shared RR/window math remains
+  // in the existing foundation and rhythm modules, without another cleaner.
+  GroupDecl(
+    id: 'pulse.episodes',
+    kind: GroupKind.algorithm,
+    counter: 1,
+    members: ['detectPulseEpisodes', 'pulseRespiratorySpectrum', 'pulseRespiratoryFit'],
+    deps: ['found.core', 'found.rr_correction'],
+    files: [
+      'lib/src/onehz/clinical/irregular_window.dart',
+      'lib/src/onehz/clinical/pulse_episodes.dart',
+      'lib/src/onehz/clinical/pulse_respiratory_spectrum.dart',
+    ],
+  ),
   GroupDecl(
     id: 'day.blocks',
     kind: GroupKind.algorithm,
