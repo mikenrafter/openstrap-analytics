@@ -252,6 +252,8 @@ void main() {
     final clean =
         detectPulseEpisodes(beats, completeThroughMs: 1200000, sourceStartMs: 0);
     final home = b.timeMs ~/ pulseWindowMs * pulseWindowMs;
+    expect([for (final w in conflicted.windows) if (w.reasons.contains('timestamps')) w.startMs],
+        isNotEmpty);
     expect(conflicted.windows.firstWhere((w) => w.startMs == home).reasons,
         contains('timestamps'));
     expect(clean.windows.any((w) => w.reasons.contains('timestamps')), isFalse);
