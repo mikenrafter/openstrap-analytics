@@ -1,4 +1,7 @@
 // Owner: analytics. Bounded respiratory evidence for pulse screening.
+// Welch 1967, IEEE Trans. Audio Electroacoustics 15(2):70–73, supplies the
+// segmented spectral estimator. Peak thresholds and single-fit exclusion are
+// internal ESTIMATE policy with low confidence [Pulse structural spec 5.2].
 import 'dart:math' as math;
 
 const pulseRespiratoryMinHz = 0.15;

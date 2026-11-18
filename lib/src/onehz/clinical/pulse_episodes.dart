@@ -1,4 +1,7 @@
 // Owner: analytics. Versioned experimental pulse timing policy, not diagnosis.
+// Internal ESTIMATE with low confidence: fixed floors and closed-window voting
+// follow Pulse structural spec 5.1–5.2 (owner accepted 2026-11-17).
+// Task Force 1996 supports the HRV descriptors, not this classifier's accuracy.
 // CLAIM(pulse-closed): only certified, supported UTC windows vote [pulse_episodes_test].
 import 'dart:math' as math;
 import '../foundations/rr_correction.dart';
